@@ -1,0 +1,43 @@
+From: WinPad
+Subject: [PATCH] include: Load the syscall dispatcher with adrp/ldr in aarch64 stubs.
+
+The aarch64 syscall stubs kept the address of __wine_syscall_dispatcher
+in a literal inside .text, which needs a base relocation in a code page.
+Use adrp/ldr like the arm64ec stubs, so ntdll and win32u have no
+relocations in executable sections and their code can live in signed,
+read-only pages on iOS.
+
+Applies to willfaust/wine madeira-lgpl at 257f271.
+---
+diff --git a/dlls/ntdll/tests/virtual.c b/dlls/ntdll/tests/virtual.c
+index 809c45e..be82c90 100644
+--- a/dlls/ntdll/tests/virtual.c
++++ b/dlls/ntdll/tests/virtual.c
+@@ -2420,7 +2420,7 @@ static int get_syscall_id( void *code )
+     if ((instr[0] & 0xffe0001f) == 0xd4000001 && instr[1] == 0xd65f03c0)  /* windows */
+         return (instr[0] >> 5) & 0xffff;
+     if ((instr[0] & 0xffe0001f) == 0xd2800008 && instr[1] == 0xaa1e03e9 &&
+-        instr[3] == 0xf9400210 && instr[4] == 0xd63f0200 && instr[5] == 0xd65f03c0) /* wine */
++        (instr[3] & 0xffc003ff) == 0xf9400210 && instr[4] == 0xd63f0200 && instr[5] == 0xd65f03c0) /* wine */
+         return (instr[0] >> 5) & 0xffff;
+ #elif defined __arm__
+     const USHORT *instr = code;
+diff --git a/include/wine/asm.h b/include/wine/asm.h
+index 3cb2125..cf94af9 100644
+--- a/include/wine/asm.h
++++ b/include/wine/asm.h
+@@ -252,11 +252,10 @@
+                        ".seh_endprologue\n\t" \
+                        "mov x8, #(" #id ")\n\t" \
+                        "mov x9, x30\n\t" \
+-                       "ldr x16, 1f\n\t" \
+-                       "ldr x16, [x16]\n\t" \
++                       "adrp x16, " __ASM_NAME("__wine_syscall_dispatcher") "\n\t" \
++                       "ldr x16, [x16, :lo12:" __ASM_NAME("__wine_syscall_dispatcher") "]\n\t" \
+                        "blr x16\n\t" \
+-                       "ret\n" \
+-                       "1:\t.quad " __ASM_NAME("__wine_syscall_dispatcher") )
++                       "ret" )
+ #elif defined __arm64ec__
+ # define __ASM_SYSCALL_FUNC(id,name) \
+     asm( ".seh_proc \"#" #name "$hp_target\"\n\t" \
