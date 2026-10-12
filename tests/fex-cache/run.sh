@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds upstream FEX at a pinned commit (ARM64 Linux host only), runs a small
-# x86-64 guest with code caching enabled so FEXServer records a code map and
-# FEXOfflineCompiler turns it into a code cache, then counts what is in that
+# x86-64 guest with code caching enabled so FEX records a code map, has
+# FEXOfflineCompiler turn it into a code cache, then counts what is in that
 # cache with tools/fxcc-inspect.
 #
 # This is the baseline for the AOT mode (docs/M1-findings.md, section B): every
@@ -11,7 +11,7 @@
 set -eu
 
 FEX_REPO=https://github.com/FEX-Emu/FEX.git
-FEX_COMMIT=14c92681f4d62cf84d901460e0358de09c8847a7
+FEX_COMMIT=$(cat "$(dirname "$0")/fex-commit")
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -54,23 +54,30 @@ mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
 export FEX_ENABLECODECACHINGWIP=1
 export PATH="$build/Bin:$PATH"
 
-# First runs record code maps; FEXServer merges them and runs FEXOfflineCompiler
-# when the same executable starts again.
-for i in 1 2 3; do
-    # Run FEXServer in the foreground so its log is kept; FEX connects to it.
-    FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
-    server=$!
-    sleep 1
-    out=$(FEX "$guest")
-    [ "$out" = ok ] || { echo "guest printed '$out' on run $i" >&2; exit 1; }
-    FEXServer -k >/dev/null 2>&1 || true
-    wait "$server" || true
-done
+# One run records a code map. On Linux FEX at this commit never writes the
+# main-executable marker into code maps (only the Windows ImageTracker does), so
+# FEXServer's own aggregation asserts. The map of a static guest names one file,
+# which "FEXOfflineCompiler generate" accepts without the marker, so it is
+# called directly.
+FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
+server=$!
+sleep 1
+out=$(FEX "$guest")
+[ "$out" = ok ] || { echo "guest printed '$out'" >&2; exit 1; }
+FEXServer -k >/dev/null 2>&1 || true
+wait "$server" || true
 
 echo "FEXServer log:"
 cat "$work/fexserver.log"
 echo "FEX files:"
 find "$HOME" -path '*fex-emu*' | sed "s|$HOME/||"
+
+cachedir="$XDG_CACHE_HOME/fex-emu/cache"
+maps=$(find "$HOME" -path '*fex-emu/codemap/*' -type f -name '*.bin')
+[ -n "$maps" ] || { echo "no code map was recorded" >&2; exit 1; }
+for m in $maps; do
+    FEXOfflineCompiler generate --outdir "$cachedir" "$m"
+done
 
 caches=$(find "$HOME" -path '*fex-emu/cache/*' -type f ! -name '*.tmp' ! -name '*.lock')
 if [ -z "$caches" ]; then
