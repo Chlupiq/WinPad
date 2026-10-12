@@ -42,6 +42,23 @@ Problém pro iOS bez JITu: FEX při načtení cache **zkopíruje kód do vlastn�
 
 **Závěr B:** proveditelné, ale je to největší část práce. Jde o zásah do backendu FEX, ne o nový překladač. Doporučuji ho dělat proti upstream FEX (MIT) a zároveň proti forku Madeiry (`ios-port-2607`).
 
+## Výchozí měření FEX cache (M2, krok 2a)
+
+`tests/fex-cache/run.sh` v CI (ubuntu-24.04-arm, FEX 14c9268) přeloží malý statický x86-64 program (smyčka, přímé a nepřímé volání), nahraje jeho code map a z ní `FEXOfflineCompiler generate` vytvoří cache. `tools/fxcc-inspect` v ní spočítá:
+
+| | |
+|---|---|
+| bloků v code map / v cache | 5 / 7 |
+| strojového kódu | 4096 B (1 stránka) |
+| relokací | 24 (3,43 na blok) |
+| `GUEST_RIP_MOVE` | 10 |
+| `GUEST_RIP_LITERAL` | 9 |
+| `NAMED_SYMBOL_LITERAL` (vše `EXITFUNCTION_LINKER`) | 5 |
+
+Všech 24 míst FEX při načtení cache přepisuje v kódu. Pro iOS bez JITu proto platí: `GUEST_RIP_*` (19) odpadnou, když se modul vždy mapuje na svou preferovanou adresu (bod 2), a `EXITFUNCTION_LINKER` (5) se nahradí `adrp`+`add` na symbol dispatcheru (bod 1). `GUEST_PATCHABLE_*` ani `NAMED_THUNK_MOVE` se u tohoto programu neobjevily.
+
+Linuxový FEX v této verzi nezapisuje do code map značku hlavního programu (zapisuje ji jen windowsový `ImageTracker`) a FEXServer na ni při startu programu padal na aserci. `tests/fex-cache/build-fex.sh` tuto jednu aserci odstraňuje; pro cestu přes Wine (kde se značka zapisuje) to není potřeba.
+
 ## Upravené pořadí pro M2
 
 1. Patch `winebuild` (syscall stuby) a ověření auditem, že v `.text` nezbyly relokace. *(cloud)*
