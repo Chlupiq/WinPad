@@ -71,10 +71,11 @@ python3 -I "$root/tools/fxcc-inspect/fxcc_inspect.py" --json "$work/census.json"
 FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
 server=$!
 sleep 1
-out=$(FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr FEX "$guest" 2>"$work/fex-cached-run.log")
+status=0
+out=$(FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr FEX "$guest" 2>"$work/fex-cached-run.log") || status=$?
 FEXServer -k >/dev/null 2>&1 || true
 wait "$server" || true
 echo "FEX log of the cached run:"
 cat "$work/fex-cached-run.log"
-[ "$out" = ok ] || { echo "guest printed '$out' with the cache" >&2; exit 1; }
+[ "$status" = 0 ] && [ "$out" = ok ] || { echo "guest printed '$out' and exited with $status with the cache" >&2; exit 1; }
 grep -q 'Cache load:' "$work/fex-cached-run.log" || { echo "FEX did not load the code cache" >&2; exit 1; }
