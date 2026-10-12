@@ -40,11 +40,13 @@ class ParseTest(unittest.TestCase):
     def test_data_slots_do_not_patch_code(self):
         data = build_cache(
             blocks=[(0x1000, 0, [0x1000])],
-            relocs=[(0x10, 8, b""), (0x20, 8, b""), (0x30, 2, b"")],
+            relocs=[(0x10, 8, b""), (0x20, 8, b""), (0x28, 9, b""), (0x30, 2, b"")],
             code=b"\x1f\x20\x03\xd5" * 16,
         )
         r = fi.parse(data)
-        self.assertEqual(r["relocations_by_type"], {"GUEST_RIP_DATA_SLOT": 2, "GUEST_RIP_LITERAL": 1})
+        self.assertEqual(
+            r["relocations_by_type"], {"GUEST_RIP_DATA_SLOT": 2, "GUEST_RIP_LINK_RECORD": 1, "GUEST_RIP_LITERAL": 1}
+        )
         self.assertEqual(r["code_patches_on_load"], 1)
 
     def test_bad_magic(self):
