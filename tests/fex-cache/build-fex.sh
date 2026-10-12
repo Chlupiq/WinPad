@@ -33,6 +33,11 @@ pipe="$src/Source/Tools/FEXServer/ProcessPipe.cpp"
 grep -q 'New code maps did not contain executable marker' "$pipe"
 sed -i '/New code maps did not contain executable marker/d' "$pipe"
 
+# WinPad fixes to FEX, see the header of each patch.
+for p in "$here"/../../patches/fex/*.patch; do
+    git -C "$src" apply "$p"
+done
+
 cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
     -DENABLE_LTO=False -DENABLE_ASSERTIONS=True -DBUILD_TESTING=False \

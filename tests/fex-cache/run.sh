@@ -29,7 +29,7 @@ guest="$work/guest"
 # With lld's default layout both the read-only and the code segment map file
 # offset 0, FEX at runtime records code offsets from the code segment's base
 # while FEXOfflineCompiler uses the first mapping, so the cache holds code
-# compiled from the wrong guest bytes (the cached run dies with SIGILL).
+# compiled from the wrong guest bytes.
 clang --target=x86_64-linux-gnu -nostdlib -static -fuse-ld=lld -Wl,--no-rosegment -o "$guest" "$here/guest.S"
 
 # Isolated FEX config and cache directories.

@@ -1,0 +1,30 @@
+Rebase code cache relocations to the code buffer (FEX 14c9268)
+
+The JIT records relocation offsets relative to the temporary buffer each
+block is compiled into. When generating a code cache, relocations are kept
+across all compiles and serialized against the whole code buffer, so every
+block after the first got its relocations applied at the first block's
+offsets: the cache file held corrupted code and FEX died with SIGILL when
+running from it. Rebase each compile's relocations once the block's final
+location is known.
+
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index ef7e332..a7850a5 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -1159,6 +1159,15 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+     CodeBegin += Delta;
+     CodeData.HostCodeOffset = CodeData.BlockBegin - CurrentCodeBuffer->GetBufferBase();
+ 
++    // Relocation offsets were recorded relative to the temporary buffer. Code cache
++    // generation keeps relocations across compiles and serializes them against the
++    // whole CodeBuffer, so rebase this compile's relocations to the final location.
++    if (CTX->GetCodeCache().IsGeneratingCache) {
++      for (size_t i = PrevNumAllocations; i < Relocations.size(); ++i) {
++        Relocations[i].Header.Offset += CodeData.HostCodeOffset;
++      }
++    }
++
+     // Copy over CodeBuffer contents
+     memcpy(AllocatedInfo.BufferAllocationOffset, TempCodeBuffer, CodeData.Size);
+   }
