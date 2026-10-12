@@ -21,3 +21,38 @@ jobs:
           python3 -m pip install -q -r tools/pe-reloc-audit/requirements.txt
       - name: Syscall stubs have no code relocations
         run: sh tests/syscall-stubs/run.sh
+
+  fxcc-inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: python3 -I tools/fxcc-inspect/test_fxcc_inspect.py
+
+  fex-cache:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang lld cmake ninja-build python3 libepoxy-dev libsdl2-dev
+      - name: Restore FEX build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/fex-build
+          key: fex-build-${{ runner.arch }}-${{ hashFiles('tests/fex-cache/run.sh') }}
+      - name: Build FEX and generate a code cache
+        env:
+          WORK_DIR: ${{ runner.temp }}/fex-work
+          FEX_BUILD: ${{ runner.temp }}/fex-build
+        run: sh tests/fex-cache/run.sh
+      - name: Upload census
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex-cache-census
+          path: |
+            ${{ runner.temp }}/fex-work/census.json
+            ${{ runner.temp }}/fex-work/home/.cache/fex-emu
+          if-no-files-found: warn
