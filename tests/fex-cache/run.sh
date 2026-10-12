@@ -78,8 +78,9 @@ generate() {
         --code-out "$work/$1-code.bin" $caches
 }
 
-# run_cached NAME: run the guest again; FEX must load the cache and the guest
-# must still print "ok". On failure, print diagnostics.
+# run_cached NAME CENSUS: run the guest again; FEX must load the cache made by
+# "generate CENSUS" and the guest must still print "ok". On failure, print
+# diagnostics.
 run_cached() {
     log="$work/fex-$1-run.log"
     FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
@@ -107,7 +108,7 @@ run_cached() {
         FEXServer -k >/dev/null 2>&1 || true
         wait "$server" || true
         echo "== code in the cache file (before relocation)"
-        objdump -D -b binary -m aarch64 "$work/$1-code.bin" | sed -n '8,400p' | grep -v '^\s*$' | sed '/udf\s#0$/d' || true
+        objdump -D -b binary -m aarch64 "$work/$2-code.bin" | sed -n '8,400p' | grep -v '^\s*$' | sed '/udf\s#0$/d' || true
         exit 1
     fi
     grep -q 'Cache load:' "$log" || { echo "FEX did not load the $1 cache" >&2; exit 1; }
@@ -115,7 +116,7 @@ run_cached() {
 
 # Regular cache: the baseline every AOT change is measured against.
 generate census
-run_cached cached
+run_cached cached census
 
 # AOT cache (patches/fex/0002-0004): every relocation only fills the data area
 # (guest RIP slots, block link records, block tails), so FEX maps the code
@@ -133,7 +134,7 @@ for path, r in json.load(open(sys.argv[1])).items():
     if r["code_patches_on_load"] or not all(types.get(t) for t in need):
         sys.exit(f"{path}: unexpected AOT relocations {types}")
 PY
-run_cached aot
+run_cached aot aot-census
 grep -Eq 'AOT data area: .*\([1-9][0-9]* link records\)' "$work/fex-aot-run.log" ||
     { echo "FEX did not set up the AOT data area with link records" >&2; exit 1; }
 grep -q 'AOT code mapped read+execute:' "$work/fex-aot-run.log" ||

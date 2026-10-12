@@ -9,10 +9,28 @@ which the loader fills in (RIP rebased, spin lock cleared).
 When every relocation of a cache only fills the data area, LoadCache copies
 the code once and maps it PROT_READ|PROT_EXEC; all pages count as loaded,
 so nothing is relocated lazily. The SIGSEGV handler no longer treats a fault
-in such code as a lazy page load, so a write into it is a real fault.
+in such code as a lazy page load, so a write into it is a real fault. Unaligned TSO accesses that FEX would
+backpatch are emulated by the SIGBUS handler instead (the non-JIT path),
+flagged by JITCodeTail::ReadOnlyCode which the loader sets.
 
+diff --git a/FEXCore/Source/Interface/Core/CPUBackend.h b/FEXCore/Source/Interface/Core/CPUBackend.h
+index 0183694..44318fe 100644
+--- a/FEXCore/Source/Interface/Core/CPUBackend.h
++++ b/FEXCore/Source/Interface/Core/CPUBackend.h
+@@ -95,7 +95,10 @@ namespace CPU {
+       // If this block represents a single guest instruction.
+       bool SingleInst;
+ 
+-      uint8_t _Pad[3];
++      // If this block is read-only AOT code that must never be backpatched.
++      bool ReadOnlyCode;
++
++      uint8_t _Pad[2];
+     };
+ 
+     /**
 diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
-index 378719a..2d5cbb9 100644
+index 378719a..e2ff651 100644
 --- a/FEXCore/Source/Interface/Core/CodeCache.cpp
 +++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
 @@ -662,7 +662,19 @@ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> C
@@ -53,7 +71,7 @@ index 378719a..2d5cbb9 100644
  
  #ifndef _WIN32
    // Allocate target memory for post-relocation code. This is PROT_NONE until
-@@ -765,10 +781,32 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+@@ -765,10 +781,33 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
          Record->CallerOffset = FEXCore::Context::DATA_ONLY_LINK_RECORD;
          Slot += 3;
          ++NumLinkRecords;
@@ -62,6 +80,7 @@ index 378719a..2d5cbb9 100644
 +        auto* Tail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(Slot);
 +        Tail->RIP = FileStartVA + Reloc.AOTBlockTail.GuestRIP;
 +        Tail->SpinLockFutex = 0;
++        Tail->ReadOnlyCode = ReadOnlyCode;
 +        Slot += CPU::AOTDataSlotCount(Reloc);
        }
      }
@@ -86,7 +105,7 @@ index 378719a..2d5cbb9 100644
  #elif defined(_M_ARM64EC)
    // TODO: Implement lazy mapping on Windows
    // NOTE: The executed code must have MEM_EXTENDED_PARAMETER_EC_CODE set, so we can't operate on the mapped cache file directly
-@@ -801,6 +839,12 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+@@ -801,6 +840,12 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
      new (Storage) MappedCodeCacheFile {this, CacheFile, CodeDataInFile, CodeBuffer, BlockListStart, header.NumBlocks, header.NumCodePages,
                                         std::move(PageRelocationRanges), fextl::vector<bool>(NumPages), FileStartVA});
    Result->DataAreaMapSize = DataAreaMapSize;
@@ -99,7 +118,7 @@ index 378719a..2d5cbb9 100644
    return Result;
  }
  
-@@ -906,7 +950,9 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+@@ -906,7 +951,9 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
    if (true) {
  #endif
      auto Range = SelectCodeRangeToFinalize(Code, 0, Code.CodeBuffer.size_bytes() / Utils::FEX_PAGE_SIZE);
@@ -225,6 +244,22 @@ index 2cc0217..c19c85b 100644
  uint64_t GetNamedSymbolLiteral(FEXCore::Context::ContextImpl&, RelocNamedSymbolLiteral::NamedSymbol);
  
  } // namespace FEXCore::CPU
+diff --git a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+index 01e5bb2..8ec2d93 100644
+--- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
++++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+@@ -2050,6 +2050,11 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
+   auto InlineHeader = reinterpret_cast<const CPU::CPUBackend::JITCodeHeader*>(BlockBegin);
+   auto InlineTail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(Frame->State.InlineJITBlockHeader + InlineHeader->OffsetToBlockTail);
+ 
++  if (InlineTail->ReadOnlyCode) {
++    // AOT code is never backpatched; emulate the access as for non-JIT code.
++    return HandleUnalignedAccess(Thread, HandleType, ProgramCounter, GPRs, false);
++  }
++
+   // Check some instructions first that don't do any backpatching.
+   if ((Instr & ArchHelpers::Arm64::CASPAL_MASK) == ArchHelpers::Arm64::CASPAL_INST) { // CASPAL
+     if (ArchHelpers::Arm64::HandleCASPAL(Instr, GPRs, StrictSplitLockMutex)) {
 diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
 index dade379..b9ac424 100644
 --- a/FEXCore/include/FEXCore/Core/CodeCache.h
