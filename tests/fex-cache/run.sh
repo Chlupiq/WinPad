@@ -25,7 +25,7 @@ fi
 
 src="$work/fex"
 build=${FEX_BUILD:-$work/fex-build}
-if [ ! -x "$build/Bin/FEXInterpreter" ]; then
+if [ ! -x "$build/Bin/FEX" ]; then
     if [ ! -d "$src/.git" ]; then
         git init -q "$src"
         git -C "$src" remote add origin "$FEX_REPO"
@@ -41,7 +41,7 @@ if [ ! -x "$build/Bin/FEXInterpreter" ]; then
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
         -DENABLE_LTO=False -DENABLE_ASSERTIONS=True -DBUILD_TESTING=False \
         -DBUILD_THUNKS=False -DBUILD_FEX_LINUX_TESTS=False -DBUILD_FEXCONFIG=False
-    cmake --build "$build" --target FEXInterpreter FEXServer FEXOfflineCompiler
+    cmake --build "$build" --target FEX FEXServer FEXOfflineCompiler
 fi
 
 guest="$work/guest"
@@ -57,7 +57,7 @@ export PATH="$build/Bin:$PATH"
 # First runs record code maps; FEXServer merges them and runs FEXOfflineCompiler
 # when the same executable starts again.
 for i in 1 2 3; do
-    out=$(FEXInterpreter "$guest")
+    out=$(FEX "$guest")
     [ "$out" = ok ] || { echo "guest printed '$out' on run $i" >&2; exit 1; }
     FEXServer -k >/dev/null 2>&1 || true
     sleep 2
