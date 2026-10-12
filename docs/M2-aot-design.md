@@ -37,5 +37,6 @@ Na Linuxu ARM64 v CI: AOT cache se namapuje ze souboru jen `r-x` (bez staging bu
 1. Druhý běh testu načte cache a ověří, že se použila. *(PR #5, hotovo)*
 2. Volba AOT + datová oblast + sloty pro `EXITFUNCTION_LINKER` a `GUEST_RIP_*`, nový formát cache (FXCC v3) a podpora v `fxcc-inspect`.
    *(PR #6, první část: volba `AOTCodeCacheWIP`, `GUEST_RIP_MOVE` → slot v datech přes `adrp`+`ldr`, linker se v thuncích čte ze stavu vlákna `Pointers.ExitFunctionLinker`, takže `EXITFUNCTION_LINKER` zmizí úplně. Formát hlavičky zůstal, počet slotů plyne z relokací. `GUEST_RIP_LITERAL` zůstává v záznamu thunku a odejde s bodem 3.)*
+   *Výsledek v CI (ARM64): AOT cache testovacího programu má 7 bloků, 0 `NAMED_SYMBOL_LITERAL`, 0 `GUEST_RIP_MOVE`, 10 slotů v datech (`AOT data area: 10 slots at code+0x4000`), program z ní doběhne. Zápisů do kódu při načtení zbývá 9 z 24, všechny `GUEST_RIP_LITERAL` v thuncích.*
 3. Propojování přes data (thunky, `ExitFunctionLink`, delinkery).
 4. Mapování cache `r-x` bez relokací a test, který ověří, že do kódu nikdo nezapsal.
