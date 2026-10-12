@@ -1,0 +1,251 @@
+AOT code caches: block linking only through data (FEX 14c9268, on top of 0002)
+
+With AOTCodeCacheWIP, jump thunks no longer carry their ExitFunctionLinkData
+record. The record lives in the AOT data area (three slots, numbered with the
+data slots of 0002) and the thunk reaches it with adrp + add
+(RELOC_GUEST_RIP_LINK_RECORD):
+
+    adrp TMP1, Record; add TMP1, TMP1, :lo12:Record
+    ldr TMP2, [TMP1]; cbz TMP2, 1f; br TMP2
+ 1: mov lr, TMP1; ldr TMP2, [STATE, ExitFunctionLinker]; br TMP2
+
+The loader fills each record with HostCode 0, the guest RIP and CallerOffset
+DATA_ONLY_LINK_RECORD. For such records ExitFunctionLink only stores HostCode
+and the delinker only clears it, so neither the call site nor the thunk is
+ever patched. Thunks with a patch site (ARM64EC) keep the old form.
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index 9f427da..3de6789 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -63,6 +63,10 @@ struct CustomIRResult {
+     , Data(Data) {}
+ };
+ 
++// CallerOffset of a link record that lives in the data area of an AOT code
++// cache: linking only stores HostCode, the code is never patched.
++constexpr int64_t DATA_ONLY_LINK_RECORD = INT64_MIN;
++
+ using BlockDelinkerFunc = void (*)(FEXCore::Context::ExitFunctionLinkData* Record);
+ constexpr uint32_t TSC_SCALE_MAXIMUM = 1'000'000'000; ///< 1Ghz
+ 
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index c71b128..378719a 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -643,10 +643,11 @@ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> C
+       ApplyRIPMoveRelocation(CTX, Reloc.GuestRIP.GuestRIP, Reloc.GuestRIP.RegisterIndex, GuestEntry, Emitter);
+       break;
+     }
+-    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT: {
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT:
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD: {
+       // The code only changes when serializing the cache (all relocations are
+       // passed at once then, so the running index is the slot number). After
+-      // loading, the slot in the data area holds the value instead.
++      // loading, the data area holds the value or link record instead.
+       if (ForStorage) {
+         const uint64_t Slot = CPU::AOTDataAreaOffset(Code.size_bytes()) + DataSlotIndex * sizeof(uint64_t);
+         const uint64_t Site = Reloc.Header.Offset;
+@@ -654,11 +655,14 @@ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> C
+         LOGMAN_THROW_A_FMT(PageDelta < (1LL << 20) && PageDelta >= -(1LL << 20), "AOT data slot out of adrp range");
+         const uint32_t Rd = Reloc.GuestRIP.RegisterIndex;
+         const uint32_t Adrp = 0x90000000U | ((PageDelta & 3) << 29) | (((PageDelta >> 2) & 0x7FFFF) << 5) | Rd;
+-        const uint32_t Ldr = 0xF9400000U | (((Slot & 0xFFF) / 8) << 10) | (Rd << 5) | Rd;
++        // ldr Rd, [Rd, :lo12:slot] for a value, add Rd, Rd, :lo12:record for a link record
++        const uint32_t Lo12 = Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT ?
++                                0xF9400000U | (((Slot & 0xFFF) / 8) << 10) | (Rd << 5) | Rd :
++                                0x91000000U | ((Slot & 0xFFF) << 10) | (Rd << 5) | Rd;
+         memcpy(Code.data() + Site, &Adrp, sizeof(Adrp));
+-        memcpy(Code.data() + Site + 4, &Ldr, sizeof(Ldr));
++        memcpy(Code.data() + Site + 4, &Lo12, sizeof(Lo12));
+       }
+-      ++DataSlotIndex;
++      DataSlotIndex += CPU::AOTDataSlotCount(Reloc.Header.Type);
+       break;
+     }
+ 
+@@ -719,8 +723,10 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+   auto CodeDataInFile = std::span {Cursor, header.CodeBufferSize};
+ 
+   // AOT code caches load values from a data area at a fixed distance after the code
+-  const auto NumDataSlots = std::ranges::count_if(
+-    Relocations, [](const auto& Reloc) { return Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT; });
++  uint64_t NumDataSlots = 0;
++  for (const auto& Reloc : Relocations) {
++    NumDataSlots += CPU::AOTDataSlotCount(Reloc.Header.Type);
++  }
+   const size_t DataAreaOffset = NumDataSlots ? CPU::AOTDataAreaOffset(header.CodeBufferSize) : header.CodeBufferSize;
+   const size_t DataAreaMapSize =
+     NumDataSlots ? AlignUp(DataAreaOffset + NumDataSlots * sizeof(uint64_t), Utils::FEX_PAGE_SIZE) - header.CodeBufferSize : 0;
+@@ -747,12 +753,21 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+       return nullptr;
+     }
+     auto* Slot = reinterpret_cast<uint64_t*>(DataArea);
++    size_t NumLinkRecords = 0;
+     for (const auto& Reloc : Relocations) {
+       if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT) {
+         *Slot++ = FileStartVA + Reloc.GuestRIP.GuestRIP;
++      } else if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD) {
++        static_assert(sizeof(FEXCore::Context::ExitFunctionLinkData) == 3 * sizeof(uint64_t));
++        auto* Record = reinterpret_cast<FEXCore::Context::ExitFunctionLinkData*>(Slot);
++        Record->HostCode = 0;
++        Record->GuestRIP = FileStartVA + Reloc.GuestRIP.GuestRIP;
++        Record->CallerOffset = FEXCore::Context::DATA_ONLY_LINK_RECORD;
++        Slot += 3;
++        ++NumLinkRecords;
+       }
+     }
+-    LogMan::Msg::IFmt("AOT data area: {} slots at code+{:#x}", NumDataSlots, DataAreaOffset);
++    LogMan::Msg::IFmt("AOT data area: {} slots ({} link records) at code+{:#x}", NumDataSlots, NumLinkRecords, DataAreaOffset);
+   }
+ #elif defined(_M_ARM64EC)
+   // TODO: Implement lazy mapping on Windows
+diff --git a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+index 348f1f5..c97893c 100644
+--- a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+@@ -92,6 +92,19 @@ bool Arm64JITCore::EmitAOTCode() const {
+   return AOTCodeCache() && CTX->GetCodeCache().IsGeneratingCache;
+ }
+ 
++void Arm64JITCore::InsertGuestRIPLinkRecord(ARMEmitter::Register Reg, uint64_t GuestRIP) {
++  Relocation RecordABI {};
++  RecordABI.GuestRIP.Header = {.Offset = GetCursorOffset(), .Type = FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD};
++  RecordABI.GuestRIP.GuestRIP = GuestRIP;
++  RecordABI.GuestRIP.RegisterIndex = Reg.Idx();
++
++  // adrp Reg, record; add Reg, Reg, :lo12:record
++  // Immediates are filled in when the code cache is serialized.
++  dc32(0x90000000U | Reg.Idx());
++  dc32(0x91000000U | (Reg.Idx() << 5) | Reg.Idx());
++  Relocations.emplace_back(RecordABI);
++}
++
+ void Arm64JITCore::InsertGuestRIPMove(ARMEmitter::Register Reg, uint64_t Constant) {
+   if (EmitAOTCode()) {
+     Relocation SlotABI {};
+@@ -158,7 +171,8 @@ fextl::vector<FEXCore::CPU::Relocation> Arm64JITCore::TakeRelocations(uint64_t G
+     switch (Relocation.Header.Type) {
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE:
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL:
+-    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT: {
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT:
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD: {
+       Relocation.GuestRIP.GuestRIP -= GuestBaseAddress;
+       break;
+     }
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index 5468ac0..f6b8bf9 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -563,6 +563,11 @@ static void IndirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record
+   // No need to reset HostCode here as the exit linker pointer is stored separately, and if the block is relinked it will be updated.
+ }
+ 
++static void DataOnlyBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record) {
++  // The thunk falls back to the exit linker once HostCode is zero again.
++  std::atomic_ref<uint64_t>(Record->HostCode).store(0, std::memory_order::seq_cst);
++}
++
+ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEXCore::Context::ExitFunctionLinkData* Record) {
+   auto Thread = Frame->Thread;
+   bool TFSet = Thread->CurrentFrame->State.flags[X86State::RFLAG_TF_RAW_LOC];
+@@ -605,6 +610,13 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
+   // Lock here is necessary to prevent simultaneous linking and delinking
+   auto lk = Thread->LookupCache->AcquireWriteLock();
+ 
++  if (Record->CallerOffset == FEXCore::Context::DATA_ONLY_LINK_RECORD) {
++    // AOT code cache: the record is data, the code stays untouched.
++    std::atomic_ref<uint64_t>(Record->HostCode).store(HostCode, std::memory_order::seq_cst);
++    Thread->LookupCache->AddBlockLink(GuestRip, Record, DataOnlyBlockDelinker, lk);
++    return HostCode;
++  }
++
+   // For non-calls, this would extend into the block's code, however that's fine as an out-of-range adr would never
+   // be generated avoiding any false positives.
+   uintptr_t KnownCallMarkerAddr = CallerAddress - 0x8;
+@@ -1040,7 +1052,33 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+   PendingTargetLabel = nullptr;
+ 
+   ARMEmitter::ForwardLabel l_ExitLink;
++  bool NeedsExitLinkLiteral = false;
+   for (auto& PendingJumpThunk : PendingJumpThunks) {
++    if (EmitAOTCode() && !PendingJumpThunk.PatchSiteAddress) {
++      // The link record lives in the data area and linking only writes its
++      // HostCode, so the thunk and the call site are never patched:
++      //    00: adrp TMP1, Record
++      //    04: add TMP1, TMP1, :lo12:Record
++      //    08: ldr TMP2, [TMP1]      ; HostCode
++      //    0c: cbz TMP2, 0x14
++      //    10: br TMP2
++      //    14: mov lr, TMP1          ; the exit linker takes the record in lr
++      //    18: ldr TMP2, <Shared exit linker>
++      //    1c: br TMP2
++      ARMEmitter::ForwardLabel l_DoLink;
++      BindOrRestart(&PendingJumpThunk.Label);
++      InsertGuestRIPLinkRecord(TMP1, PendingJumpThunk.GuestRIP);
++      ldr(TMP2, TMP1, 0);
++      (void)cbz(ARMEmitter::Size::i64Bit, TMP2, &l_DoLink);
++      br(TMP2);
++      BindOrRestart(&l_DoLink);
++      mov(ARMEmitter::XReg::lr, TMP1);
++      ldr(TMP2, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.ExitFunctionLinker));
++      br(TMP2);
++      continue;
++    }
++
++    NeedsExitLinkLiteral = true;
+     // Align as 64-bit atomics are used on the HostCode field.
+     Align(8);
+ 
+@@ -1071,7 +1109,7 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+     dc64(PendingJumpThunk.CallerAddress - ThunkAddress); // CallerOffset
+   }
+ 
+-  if (!EmitAOTCode()) {
++  if (NeedsExitLinkLiteral && !EmitAOTCode()) {
+     BindOrRestart(&l_ExitLink);
+     PlaceNamedSymbolLiteral(InsertNamedSymbolLiteral(RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER));
+   }
+diff --git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+index b2df867..fd1fed6 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -604,6 +604,7 @@ private:
+ 
+   // Emit code for an AOT code cache: no value in the code is patched after loading
+   bool EmitAOTCode() const;
++  void InsertGuestRIPLinkRecord(ARMEmitter::Register Reg, uint64_t GuestRIP);
+ 
+   /**
+    * Returns any relocations generated since the last call to TakeRelocations.
+diff --git a/FEXCore/Source/Interface/Core/JIT/Relocations.h b/FEXCore/Source/Interface/Core/JIT/Relocations.h
+index cc3b6ad..2cc0217 100644
+--- a/FEXCore/Source/Interface/Core/JIT/Relocations.h
++++ b/FEXCore/Source/Interface/Core/JIT/Relocations.h
+@@ -48,8 +48,24 @@ enum class RelocationTypes : uint32_t {
+   // Data slots are numbered by the order of these relocations.
+   // Aligned to struct RelocGuestRIP
+   RELOC_GUEST_RIP_DATA_SLOT,
++
++  // Block link record in the data area next to the code (AOT code caches)
++  // adrp + add pair putting the record's address in a register; resolved when
++  // the cache is serialized like RELOC_GUEST_RIP_DATA_SLOT. The record is a
++  // Context::ExitFunctionLinkData taking three data slots, filled in on load.
++  // Aligned to struct RelocGuestRIP
++  RELOC_GUEST_RIP_LINK_RECORD,
+ };
+ 
++// Number of 8-byte data area slots a relocation takes in an AOT code cache
++constexpr uint64_t AOTDataSlotCount(RelocationTypes Type) {
++  switch (Type) {
++  case RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT: return 1;
++  case RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD: return 3;
++  default: return 0;
++  }
++}
++
+ // Offset of the data area from the start of the code buffer in an AOT code cache
+ constexpr uint64_t AOTDataAreaOffset(uint64_t CodeSize) {
+   constexpr uint64_t Alignment = 0x4000; // Largest host page size (iOS)

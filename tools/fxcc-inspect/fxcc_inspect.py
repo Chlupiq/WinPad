@@ -32,9 +32,10 @@ RELOC_TYPES = [
     "GUEST_PATCHABLE_RIP_MOVE",
     "GUEST_PATCHABLE_CRC_MOVE",
     "GUEST_RIP_DATA_SLOT",  # patches/fex/0002: fills a data slot, not code
+    "GUEST_RIP_LINK_RECORD",  # patches/fex/0003: fills a block link record in data
 ]
 # Relocations that change code when a cache is loaded (all but data slots)
-DATA_ONLY_TYPES = {"GUEST_RIP_DATA_SLOT"}
+DATA_ONLY_TYPES = {"GUEST_RIP_DATA_SLOT", "GUEST_RIP_LINK_RECORD"}
 NAMED_SYMBOLS = ["EXITFUNCTION_LINKER"]
 
 
