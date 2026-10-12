@@ -7,11 +7,9 @@
 # This is the baseline for the AOT mode (docs/M1-findings.md, section B): every
 # relocation reported here is a write into code that iOS without JIT forbids.
 #
-# Needs: git, cmake, ninja, clang, lld, python3. Set FEX_BUILD to reuse a build.
+# Needs: git, cmake, ninja, clang, lld, python3. Set FEX_BUILD to reuse a build
+# made by build-fex.sh.
 set -eu
-
-FEX_REPO=https://github.com/FEX-Emu/FEX.git
-FEX_COMMIT=$(cat "$(dirname "$0")/fex-commit")
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -23,26 +21,8 @@ if [ "$(uname -m)" != aarch64 ]; then
     exit 1
 fi
 
-src="$work/fex"
 build=${FEX_BUILD:-$work/fex-build}
-if [ ! -x "$build/Bin/FEX" ]; then
-    if [ ! -d "$src/.git" ]; then
-        git init -q "$src"
-        git -C "$src" remote add origin "$FEX_REPO"
-    fi
-    git -C "$src" fetch -q --depth 1 origin "$FEX_COMMIT"
-    git -C "$src" checkout -q FETCH_HEAD
-    # Skip the large test-binary submodules.
-    for m in $(git -C "$src" config -f .gitmodules --get-regexp 'submodule\..*\.path' | awk '{print $2}'); do
-        case "$m" in External/fex-*-bins) continue ;; esac
-        git -C "$src" submodule update -q --init --depth 1 "$m"
-    done
-    cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-        -DENABLE_LTO=False -DENABLE_ASSERTIONS=True -DBUILD_TESTING=False \
-        -DBUILD_THUNKS=False -DBUILD_FEX_LINUX_TESTS=False -DBUILD_FEXCONFIG=False
-    cmake --build "$build" --target FEX FEXServer FEXOfflineCompiler
-fi
+[ -x "$build/Bin/FEX" ] || sh "$here/build-fex.sh" "$work/fex" "$build"
 
 guest="$work/guest"
 clang --target=x86_64-linux-gnu -nostdlib -static -fuse-ld=lld -o "$guest" "$here/guest.S"
@@ -54,11 +34,10 @@ mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
 export FEX_ENABLECODECACHINGWIP=1
 export PATH="$build/Bin:$PATH"
 
-# One run records a code map. On Linux FEX at this commit never writes the
-# main-executable marker into code maps (only the Windows ImageTracker does), so
-# FEXServer's own aggregation asserts. The map of a static guest names one file,
-# which "FEXOfflineCompiler generate" accepts without the marker, so it is
-# called directly.
+# One run records a code map. FEXServer would only compile it on the next
+# start of the same program, so FEXOfflineCompiler is called directly; a static
+# guest's map names a single file, which "generate" accepts without the
+# main-executable marker (see build-fex.sh).
 FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
 server=$!
 sleep 1
