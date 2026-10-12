@@ -1,8 +1,8 @@
 #!/bin/sh
 # Builds upstream FEX at a pinned commit (ARM64 Linux host only), runs a small
 # x86-64 guest with code caching enabled so FEX records a code map, has
-# FEXOfflineCompiler turn it into a code cache, then counts what is in that
-# cache with tools/fxcc-inspect.
+# FEXOfflineCompiler turn it into a code cache, counts what is in that cache
+# with tools/fxcc-inspect and checks that a second run loads it.
 #
 # This is the baseline for the AOT mode (docs/M1-findings.md, section B): every
 # relocation reported here is a write into code that iOS without JIT forbids.
@@ -65,3 +65,16 @@ if [ -z "$caches" ]; then
 fi
 # shellcheck disable=SC2086
 python3 -I "$root/tools/fxcc-inspect/fxcc_inspect.py" --json "$work/census.json" $caches
+
+# Run the guest again: FEX must find the cache, load its blocks and still print
+# "ok". This is the path the AOT mode will later run without writing to code.
+FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
+server=$!
+sleep 1
+out=$(FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr FEX "$guest" 2>"$work/fex-cached-run.log")
+FEXServer -k >/dev/null 2>&1 || true
+wait "$server" || true
+echo "FEX log of the cached run:"
+cat "$work/fex-cached-run.log"
+[ "$out" = ok ] || { echo "guest printed '$out' with the cache" >&2; exit 1; }
+grep -q 'Cache load:' "$work/fex-cached-run.log" || { echo "FEX did not load the code cache" >&2; exit 1; }
