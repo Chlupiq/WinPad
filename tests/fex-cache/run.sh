@@ -1,8 +1,8 @@
 #!/bin/sh
 # Builds upstream FEX at a pinned commit (ARM64 Linux host only), runs a small
 # x86-64 guest with code caching enabled so FEX records a code map, has
-# FEXOfflineCompiler turn it into a code cache, then counts what is in that
-# cache with tools/fxcc-inspect.
+# FEXOfflineCompiler turn it into a code cache, counts what is in that cache
+# with tools/fxcc-inspect and checks that a second run loads it.
 #
 # This is the baseline for the AOT mode (docs/M1-findings.md, section B): every
 # relocation reported here is a write into code that iOS without JIT forbids.
@@ -25,7 +25,12 @@ build=${FEX_BUILD:-$work/fex-build}
 [ -x "$build/Bin/FEX" ] || sh "$here/build-fex.sh" "$work/fex" "$build"
 
 guest="$work/guest"
-clang --target=x86_64-linux-gnu -nostdlib -static -fuse-ld=lld -o "$guest" "$here/guest.S"
+# --no-rosegment puts the ELF headers and code in one segment at file offset 0.
+# With lld's default layout both the read-only and the code segment map file
+# offset 0, FEX at runtime records code offsets from the code segment's base
+# while FEXOfflineCompiler uses the first mapping, so the cache holds code
+# compiled from the wrong guest bytes.
+clang --target=x86_64-linux-gnu -nostdlib -static -fuse-ld=lld -Wl,--no-rosegment -o "$guest" "$here/guest.S"
 
 # Isolated FEX config and cache directories.
 export HOME="$work/home"
@@ -64,4 +69,38 @@ if [ -z "$caches" ]; then
     exit 1
 fi
 # shellcheck disable=SC2086
-python3 -I "$root/tools/fxcc-inspect/fxcc_inspect.py" --json "$work/census.json" $caches
+python3 -I "$root/tools/fxcc-inspect/fxcc_inspect.py" --json "$work/census.json" --list \
+    --code-out "$work/cache-code.bin" $caches
+
+# Run the guest again: FEX must find the cache, load its blocks and still print
+# "ok". This is the path the AOT mode will later run without writing to code.
+FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
+server=$!
+sleep 1
+status=0
+out=$(FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr FEX "$guest" 2>"$work/fex-cached-run.log") || status=$?
+FEXServer -k >/dev/null 2>&1 || true
+wait "$server" || true
+echo "FEX log of the cached run:"
+cat "$work/fex-cached-run.log"
+if [ "$status" != 0 ] || [ "$out" != ok ]; then
+    echo "guest printed '$out' and exited with $status with the cache" >&2
+    # Diagnostics: compare cached code against a fresh compile, then get a
+    # backtrace of the crash.
+    FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
+    server=$!
+    sleep 1
+    echo "== cached run with EnableCodeCacheValidation"
+    FEX_ENABLECODECACHEVALIDATION=1 FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr FEX "$guest" 2>&1 || true
+    if command -v gdb >/dev/null; then
+        echo "== cached run under gdb"
+        FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr gdb -q -batch -ex 'handle SIGSEGV nostop noprint pass' \
+            -ex run -ex bt -ex 'info registers pc' -ex 'x/160i ($pc & ~0xfff)' --args "$build/Bin/FEX" "$guest" 2>&1 || true
+    fi
+    FEXServer -k >/dev/null 2>&1 || true
+    wait "$server" || true
+    echo "== code in the cache file (before relocation)"
+    objdump -D -b binary -m aarch64 "$work/cache-code.bin" | sed -n '8,400p' | grep -v '^\s*$' | sed '/udf\s#0$/d' || true
+    exit 1
+fi
+grep -q 'Cache load:' "$work/fex-cached-run.log" || { echo "FEX did not load the code cache" >&2; exit 1; }

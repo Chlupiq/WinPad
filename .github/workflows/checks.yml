@@ -36,12 +36,12 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q clang lld cmake ninja-build python3
+          sudo apt-get install -y -q clang lld cmake ninja-build python3 gdb
       - name: Restore FEX build
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/fex-build
-          key: fex-build-${{ runner.arch }}-${{ hashFiles('tests/fex-cache/fex-commit', 'tests/fex-cache/build-fex.sh') }}
+          key: fex-build-${{ runner.arch }}-${{ hashFiles('tests/fex-cache/fex-commit', 'tests/fex-cache/build-fex.sh', 'patches/fex/*.patch') }}
       - name: Build FEX and generate a code cache
         env:
           WORK_DIR: ${{ runner.temp }}/fex-work
@@ -55,5 +55,6 @@ jobs:
           path: |
             ${{ runner.temp }}/fex-work/census.json
             ${{ runner.temp }}/fex-work/fexserver.log
+            ${{ runner.temp }}/fex-work/fex-cached-run.log
             ${{ runner.temp }}/fex-work/home/.cache/fex-emu
           if-no-files-found: warn
