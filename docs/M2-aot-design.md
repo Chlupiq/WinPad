@@ -45,3 +45,15 @@ Na Linuxu ARM64 v CI: AOT cache se namapuje ze souboru jen `r-x` (bez staging bu
    *(PR #8: konec bloku (`JITCodeTail` s tabulkou RIP) se kopíruje do datové oblasti a hlavička bloku na kopii ukazuje (`RELOC_AOT_BLOCK_TAIL`). Když všechny relokace plní jen data, zavaděč kód hned zkopíruje a nastaví `PROT_READ|PROT_EXEC`, bez líného načítání po stránkách. Zápis do takového kódu skončí chybou, obsluha SIGSEGV ho už nepovažuje za líné načtení. Test v CI vyžaduje 0 zápisů do kódu při načtení a hlášku `AOT code mapped read+execute`.)*
    *Výsledek v CI (ARM64): 0 zápisů do kódu z 24 původních, 59 slotů v datech (10 hodnot, 4 záznamy propojení, 5 konců bloků), kód namapovaný jen `r-x` a program z něj doběhne.*
    *Zbývá pro iOS: na Linuxu se kód kopíruje z cache souboru do anonymní paměti, na iOS ho namapuje dyld z `__TEXT` (krok `cache2macho`). Nezarovnaný přístup s pořadím TSO (`ldapur`, `stlr`, …) FEX normálně opraví přepsáním instrukce; v AOT kódu ho obsluha SIGBUS místo toho provede sama, atomicky a bez zápisu do kódu (stejná cesta jako pro kód mimo JIT). Test na to narazil hned: tabulka v testovacím programu není zarovnaná. Novější čipy Apple by měly mít LSE2, kde nezarovnaný `ldapur` uvnitř 16 bajtů nechybuje (neověřeno na iPadu); každý chybující přístup ale stojí signál. Ověření cache (`EnableCodeCacheValidation`) s AOT cache nepočítá.*
+
+## cache2macho (M2, bod 3 pořadí z M1)
+
+`tools/cache2macho/cache2macho.py` převede AOT cache na objekt Mach-O pro arm64 (iOS), který se slinkuje přímo do aplikace:
+
+- `__TEXT,__fexaot_text`: kód z cache. Dvojice `adrp`+`ldr`/`add` do datové oblasti dostanou `ARM64_RELOC_PAGE21`/`PAGEOFF12` (s `ARM64_RELOC_ADDEND`), 32bitový odkaz z hlavičky bloku na kopii konce bloku dvojici `SUBTRACTOR`/`UNSIGNED`. Vzdálenost kód–data tak řeší linker a kód po podepsání nepotřebuje žádnou opravu.
+- `__DATA,__fexaot_data`: datová oblast (nulová, `S_ZEROFILL`) ve stejném rozložení, jaké používá zavaděč FEX. Vyplní ji běhové prostředí.
+- `__TEXT,__fexaot_meta`: hlavička `FXAM` a zbytek cache souboru bez kódu (seznam bloků, relokace, stránky kódu) pro zavaděč.
+
+Ověření bez iPadu: `tests/fex-cache/run.sh` převede AOT cache z CI, slinkuje ji `ld64.lld` jako iOS dylib a `check_linked.py` ve výsledku dekóduje každý odkaz do datové oblasti a porovná ho s offsetem, který by použil zavaděč FEX. Ostatní bajty kódu musí zůstat stejné a segment s kódem musí být `r-x`.
+
+Zbývá: zavaděč v FEX, který místo souboru vezme kód a data ze symbolů `_PREFIX_text`/`_data`/`_meta` (bez kopírování a `mprotect`), a statický dispatcher (bod 5 z M1). To patří k iOS buildu.
