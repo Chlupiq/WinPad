@@ -25,7 +25,12 @@ build=${FEX_BUILD:-$work/fex-build}
 [ -x "$build/Bin/FEX" ] || sh "$here/build-fex.sh" "$work/fex" "$build"
 
 guest="$work/guest"
-clang --target=x86_64-linux-gnu -nostdlib -static -fuse-ld=lld -o "$guest" "$here/guest.S"
+# --no-rosegment puts the ELF headers and code in one segment at file offset 0.
+# With lld's default layout both the read-only and the code segment map file
+# offset 0, FEX at runtime records code offsets from the code segment's base
+# while FEXOfflineCompiler uses the first mapping, so the cache holds code
+# compiled from the wrong guest bytes (the cached run dies with SIGILL).
+clang --target=x86_64-linux-gnu -nostdlib -static -fuse-ld=lld -Wl,--no-rosegment -o "$guest" "$here/guest.S"
 
 # Isolated FEX config and cache directories.
 export HOME="$work/home"
