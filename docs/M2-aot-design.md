@@ -27,9 +27,14 @@ V AOT režimu (nová volba, např. `FEX_AOTCODE=1`) backend vydává kód tak, a
 
 Na Linuxu ARM64 v CI: AOT cache se namapuje ze souboru jen `r-x` (bez staging bufferu) a datová oblast `rw-`. Testovací program musí doběhnout, `fxcc-inspect` musí v AOT cache ukázat 0 relokací v kódu a druhý běh musí blok načíst z cache (kontrola `Cache load:` v logu, zavedená v tomto kroku).
 
+## Nálezy z ověření v CI
+
+- **Chyba FEX: relokace v cache mířily do prvního bloku.** JIT ukládá offsety relokací vůči dočasnému bufferu bloku. Při generování cache se relokace sbírají přes všechny bloky a serializují vůči celému code bufferu, takže relokace každého dalšího bloku se zapsaly do kódu prvního bloku a běh z cache spadl na SIGILL. Oprava: `patches/fex/0001-codecache-rebase-relocations.patch`. Po ní test projde: 7 bloků se načte z cache a program vypíše `ok`.
+- **Statický program musí mít kód od offsetu 0.** S výchozím rozložením lld mapují segment jen pro čtení i segment kódu offset 0 souboru. FEX za běhu pak počítá offsety bloků od jiné základní adresy (0x201000) než `FEXOfflineCompiler` (0x200000). Test proto linkuje s `--no-rosegment`. Pro Wine a PE moduly to neplatí, tam adresy hlídá `ImageTracker`.
+
 ## Pořadí implementace
 
-1. Druhý běh testu načte cache a ověří, že se použila. *(tento PR)*
+1. Druhý běh testu načte cache a ověří, že se použila. *(PR #5, hotovo)*
 2. Volba AOT + datová oblast + sloty pro `EXITFUNCTION_LINKER` a `GUEST_RIP_*`, nový formát cache (FXCC v3) a podpora v `fxcc-inspect`.
 3. Propojování přes data (thunky, `ExitFunctionLink`, delinkery).
 4. Mapování cache `r-x` bez relokací a test, který ověří, že do kódu nikdo nezapsal.
