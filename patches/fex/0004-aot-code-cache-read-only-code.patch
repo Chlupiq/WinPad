@@ -1,0 +1,290 @@
+AOT code caches: block tails in the data area, code mapped read+execute (FEX 14c9268, on top of 0003)
+
+With AOTCodeCacheWIP, a block's JITCodeTail (entry RIP, spin lock, RIP
+entries) no longer needs a GUEST_RIP_LITERAL. A RELOC_AOT_BLOCK_TAIL
+relocation records where the tail is; when the cache is serialized the
+block's JITCodeHeader is pointed at a copy of the tail in the data area,
+which the loader fills in (RIP rebased, spin lock cleared).
+
+When every relocation of a cache only fills the data area, LoadCache copies
+the code once and maps it PROT_READ|PROT_EXEC; all pages count as loaded,
+so nothing is relocated lazily. The SIGSEGV handler no longer treats a fault
+in such code as a lazy page load, so a write into it is a real fault. Unaligned TSO accesses that FEX would
+backpatch are emulated by the SIGBUS handler instead (the non-JIT path),
+flagged by JITCodeTail::ReadOnlyCode which the loader sets.
+
+diff --git a/FEXCore/Source/Interface/Core/CPUBackend.h b/FEXCore/Source/Interface/Core/CPUBackend.h
+index 0183694..44318fe 100644
+--- a/FEXCore/Source/Interface/Core/CPUBackend.h
++++ b/FEXCore/Source/Interface/Core/CPUBackend.h
+@@ -95,7 +95,10 @@ namespace CPU {
+       // If this block represents a single guest instruction.
+       bool SingleInst;
+ 
+-      uint8_t _Pad[3];
++      // If this block is read-only AOT code that must never be backpatched.
++      bool ReadOnlyCode;
++
++      uint8_t _Pad[2];
+     };
+ 
+     /**
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 378719a..e2ff651 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -662,7 +662,19 @@ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> C
+         memcpy(Code.data() + Site, &Adrp, sizeof(Adrp));
+         memcpy(Code.data() + Site + 4, &Lo12, sizeof(Lo12));
+       }
+-      DataSlotIndex += CPU::AOTDataSlotCount(Reloc.Header.Type);
++      DataSlotIndex += CPU::AOTDataSlotCount(Reloc);
++      break;
++    }
++    case FEXCore::CPU::RelocationTypes::RELOC_AOT_BLOCK_TAIL: {
++      // Point the block header at the tail's copy in the data area
++      if (ForStorage) {
++        const uint64_t Slot = CPU::AOTDataAreaOffset(Code.size_bytes()) + DataSlotIndex * sizeof(uint64_t);
++        const uint64_t HeaderOffset = Reloc.Header.Offset - Reloc.AOTBlockTail.OffsetFromHeader;
++        LOGMAN_THROW_A_FMT(Slot - HeaderOffset <= UINT32_MAX, "AOT block tail out of range");
++        CPU::CPUBackend::JITCodeHeader Header {.OffsetToBlockTail = static_cast<uint32_t>(Slot - HeaderOffset)};
++        memcpy(Code.data() + HeaderOffset, &Header, sizeof(Header));
++      }
++      DataSlotIndex += CPU::AOTDataSlotCount(Reloc);
+       break;
+     }
+ 
+@@ -725,11 +737,15 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+   // AOT code caches load values from a data area at a fixed distance after the code
+   uint64_t NumDataSlots = 0;
+   for (const auto& Reloc : Relocations) {
+-    NumDataSlots += CPU::AOTDataSlotCount(Reloc.Header.Type);
++    NumDataSlots += CPU::AOTDataSlotCount(Reloc);
+   }
+   const size_t DataAreaOffset = NumDataSlots ? CPU::AOTDataAreaOffset(header.CodeBufferSize) : header.CodeBufferSize;
+   const size_t DataAreaMapSize =
+     NumDataSlots ? AlignUp(DataAreaOffset + NumDataSlots * sizeof(uint64_t), Utils::FEX_PAGE_SIZE) - header.CodeBufferSize : 0;
++  // If every relocation only fills the data area, the code is final as stored
++  // and is mapped read+execute at once, never written afterwards.
++  const bool ReadOnlyCode =
++    NumDataSlots && std::ranges::all_of(Relocations, [](const auto& Reloc) { return CPU::AOTDataSlotCount(Reloc) != 0; });
+ 
+ #ifndef _WIN32
+   // Allocate target memory for post-relocation code. This is PROT_NONE until
+@@ -765,10 +781,33 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+         Record->CallerOffset = FEXCore::Context::DATA_ONLY_LINK_RECORD;
+         Slot += 3;
+         ++NumLinkRecords;
++      } else if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_AOT_BLOCK_TAIL) {
++        memcpy(Slot, CodeDataInFile.data() + Reloc.Header.Offset, Reloc.AOTBlockTail.TailSize);
++        auto* Tail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(Slot);
++        Tail->RIP = FileStartVA + Reloc.AOTBlockTail.GuestRIP;
++        Tail->SpinLockFutex = 0;
++        Tail->ReadOnlyCode = ReadOnlyCode;
++        Slot += CPU::AOTDataSlotCount(Reloc);
+       }
+     }
+     LogMan::Msg::IFmt("AOT data area: {} slots ({} link records) at code+{:#x}", NumDataSlots, NumLinkRecords, DataAreaOffset);
+   }
++
++  if (ReadOnlyCode) {
++    if (::mprotect(CodeBufferAllocation, header.CodeBufferSize, PROT_READ | PROT_WRITE) != 0) {
++      LogMan::Msg::EFmt("Failed to map AOT code");
++      Allocator::munmap(CodeBufferAllocation, header.CodeBufferSize + DataAreaMapSize);
++      return nullptr;
++    }
++    memcpy(CodeBufferAllocation, CodeDataInFile.data(), header.CodeBufferSize);
++    if (::mprotect(CodeBufferAllocation, header.CodeBufferSize, PROT_READ | PROT_EXEC) != 0) {
++      LogMan::Msg::EFmt("Failed to map AOT code");
++      Allocator::munmap(CodeBufferAllocation, header.CodeBufferSize + DataAreaMapSize);
++      return nullptr;
++    }
++    ARMEmitter::Emitter::ClearICache(CodeBufferAllocation, header.CodeBufferSize);
++    LogMan::Msg::IFmt("AOT code mapped read+execute: {} pages", header.CodeBufferSize / Utils::FEX_PAGE_SIZE);
++  }
+ #elif defined(_M_ARM64EC)
+   // TODO: Implement lazy mapping on Windows
+   // NOTE: The executed code must have MEM_EXTENDED_PARAMETER_EC_CODE set, so we can't operate on the mapped cache file directly
+@@ -801,6 +840,12 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+     new (Storage) MappedCodeCacheFile {this, CacheFile, CodeDataInFile, CodeBuffer, BlockListStart, header.NumBlocks, header.NumCodePages,
+                                        std::move(PageRelocationRanges), fextl::vector<bool>(NumPages), FileStartVA});
+   Result->DataAreaMapSize = DataAreaMapSize;
++#ifndef _WIN32
++  if (ReadOnlyCode) {
++    Result->LoadedPages.assign(NumPages, true);
++    Result->ReadOnlyCode = true;
++  }
++#endif
+   return Result;
+ }
+ 
+@@ -906,7 +951,9 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+   if (true) {
+ #endif
+     auto Range = SelectCodeRangeToFinalize(Code, 0, Code.CodeBuffer.size_bytes() / Utils::FEX_PAGE_SIZE);
+-    FinalizeCodePages(Code, Range);
++    if (!Range.empty()) {
++      FinalizeCodePages(Code, Range);
++    }
+   }
+ 
+   if (EnableCodeCacheValidation) {
+diff --git a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+index c97893c..df87fcf 100644
+--- a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+@@ -172,7 +172,8 @@ fextl::vector<FEXCore::CPU::Relocation> Arm64JITCore::TakeRelocations(uint64_t G
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE:
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL:
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT:
+-    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD: {
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD:
++    case FEXCore::CPU::RelocationTypes::RELOC_AOT_BLOCK_TAIL: {
+       Relocation.GuestRIP.GuestRIP -= GuestBaseAddress;
+       break;
+     }
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index f6b8bf9..0ce1d0d 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -1179,8 +1179,18 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+   JITBlockTail.Size = CodeData.Size;
+   {
+     memcpy(JITBlockTailLocation, &JITBlockTail, sizeof(JITBlockTail));
+-    SetCursorOffset(JITBlockTailLocation - CodeData.BlockBegin + offsetof(JITCodeTail, RIP));
+-    PlaceNamedSymbolLiteral(InsertGuestRIPLiteral(JITBlockTail.RIP));
++    if (EmitAOTCode()) {
++      Relocation TailABI {};
++      TailABI.AOTBlockTail.Header = {.Offset = static_cast<uint64_t>(JITBlockTailLocation - CodeData.BlockBegin),
++                                     .Type = FEXCore::CPU::RelocationTypes::RELOC_AOT_BLOCK_TAIL};
++      TailABI.AOTBlockTail.TailSize = CodeData.Size - CodeHeader->OffsetToBlockTail;
++      TailABI.AOTBlockTail.GuestRIP = JITBlockTail.RIP;
++      TailABI.AOTBlockTail.OffsetFromHeader = CodeHeader->OffsetToBlockTail;
++      Relocations.emplace_back(TailABI);
++    } else {
++      SetCursorOffset(JITBlockTailLocation - CodeData.BlockBegin + offsetof(JITCodeTail, RIP));
++      PlaceNamedSymbolLiteral(InsertGuestRIPLiteral(JITBlockTail.RIP));
++    }
+ 
+     // Emitter buffer is no longer used, guard against misuse by setting to nullptr.
+     SetBuffer(nullptr, 0);
+diff --git a/FEXCore/Source/Interface/Core/JIT/Relocations.h b/FEXCore/Source/Interface/Core/JIT/Relocations.h
+index 2cc0217..c19c85b 100644
+--- a/FEXCore/Source/Interface/Core/JIT/Relocations.h
++++ b/FEXCore/Source/Interface/Core/JIT/Relocations.h
+@@ -55,16 +55,15 @@ enum class RelocationTypes : uint32_t {
+   // Context::ExitFunctionLinkData taking three data slots, filled in on load.
+   // Aligned to struct RelocGuestRIP
+   RELOC_GUEST_RIP_LINK_RECORD,
+-};
+ 
+-// Number of 8-byte data area slots a relocation takes in an AOT code cache
+-constexpr uint64_t AOTDataSlotCount(RelocationTypes Type) {
+-  switch (Type) {
+-  case RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT: return 1;
+-  case RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD: return 3;
+-  default: return 0;
+-  }
+-}
++  // JITCodeTail of a block moved to the data area (AOT code caches)
++  // Offset points at the tail inside the code, which stays as emitted but
++  // unused. When the cache is serialized, the block's JITCodeHeader is
++  // pointed at the tail's copy in the data area; the loader copies the tail
++  // there and fills in its RIP. The tail's spin lock is then data, too.
++  // Aligned to struct RelocAOTBlockTail
++  RELOC_AOT_BLOCK_TAIL,
++};
+ 
+ // Offset of the data area from the start of the code buffer in an AOT code cache
+ constexpr uint64_t AOTDataAreaOffset(uint64_t CodeSize) {
+@@ -118,6 +117,22 @@ struct RelocGuestRIP final {
+   uint32_t pad2[6] {};
+ };
+ 
++// Same layout as RelocGuestRIP up to GuestRIP, so guest RIP rebasing treats both alike
++struct RelocAOTBlockTail final {
++  RelocationHeader Header {};
++
++  // Bytes from the tail to the end of the block (tail and RIP entries)
++  uint32_t TailSize;
++
++  // The block's entry RIP, relative to the binary base in a serialized cache
++  uint64_t GuestRIP;
++
++  // Offset from the block's JITCodeHeader to the tail
++  uint32_t OffsetFromHeader;
++
++  uint32_t pad2[5] {};
++};
++
+ struct RelocGuestPatchableData final {
+   RelocationHeader Header {};
+ 
+@@ -154,8 +169,23 @@ union Relocation {
+   RelocGuestRIP GuestRIP;
+ 
+   RelocGuestPatchableData GuestPatchableData;
++
++  RelocAOTBlockTail AOTBlockTail;
+ };
+ 
++static_assert(offsetof(RelocAOTBlockTail, GuestRIP) == offsetof(RelocGuestRIP, GuestRIP));
++static_assert(sizeof(RelocAOTBlockTail) == sizeof(RelocGuestRIP));
++
++// Number of 8-byte data area slots a relocation takes in an AOT code cache
++constexpr uint64_t AOTDataSlotCount(const Relocation& Reloc) {
++  switch (Reloc.Header.Type) {
++  case RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT: return 1;
++  case RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD: return 3;
++  case RelocationTypes::RELOC_AOT_BLOCK_TAIL: return (Reloc.AOTBlockTail.TailSize + 7) / 8;
++  default: return 0;
++  }
++}
++
+ uint64_t GetNamedSymbolLiteral(FEXCore::Context::ContextImpl&, RelocNamedSymbolLiteral::NamedSymbol);
+ 
+ } // namespace FEXCore::CPU
+diff --git a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+index 01e5bb2..8ec2d93 100644
+--- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
++++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+@@ -2050,6 +2050,11 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
+   auto InlineHeader = reinterpret_cast<const CPU::CPUBackend::JITCodeHeader*>(BlockBegin);
+   auto InlineTail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(Frame->State.InlineJITBlockHeader + InlineHeader->OffsetToBlockTail);
+ 
++  if (InlineTail->ReadOnlyCode) {
++    // AOT code is never backpatched; emulate the access as for non-JIT code.
++    return HandleUnalignedAccess(Thread, HandleType, ProgramCounter, GPRs, false);
++  }
++
+   // Check some instructions first that don't do any backpatching.
+   if ((Instr & ArchHelpers::Arm64::CASPAL_MASK) == ArchHelpers::Arm64::CASPAL_INST) { // CASPAL
+     if (ArchHelpers::Arm64::HandleCASPAL(Instr, GPRs, StrictSplitLockMutex)) {
+diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
+index dade379..b9ac424 100644
+--- a/FEXCore/include/FEXCore/Core/CodeCache.h
++++ b/FEXCore/include/FEXCore/Core/CodeCache.h
+@@ -222,6 +222,7 @@ struct MappedCodeCacheFile {
+   uint64_t GuestBase {}; // Guest base address for relocation application
+ 
+   size_t DataAreaMapSize {}; // AOT caches: bytes mapped after CodeBuffer for the data area (padding + slots)
++  bool ReadOnlyCode {};      // AOT caches: CodeBuffer is final and mapped read+execute, faults in it are real
+ 
+   // Helper member to prevent moving/copying without disallowing aggregate-construction
+   std::atomic<int> disallow_copy_or_move;
+diff --git a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+index 94bdd37..26603ea 100644
+--- a/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
++++ b/Source/Tools/LinuxEmulation/LinuxSyscalls/SyscallsSMCTracking.cpp
+@@ -73,6 +73,11 @@ bool SyscallHandler::HandleSegfault(FEXCore::Core::InternalThreadState* Thread,
+         // Untracked address; not handled here
+         return false;
+       }
++      if (Code->ReadOnlyCode) {
++        // Nothing is loaded lazily, so this is a write into read-only code
++        LogMan::Msg::EFmt("Fault in read-only AOT code at {:#x}", FaultAddress);
++        return false;
++      }
+       std::lock_guard lk(_SyscallHandler->CodeCachePatchingMutex);
+       HandleSegfaultForCodeCacheFinalization(*Thread, *Code, FaultAddress);
+       return true;
