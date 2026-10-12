@@ -3,7 +3,7 @@
 # x86-64 guest with code caching enabled so FEX records a code map, has
 # FEXOfflineCompiler turn it into a code cache, counts what is in that cache
 # with tools/fxcc-inspect and checks that a second run loads it. Then does
-# the same with an AOT cache (patches/fex/0002, 0003).
+# the same with an AOT cache (patches/fex/0002-0004).
 #
 # This is the baseline for the AOT mode (docs/M1-findings.md, section B): every
 # relocation reported here is a write into code that iOS without JIT forbids.
@@ -117,8 +117,9 @@ run_cached() {
 generate census
 run_cached cached
 
-# AOT cache (patches/fex/0002, 0003): no named-symbol literals, guest RIPs come
-# from data slots and block link records live in the data area. FEXOfflineCompiler ignores FEX_* variables, so the option
+# AOT cache (patches/fex/0002-0004): every relocation only fills the data area
+# (guest RIP slots, block link records, block tails), so FEX maps the code
+# read+execute at load and any later write into it faults. FEXOfflineCompiler ignores FEX_* variables, so the option
 # goes through the config file.
 mkdir -p "$XDG_CONFIG_HOME/fex-emu"
 echo '{"Config": {"AOTCodeCacheWIP": "1"}}' >"$XDG_CONFIG_HOME/fex-emu/Config.json"
@@ -128,10 +129,12 @@ python3 -I - "$work/aot-census.json" <<'PY'
 import json, sys
 for path, r in json.load(open(sys.argv[1])).items():
     types = r["relocations_by_type"]
-    bad = {t: types.get(t, 0) for t in ("NAMED_SYMBOL_LITERAL", "GUEST_RIP_MOVE") if types.get(t)}
-    if bad or not types.get("GUEST_RIP_DATA_SLOT") or not types.get("GUEST_RIP_LINK_RECORD"):
+    need = ("GUEST_RIP_DATA_SLOT", "GUEST_RIP_LINK_RECORD", "AOT_BLOCK_TAIL")
+    if r["code_patches_on_load"] or not all(types.get(t) for t in need):
         sys.exit(f"{path}: unexpected AOT relocations {types}")
 PY
 run_cached aot
 grep -Eq 'AOT data area: .*\([1-9][0-9]* link records\)' "$work/fex-aot-run.log" ||
     { echo "FEX did not set up the AOT data area with link records" >&2; exit 1; }
+grep -q 'AOT code mapped read+execute:' "$work/fex-aot-run.log" ||
+    { echo "FEX did not map the AOT code read-only" >&2; exit 1; }
