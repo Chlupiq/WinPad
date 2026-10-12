@@ -27,7 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Unit tests
-        run: python3 -I tools/fxcc-inspect/test_fxcc_inspect.py
+        run: |
+          python3 -I tools/fxcc-inspect/test_fxcc_inspect.py
+          python3 -I tools/cache2macho/test_cache2macho.py
 
   fex-cache:
     runs-on: ubuntu-24.04-arm
@@ -57,5 +59,6 @@ jobs:
             ${{ runner.temp }}/fex-work/fexserver.log
             ${{ runner.temp }}/fex-work/fex-*-run.log
             ${{ runner.temp }}/fex-work/aot-census.json
+            ${{ runner.temp }}/fex-work/aot*.o
             ${{ runner.temp }}/fex-work/home/.cache/fex-emu
           if-no-files-found: warn

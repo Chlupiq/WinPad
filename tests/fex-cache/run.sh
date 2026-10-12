@@ -134,6 +134,19 @@ for path, r in json.load(open(sys.argv[1])).items():
     if r["code_patches_on_load"] or not all(types.get(t) for t in need):
         sys.exit(f"{path}: unexpected AOT relocations {types}")
 PY
+
+# The AOT cache as a Mach-O object for iOS (tools/cache2macho): link it the way
+# the app would and check that the linker resolved every data-area reference.
+ld64=$(command -v ld64.lld || ls /usr/lib/llvm-*/bin/ld64.lld 2>/dev/null | tail -n 1)
+[ -n "$ld64" ] || { echo "ld64.lld not found" >&2; exit 1; }
+n=0
+for c in $(find "$cachedir" -type f ! -name '*.tmp' ! -name '*.lock'); do
+    n=$((n + 1))
+    python3 -I "$root/tools/cache2macho/cache2macho.py" --prefix "fexaot$n" "$c" "$work/aot$n.o"
+    "$ld64" -arch arm64 -platform_version ios 15.0 15.0 -dylib -o "$work/aot$n.dylib" "$work/aot$n.o"
+    python3 -I "$root/tools/cache2macho/check_linked.py" "$c" "$work/aot$n.dylib"
+done
+
 run_cached aot aot-census
 grep -Eq 'AOT data area: .*\([1-9][0-9]* link records\)' "$work/fex-aot-run.log" ||
     { echo "FEX did not set up the AOT data area with link records" >&2; exit 1; }
