@@ -54,5 +54,6 @@ jobs:
           name: fex-cache-census
           path: |
             ${{ runner.temp }}/fex-work/census.json
+            ${{ runner.temp }}/fex-work/fexserver.log
             ${{ runner.temp }}/fex-work/home/.cache/fex-emu
           if-no-files-found: warn

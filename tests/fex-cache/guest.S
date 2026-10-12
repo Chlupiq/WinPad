@@ -32,7 +32,7 @@ _start:
 fail:
         mov     edi, 1
 exit:
-        mov     eax, 60
+        mov     eax, 231                # exit_group, so FEX shuts down as for a normal process exit
         syscall
 
 add_one:

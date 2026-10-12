@@ -57,14 +57,20 @@ export PATH="$build/Bin:$PATH"
 # First runs record code maps; FEXServer merges them and runs FEXOfflineCompiler
 # when the same executable starts again.
 for i in 1 2 3; do
+    # Run FEXServer in the foreground so its log is kept; FEX connects to it.
+    FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
+    server=$!
+    sleep 1
     out=$(FEX "$guest")
     [ "$out" = ok ] || { echo "guest printed '$out' on run $i" >&2; exit 1; }
     FEXServer -k >/dev/null 2>&1 || true
-    sleep 2
+    wait "$server" || true
 done
 
-echo "FEX cache directory:"
-find "$HOME" -path '*fex-emu*' -type f | sed "s|$HOME/||"
+echo "FEXServer log:"
+cat "$work/fexserver.log"
+echo "FEX files:"
+find "$HOME" -path '*fex-emu*' | sed "s|$HOME/||"
 
 caches=$(find "$HOME" -path '*fex-emu/cache/*' -type f ! -name '*.tmp' ! -name '*.lock')
 if [ -z "$caches" ]; then
