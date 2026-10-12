@@ -82,5 +82,22 @@ FEXServer -k >/dev/null 2>&1 || true
 wait "$server" || true
 echo "FEX log of the cached run:"
 cat "$work/fex-cached-run.log"
-[ "$status" = 0 ] && [ "$out" = ok ] || { echo "guest printed '$out' and exited with $status with the cache" >&2; exit 1; }
+if [ "$status" != 0 ] || [ "$out" != ok ]; then
+    echo "guest printed '$out' and exited with $status with the cache" >&2
+    # Diagnostics: compare cached code against a fresh compile, then get a
+    # backtrace of the crash.
+    FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
+    server=$!
+    sleep 1
+    echo "== cached run with EnableCodeCacheValidation"
+    FEX_ENABLECODECACHEVALIDATION=1 FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr FEX "$guest" 2>&1 || true
+    if command -v gdb >/dev/null; then
+        echo "== cached run under gdb"
+        FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr gdb -q -batch -ex 'handle SIGSEGV nostop noprint pass' \
+            -ex run -ex bt -ex 'info registers pc' -ex 'x/12i $pc-24' --args "$build/Bin/FEX" "$guest" 2>&1 || true
+    fi
+    FEXServer -k >/dev/null 2>&1 || true
+    wait "$server" || true
+    exit 1
+fi
 grep -q 'Cache load:' "$work/fex-cached-run.log" || { echo "FEX did not load the code cache" >&2; exit 1; }
