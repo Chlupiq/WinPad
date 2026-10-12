@@ -62,9 +62,11 @@ def parse(data):
 
     relocs = {}
     named = {}
+    reloc_list = []
     for i in range(num_relocs):
         roff, rtype = RELOC_HEADER.unpack_from(data, off + i * RELOC_SIZE)
         name = RELOC_TYPES[rtype] if rtype < len(RELOC_TYPES) else f"UNKNOWN_{rtype}"
+        reloc_list.append((roff, name))
         relocs[name] = relocs.get(name, 0) + 1
         if name == "NAMED_SYMBOL_LITERAL":
             (sym,) = struct.unpack_from("<I", data, off + i * RELOC_SIZE + RELOC_HEADER.size)
@@ -87,6 +89,9 @@ def parse(data):
         "relocations_by_type": relocs,
         "named_symbols": named,
         "relocations_per_block": round(num_relocs / num_blocks, 2) if num_blocks else 0,
+        "block_list": [{"guest": g, "host": h} for g, h, _ in blocks],
+        "relocation_list": [{"offset": o, "type": t} for o, t in reloc_list],
+        "code_offset": code_off,
     }
 
 
@@ -94,6 +99,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("files", nargs="+")
     ap.add_argument("--json", help="write results to this file")
+    ap.add_argument("--list", action="store_true", help="also list every block and relocation")
+    ap.add_argument("--code-out", help="write the code buffer of the (single) input file here")
     args = ap.parse_args()
     results = {}
     failed = False
@@ -114,6 +121,14 @@ def main():
             print(f"    {name:28} {count}")
         for name, count in r["named_symbols"].items():
             print(f"      symbol {name:21} {count}")
+        if args.list:
+            for b in r["block_list"]:
+                print(f"  block guest+{b['guest']:#x} -> code+{b['host']:#x}")
+            for rel in r["relocation_list"]:
+                print(f"  reloc code+{rel['offset']:#06x} {rel['type']}")
+        if args.code_out:
+            with open(args.code_out, "wb") as fh:
+                fh.write(data[r["code_offset"]:r["code_offset"] + r["code_bytes"]])
     if args.json:
         with open(args.json, "w") as fh:
             json.dump(results, fh, indent=1)

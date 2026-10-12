@@ -69,7 +69,8 @@ if [ -z "$caches" ]; then
     exit 1
 fi
 # shellcheck disable=SC2086
-python3 -I "$root/tools/fxcc-inspect/fxcc_inspect.py" --json "$work/census.json" $caches
+python3 -I "$root/tools/fxcc-inspect/fxcc_inspect.py" --json "$work/census.json" --list \
+    --code-out "$work/cache-code.bin" $caches
 
 # Run the guest again: FEX must find the cache, load its blocks and still print
 # "ok". This is the path the AOT mode will later run without writing to code.
@@ -94,10 +95,12 @@ if [ "$status" != 0 ] || [ "$out" != ok ]; then
     if command -v gdb >/dev/null; then
         echo "== cached run under gdb"
         FEX_SILENTLOG=0 FEX_OUTPUTLOG=stderr gdb -q -batch -ex 'handle SIGSEGV nostop noprint pass' \
-            -ex run -ex bt -ex 'info registers pc' -ex 'x/12i $pc-24' --args "$build/Bin/FEX" "$guest" 2>&1 || true
+            -ex run -ex bt -ex 'info registers pc' -ex 'x/160i ($pc & ~0xfff)' --args "$build/Bin/FEX" "$guest" 2>&1 || true
     fi
     FEXServer -k >/dev/null 2>&1 || true
     wait "$server" || true
+    echo "== code in the cache file (before relocation)"
+    objdump -D -b binary -m aarch64 "$work/cache-code.bin" | sed -n '8,400p' | grep -v '^\s*$' | sed '/udf\s#0$/d' || true
     exit 1
 fi
 grep -q 'Cache load:' "$work/fex-cached-run.log" || { echo "FEX did not load the code cache" >&2; exit 1; }
