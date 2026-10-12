@@ -40,7 +40,7 @@ if [ ! -x "$build/Bin/FEXInterpreter" ]; then
     cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
         -DENABLE_LTO=False -DENABLE_ASSERTIONS=True -DBUILD_TESTING=False \
-        -DBUILD_THUNKS=False -DBUILD_FEX_LINUX_TESTS=False
+        -DBUILD_THUNKS=False -DBUILD_FEX_LINUX_TESTS=False -DBUILD_FEXCONFIG=False
     cmake --build "$build" --target FEXInterpreter FEXServer FEXOfflineCompiler
 fi
 
