@@ -31,7 +31,10 @@ RELOC_TYPES = [
     "GUEST_PATCHABLE_RIP_LITERAL",
     "GUEST_PATCHABLE_RIP_MOVE",
     "GUEST_PATCHABLE_CRC_MOVE",
+    "GUEST_RIP_DATA_SLOT",  # patches/fex/0002: fills a data slot, not code
 ]
+# Relocations that change code when a cache is loaded (all but data slots)
+DATA_ONLY_TYPES = {"GUEST_RIP_DATA_SLOT"}
 NAMED_SYMBOLS = ["EXITFUNCTION_LINKER"]
 
 
@@ -89,6 +92,7 @@ def parse(data):
         "relocations_by_type": relocs,
         "named_symbols": named,
         "relocations_per_block": round(num_relocs / num_blocks, 2) if num_blocks else 0,
+        "code_patches_on_load": sum(n for t, n in relocs.items() if t not in DATA_ONLY_TYPES),
         "block_list": [{"guest": g, "host": h} for g, h, _ in blocks],
         "relocation_list": [{"offset": o, "type": t} for o, t in reloc_list],
         "code_offset": code_off,
@@ -116,7 +120,7 @@ def main():
         results[path] = r
         print(f"{path}")
         print(f"  blocks {r['blocks']}, code {r['code_bytes']} bytes, relocations {r['relocations']}"
-              f" ({r['relocations_per_block']} per block)")
+              f" ({r['relocations_per_block']} per block), code patches on load {r['code_patches_on_load']}")
         for name, count in sorted(r["relocations_by_type"].items(), key=lambda kv: -kv[1]):
             print(f"    {name:28} {count}")
         for name, count in r["named_symbols"].items():

@@ -1,0 +1,263 @@
+AOT code caches: guest RIPs from data slots, exit linker via the thread state (FEX 14c9268)
+
+New option AOTCodeCacheWIP (only affects code cache generation). With it:
+- Guest RIP constants are loaded with adrp + ldr from a data slot instead of
+  a 4-instruction move that is patched on load. The adrp/ldr immediates are
+  resolved when the cache is serialized; the data area sits at a fixed
+  distance after the code (aligned to 16 KiB) and holds one slot per
+  RELOC_GUEST_RIP_DATA_SLOT relocation, in relocation order. The loader
+  maps it read-write next to the code and fills it in; the code is not
+  touched.
+- Jump thunks load the exit function linker from
+  CpuStateFrame::Pointers.ExitFunctionLinker instead of a per-block literal,
+  so EXITFUNCTION_LINKER relocations disappear.
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index 938377f..f95d44f 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -34,6 +34,15 @@
+           "Enable lazy loading of chunks in code caches"
+         ]
+       },
++      "AOTCodeCacheWIP": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "true",
++        "Desc": [
++          "When generating a code cache, emit code that is never written to after it is",
++          "loaded: values filled in at load time go to a data area next to the code"
++        ]
++      },
+       "EnableCodeCacheValidation": {
+         "Type": "bool",
+         "Default": "false",
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 87a110c..c71b128 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -49,7 +49,7 @@ MappedCodeCacheFile::~MappedCodeCacheFile() {
+ 
+ #ifndef _WIN32
+   if (!CodeBuffer.empty()) {
+-    FEXCore::Allocator::munmap(CodeBuffer.data(), CodeBuffer.size_bytes());
++    FEXCore::Allocator::munmap(CodeBuffer.data(), CodeBuffer.size_bytes() + DataAreaMapSize);
+   }
+ #elif defined(_M_ARM64EC)
+   if (!CodeBuffer.empty()) {
+@@ -618,6 +618,7 @@ bool CodeCache::ApplyPackedCodeRelocations(uint64_t GuestEntry, std::span<std::b
+ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> Code,
+                                      std::span<const FEXCore::CPU::Relocation> EntryRelocations, bool ForStorage) {
+   CPU::Arm64Emitter Emitter(&CTX, Code.data(), Code.size_bytes());
++  uint64_t DataSlotIndex = 0;
+   for (size_t j = 0; j < EntryRelocations.size(); ++j) {
+     const FEXCore::CPU::Relocation& Reloc = EntryRelocations[j];
+     LOGMAN_THROW_A_FMT(Reloc.Header.Offset < Code.size_bytes(), "Invalid relocation offset");
+@@ -642,6 +643,24 @@ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> C
+       ApplyRIPMoveRelocation(CTX, Reloc.GuestRIP.GuestRIP, Reloc.GuestRIP.RegisterIndex, GuestEntry, Emitter);
+       break;
+     }
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT: {
++      // The code only changes when serializing the cache (all relocations are
++      // passed at once then, so the running index is the slot number). After
++      // loading, the slot in the data area holds the value instead.
++      if (ForStorage) {
++        const uint64_t Slot = CPU::AOTDataAreaOffset(Code.size_bytes()) + DataSlotIndex * sizeof(uint64_t);
++        const uint64_t Site = Reloc.Header.Offset;
++        const int64_t PageDelta = static_cast<int64_t>(Slot >> 12) - static_cast<int64_t>(Site >> 12);
++        LOGMAN_THROW_A_FMT(PageDelta < (1LL << 20) && PageDelta >= -(1LL << 20), "AOT data slot out of adrp range");
++        const uint32_t Rd = Reloc.GuestRIP.RegisterIndex;
++        const uint32_t Adrp = 0x90000000U | ((PageDelta & 3) << 29) | (((PageDelta >> 2) & 0x7FFFF) << 5) | Rd;
++        const uint32_t Ldr = 0xF9400000U | (((Slot & 0xFFF) / 8) << 10) | (Rd << 5) | Rd;
++        memcpy(Code.data() + Site, &Adrp, sizeof(Adrp));
++        memcpy(Code.data() + Site + 4, &Ldr, sizeof(Ldr));
++      }
++      ++DataSlotIndex;
++      break;
++    }
+ 
+     default: ERROR_AND_DIE_FMT("Unknown relocation type {}", ToUnderlying(Reloc.Header.Type));
+     }
+@@ -699,16 +718,42 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+   Cursor = reinterpret_cast<std::byte*>(AlignUp(reinterpret_cast<uintptr_t>(Cursor), Utils::FEX_PAGE_SIZE));
+   auto CodeDataInFile = std::span {Cursor, header.CodeBufferSize};
+ 
++  // AOT code caches load values from a data area at a fixed distance after the code
++  const auto NumDataSlots = std::ranges::count_if(
++    Relocations, [](const auto& Reloc) { return Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT; });
++  const size_t DataAreaOffset = NumDataSlots ? CPU::AOTDataAreaOffset(header.CodeBufferSize) : header.CodeBufferSize;
++  const size_t DataAreaMapSize =
++    NumDataSlots ? AlignUp(DataAreaOffset + NumDataSlots * sizeof(uint64_t), Utils::FEX_PAGE_SIZE) - header.CodeBufferSize : 0;
++
+ #ifndef _WIN32
+   // Allocate target memory for post-relocation code. This is PROT_NONE until
+   // the first execution, so that contents can be lazily populated in a
+   // frontend-provided segfault handler.
+-  void* CodeBufferAllocation = Allocator::mmap(nullptr, header.CodeBufferSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  void* CodeBufferAllocation =
++    Allocator::mmap(nullptr, header.CodeBufferSize + DataAreaMapSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+   if (CodeBufferAllocation == MAP_FAILED) {
+     LogMan::Msg::EFmt("Failed to reserve target memory for code cache");
+     return nullptr;
+   }
+   auto CodeBuffer = std::span {static_cast<std::byte*>(CodeBufferAllocation), header.CodeBufferSize};
++
++  if (NumDataSlots) {
++    auto* DataArea = static_cast<std::byte*>(CodeBufferAllocation) + DataAreaOffset;
++    const auto DataPage = AlignDown(reinterpret_cast<uintptr_t>(DataArea), Utils::FEX_PAGE_SIZE);
++    const auto DataEnd = reinterpret_cast<uintptr_t>(CodeBufferAllocation) + header.CodeBufferSize + DataAreaMapSize;
++    if (::mprotect(reinterpret_cast<void*>(DataPage), DataEnd - DataPage, PROT_READ | PROT_WRITE) != 0) {
++      LogMan::Msg::EFmt("Failed to map code cache data area");
++      Allocator::munmap(CodeBufferAllocation, header.CodeBufferSize + DataAreaMapSize);
++      return nullptr;
++    }
++    auto* Slot = reinterpret_cast<uint64_t*>(DataArea);
++    for (const auto& Reloc : Relocations) {
++      if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT) {
++        *Slot++ = FileStartVA + Reloc.GuestRIP.GuestRIP;
++      }
++    }
++    LogMan::Msg::IFmt("AOT data area: {} slots at code+{:#x}", NumDataSlots, DataAreaOffset);
++  }
+ #elif defined(_M_ARM64EC)
+   // TODO: Implement lazy mapping on Windows
+   // NOTE: The executed code must have MEM_EXTENDED_PARAMETER_EC_CODE set, so we can't operate on the mapped cache file directly
+@@ -737,9 +782,11 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+   }
+ 
+   auto Storage = FEXCore::Allocator::aligned_alloc(alignof(MappedCodeCacheFile), sizeof(MappedCodeCacheFile));
+-  return fextl::unique_ptr<MappedCodeCacheFile>(
++  auto Result = fextl::unique_ptr<MappedCodeCacheFile>(
+     new (Storage) MappedCodeCacheFile {this, CacheFile, CodeDataInFile, CodeBuffer, BlockListStart, header.NumBlocks, header.NumCodePages,
+                                        std::move(PageRelocationRanges), fextl::vector<bool>(NumPages), FileStartVA});
++  Result->DataAreaMapSize = DataAreaMapSize;
++  return Result;
+ }
+ 
+ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCodeCacheFile& Code, const ExecutableFileSectionInfo& BinarySection) {
+diff --git a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+index bb00718..348f1f5 100644
+--- a/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/Arm64Relocations.cpp
+@@ -88,7 +88,25 @@ auto Arm64JITCore::InsertGuestRIPLiteral(uint64_t GuestRIP) -> NamedSymbolLitera
+   };
+ }
+ 
++bool Arm64JITCore::EmitAOTCode() const {
++  return AOTCodeCache() && CTX->GetCodeCache().IsGeneratingCache;
++}
++
+ void Arm64JITCore::InsertGuestRIPMove(ARMEmitter::Register Reg, uint64_t Constant) {
++  if (EmitAOTCode()) {
++    Relocation SlotABI {};
++    SlotABI.GuestRIP.Header = {.Offset = GetCursorOffset(), .Type = FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT};
++    SlotABI.GuestRIP.GuestRIP = Constant;
++    SlotABI.GuestRIP.RegisterIndex = Reg.Idx();
++
++    // adrp Reg, slot; ldr Reg, [Reg, :lo12:slot]
++    // Immediates are filled in when the code cache is serialized.
++    dc32(0x90000000U | Reg.Idx());
++    dc32(0xF9400000U | (Reg.Idx() << 5) | Reg.Idx());
++    Relocations.emplace_back(SlotABI);
++    return;
++  }
++
+   Relocation MoveABI {};
+   MoveABI.GuestRIP.Header = {.Offset = GetCursorOffset(), .Type = FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE};
+   // NOTE: Cache serialization will subtract the guest binary base address later to produce consistency results
+@@ -139,7 +157,8 @@ fextl::vector<FEXCore::CPU::Relocation> Arm64JITCore::TakeRelocations(uint64_t G
+   for (auto& Relocation : Relocations) {
+     switch (Relocation.Header.Type) {
+     case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE:
+-    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL: {
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL:
++    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT: {
+       Relocation.GuestRIP.GuestRIP -= GuestBaseAddress;
+       break;
+     }
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index a7850a5..5468ac0 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -1050,7 +1050,12 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+     b_OrRestart(&l_DoLink);
+     br(TMP1);
+     BindOrRestart(&l_DoLink);
+-    ldr(TMP1, &l_ExitLink);
++    if (EmitAOTCode()) {
++      // Same size as the literal load, but nothing to relocate
++      ldr(TMP1, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.ExitFunctionLinker));
++    } else {
++      ldr(TMP1, &l_ExitLink);
++    }
+     blr(TMP1);
+ 
+     // This is a ExitFunctionLinkData struct
+@@ -1066,8 +1071,10 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+     dc64(PendingJumpThunk.CallerAddress - ThunkAddress); // CallerOffset
+   }
+ 
+-  BindOrRestart(&l_ExitLink);
+-  PlaceNamedSymbolLiteral(InsertNamedSymbolLiteral(RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER));
++  if (!EmitAOTCode()) {
++    BindOrRestart(&l_ExitLink);
++    PlaceNamedSymbolLiteral(InsertNamedSymbolLiteral(RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER));
++  }
+ 
+   // CodeSize not including the header or tail data.
+   const uint64_t CodeOnlySize = GetCursorAddress<uint8_t*>() - CodeBegin;
+diff --git a/FEXCore/Source/Interface/Core/JIT/JITClass.h b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+index 17e7691..b2df867 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JITClass.h
++++ b/FEXCore/Source/Interface/Core/JIT/JITClass.h
+@@ -600,6 +600,11 @@ private:
+ 
+   fextl::vector<FEXCore::CPU::Relocation> Relocations;
+ 
++  FEX_CONFIG_OPT(AOTCodeCache, AOTCODECACHEWIP);
++
++  // Emit code for an AOT code cache: no value in the code is patched after loading
++  bool EmitAOTCode() const;
++
+   /**
+    * Returns any relocations generated since the last call to TakeRelocations.
+    *
+diff --git a/FEXCore/Source/Interface/Core/JIT/Relocations.h b/FEXCore/Source/Interface/Core/JIT/Relocations.h
+index cbd5b2a..cc3b6ad 100644
+--- a/FEXCore/Source/Interface/Core/JIT/Relocations.h
++++ b/FEXCore/Source/Interface/Core/JIT/Relocations.h
+@@ -41,8 +41,21 @@ enum class RelocationTypes : uint32_t {
+   // Patchable guest CRC
+   // Aligned to struct RelocGuestPatchableData
+   RELOC_GUEST_PATCHABLE_CRC_MOVE,
++
++  // Guest RIP loaded from a data slot next to the code (AOT code caches)
++  // adrp + ldr pair; the code is resolved when the cache is serialized and
++  // never written after loading, only the data slot is filled in.
++  // Data slots are numbered by the order of these relocations.
++  // Aligned to struct RelocGuestRIP
++  RELOC_GUEST_RIP_DATA_SLOT,
+ };
+ 
++// Offset of the data area from the start of the code buffer in an AOT code cache
++constexpr uint64_t AOTDataAreaOffset(uint64_t CodeSize) {
++  constexpr uint64_t Alignment = 0x4000; // Largest host page size (iOS)
++  return (CodeSize + Alignment - 1) & ~(Alignment - 1);
++}
++
+ struct FEX_PACKED RelocationHeader final {
+   // Offset to the relocated host code data
+   uint64_t Offset {};
+diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
+index a09c574..dade379 100644
+--- a/FEXCore/include/FEXCore/Core/CodeCache.h
++++ b/FEXCore/include/FEXCore/Core/CodeCache.h
+@@ -221,6 +221,8 @@ struct MappedCodeCacheFile {
+ 
+   uint64_t GuestBase {}; // Guest base address for relocation application
+ 
++  size_t DataAreaMapSize {}; // AOT caches: bytes mapped after CodeBuffer for the data area (padding + slots)
++
+   // Helper member to prevent moving/copying without disallowing aggregate-construction
+   std::atomic<int> disallow_copy_or_move;
+ 
