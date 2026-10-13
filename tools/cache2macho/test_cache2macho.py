@@ -60,6 +60,14 @@ class ConvertTest(unittest.TestCase):
         text_off = obj.index(struct.pack("<II", ADRP_X0, LDR_X0))  # immediates cleared
         self.assertEqual(struct.unpack_from("<i", obj, text_off - 0x10)[0], 32 - 0)  # tail slot 32 minus header 0
 
+    def test_platform(self):
+        data = build_cache(blocks=[(0x1000, 4, [0x1000])], relocs=[(0x10, DATA_SLOT, b"")], code=aot_code())
+        for args, platform, version in (((), c2m.PLATFORM_IOS, 15 << 16),
+                                        (("14.4", c2m.PLATFORM_MACOS), c2m.PLATFORM_MACOS, (14 << 16) | (4 << 8))):
+            obj, _ = c2m.convert(data, "t", *(args or ("15.0",)))
+            cmd = obj.index(struct.pack("<I", c2m.LC_BUILD_VERSION))
+            self.assertEqual(struct.unpack_from("<III", obj, cmd + 8), (platform, version, version))
+
     def test_elf_asm_references_data_area(self):
         tail = struct.pack("<IQI", 16, 0x1000, 0x60)
         data = build_cache(

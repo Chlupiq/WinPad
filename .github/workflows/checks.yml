@@ -72,6 +72,29 @@ jobs:
             ${{ runner.temp }}/fex-work/probe
           if-no-files-found: warn
 
+  probe-macos:
+    needs: fex-cache
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install ninja
+      - name: Code map and guest from the Linux probe run
+        uses: actions/download-artifact@v4
+        with:
+          name: fex-cache-census
+          path: ${{ runner.temp }}/linux
+      - name: Probe frontend runs the guest from a Mach-O AOT image
+        timeout-minutes: 60
+        run: sh tests/probe/run-macos.sh "$RUNNER_TEMP/fex" "$RUNNER_TEMP/fex-macos" "$RUNNER_TEMP/probe" "$RUNNER_TEMP/linux/probe"
+      - name: Upload probe files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-macos
+          path: ${{ runner.temp }}/probe
+          if-no-files-found: warn
+
   fexcore-ios:
     runs-on: macos-15
     steps:

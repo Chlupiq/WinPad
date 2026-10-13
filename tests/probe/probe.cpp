@@ -7,7 +7,8 @@
 // Modes (each one process, as they would be on a build machine and a device):
 //   record CODEMAP          run with the JIT and record the executed blocks
 //   generate CODEMAP DIR    compile the recorded blocks into an AOT code cache
-//                           in DIR and write FEX's dispatcher to DIR/dispatcher.bin
+//                           in DIR and write FEX's dispatcher to DIR/dispatcher.bin,
+//                           without executable memory (NoJIT)
 //   run IMAGE               run from an AOT image built from the cache by
 //                           tools/cache2macho, with NoJIT: no memory is ever
 //                           made executable
@@ -212,6 +213,9 @@ int main(int argc, char** argv) {
   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
   fextl::string DispatcherPath;
   if (Generate) {
+    // NoJIT here too: compiling a cache needs no executable memory either
+    // (patch 0010), so a Mac can make the image for an iPad.
+    FEXCore::Config::Set(FEXCore::Config::CONFIG_NOJIT, "1");
     FEXCore::Config::Set(FEXCore::Config::CONFIG_AOTCODECACHEWIP, "1");
     DispatcherPath = fextl::fmt::format("{}/dispatcher.bin", argv[3]);
     FEXCore::Config::Set(FEXCore::Config::CONFIG_DUMPDISPATCHER, DispatcherPath);

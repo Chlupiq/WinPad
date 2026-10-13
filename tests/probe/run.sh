@@ -50,6 +50,9 @@ step() {
 }
 
 step record "$work/guest.map"
+# The macOS job (tests/probe/run-macos.sh) compiles this code map; it checks
+# that its probe embeds the same guest bytes.
+cp "$build/WinPadProbe/guest.h" "$work/guest.h"
 step generate "$work/guest.map" "$work"
 cache=$(ls "$work"/winpad-probe-guest-*)
 

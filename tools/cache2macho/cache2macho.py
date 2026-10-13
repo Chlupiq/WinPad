@@ -36,7 +36,7 @@ for Mach-O (iOS) by default, for ELF with --elf-asm. The dispatcher has no
 absolute addresses, so it needs no relocations; FEX uses it only if it matches
 what it would generate itself.
 
-Usage: cache2macho.py [--prefix NAME] [--min-ios 15.0] [--elf-asm] CACHE_FILE OUT
+Usage: cache2macho.py [--prefix NAME] [--min-ios 15.0 | --macos 14.4] [--elf-asm] CACHE_FILE OUT
        cache2macho.py --dispatcher [--elf-asm] DISPATCHER_FILE OUT.s
 """
 import argparse
@@ -59,6 +59,7 @@ LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
 LC_DYSYMTAB = 0xB
 LC_BUILD_VERSION = 0x32
+PLATFORM_MACOS = 1
 PLATFORM_IOS = 2
 S_REGULAR = 0x0
 S_ZEROFILL = 0x1
@@ -169,7 +170,7 @@ def reloc_entry(address, symbolnum, pcrel, length, extern, rtype):
     return struct.pack("<iI", address, word)
 
 
-def convert(data, prefix, min_ios):
+def convert(data, prefix, min_ios, platform=PLATFORM_IOS):
     relocs, slots, data_size, code, meta = prepare(data)
     code_size = len(code)
     text = bytearray(code)
@@ -260,7 +261,7 @@ def convert(data, prefix, min_ios):
                            flags, 0, 0, 0)
     major, minor = (int(x) for x in min_ios.split("."))
     version = (major << 16) | (minor << 8)
-    out += struct.pack("<IIIIII", LC_BUILD_VERSION, build_cmd_size, PLATFORM_IOS, version, version, 0)
+    out += struct.pack("<IIIIII", LC_BUILD_VERSION, build_cmd_size, platform, version, version, 0)
     out += struct.pack("<IIIIII", LC_SYMTAB, symtab_cmd_size, symoff, len(all_syms), stroff, len(strtab))
     out += struct.pack("<IIIIIIIIIIIIIIIIIIII", LC_DYSYMTAB, dysymtab_cmd_size,
                        0, len(syms.locals), len(syms.locals), len(syms.globals), len(all_syms), 0,
@@ -348,6 +349,7 @@ def main():
     ap.add_argument("output")
     ap.add_argument("--prefix", help="symbol name prefix (default: from the cache file name)")
     ap.add_argument("--min-ios", default="15.0")
+    ap.add_argument("--macos", metavar="MIN", help="build the object for macOS MIN instead of iOS")
     ap.add_argument("--elf-asm", action="store_true", help="write AArch64 ELF assembly for Linux instead")
     ap.add_argument("--dispatcher", action="store_true", help="input is a dispatcher dump; write assembly")
     args = ap.parse_args()
@@ -367,6 +369,8 @@ def main():
         if args.elf_asm:
             text, stats = convert_elf_asm(data, prefix)
             obj = text.encode()
+        elif args.macos:
+            obj, stats = convert(data, prefix, args.macos, PLATFORM_MACOS)
         else:
             obj, stats = convert(data, prefix, args.min_ios)
     except (ConvertError, fi.FormatError) as e:
