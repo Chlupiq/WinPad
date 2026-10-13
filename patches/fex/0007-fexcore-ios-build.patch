@@ -1,0 +1,682 @@
+FEXCore builds for iOS (FEX 14c9268, on top of 0006)
+
+WinPad's iPad test app links FEXCore as static libraries, as Madeira does
+(its fork willfaust/FEX, branch ios-port-2607, made the same kind of
+changes; the portable ones are taken from there). Linux and Windows builds
+are unchanged.
+
+- CMake accepts CMAKE_SYSTEM_NAME=iOS and then builds only FEXHeaderUtils,
+  CodeEmitter and FEXCore (no Linux frontend, no FEX allocators, no
+  pthread library to link).
+- Linux-only headers and syscalls get Darwin equivalents: gettid via
+  pthread_threadid_np, signal masks via pthread_sigmask, prctl as a stub
+  that fails, file copies via fcopyfile, no malloc.h or transparent huge
+  pages, random bytes via arc4random_buf, directory walks via readdir.
+- Futex waits (InterruptableConditionVariable, WritePriorityMutex) use
+  os_sync_wait_on_address, public since iOS 17.4.
+- The allocator uses the system mmap; FEX's 64-bit allocator, which reserves
+  the upper VA for a Linux guest, is not built. Lazily finalized cache files
+  (mremap) are refused: iOS loads only linked AOT images.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 71d8a73..0cdaa03 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -61,9 +61,9 @@ if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+   message(FATAL_ERROR "Unsupported pointer size ${CMAKE_SIZEOF_VOID_P}."
+     " FEX only supports 64-bit (8-byte pointer) systems."
+     " If you believe this is in error, file an issue.")
+-elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
++elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "iOS"))
+   message(FATAL_ERROR "Unsupported system type ${CMAKE_SYSTEM_NAME}."
+-    " FEX only supports Linux and Windows."
++    " FEX only supports Linux and Windows (and FEXCore on iOS)."
+     " If you believe this is in error, file an issue.")
+ endif()
+ 
+@@ -77,6 +77,11 @@ elseif (MINGW)
+   message(STATUS "Building for MinGW")
+   set(ENABLE_FEX_ALLOCATOR TRUE)
+   set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
++elseif (APPLE)
++  # iOS: only FEXCore is built, for an app to link; the system allocator is used
++  message(STATUS "Building FEXCore for iOS")
++  set(ENABLE_FEX_ALLOCATOR FALSE)
++  set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
+ else ()
+   message(STATUS "Clang version ${CMAKE_CXX_COMPILER_VERSION}")
+   set(CLANG_MINIMUM_VERSION 13.0)
+@@ -278,7 +283,11 @@ if (ENABLE_COMPILE_TIME_TRACE)
+   link_libraries(-ftime-trace)
+ endif()
+ 
+-set(PTHREAD_LIB pthread)
++if (APPLE)
++  set(PTHREAD_LIB "")
++else()
++  set(PTHREAD_LIB pthread)
++endif()
+ 
+ if (USE_LINKER)
+   message(STATUS "Overriding linker to: ${USE_LINKER}")
+@@ -330,7 +339,7 @@ if (ENABLE_JEMALLOC_GLIBC_ALLOC)
+   # Required for thunks to work.
+   # All host native libraries will use this allocator, while *most* other FEX internal allocations will use the other jemalloc allocator.
+   add_subdirectory(External/jemalloc_glibc/)
+-elseif (NOT MINGW)
++elseif (NOT MINGW AND NOT APPLE)
+   message(STATUS
+     " jemalloc glibc allocator disabled!\n"
+     " This is not a recommended configuration!\n"
+@@ -341,7 +350,7 @@ endif()
+ if (ENABLE_FEX_ALLOCATOR)
+   # The rpmalloc subproject that all FEXCore fextl objects allocate through.
+   add_subdirectory(External/rpmalloc/)
+-elseif (NOT MINGW)
++elseif (NOT MINGW AND NOT APPLE)
+   message (STATUS
+     " FEX allocator is disabled!\n"
+     " This is not a recommended configuration!\n"
+@@ -631,6 +640,7 @@ add_subdirectory(FEXHeaderUtils/)
+ add_subdirectory(CodeEmitter/)
+ add_subdirectory(FEXCore/)
+ 
++if (NOT APPLE)
+ if (ARCHITECTURE_arm64 AND NOT MINGW AND NOT BUILD_STEAM_SUPPORT)
+   # Binfmt_misc files must be installed prior to Source/ installs
+   add_subdirectory(Data/binfmts/)
+@@ -641,6 +651,7 @@ add_subdirectory(Source/)
+ if (NOT BUILD_STEAM_SUPPORT)
+   add_subdirectory(Data/AppConfig/)
+ endif()
++endif()
+ 
+ # Install the ThunksDB file
+ file(GLOB CONFIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Data/*.json)
+diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
+index dd8e4aa..76c38f0 100644
+--- a/FEXCore/Source/CMakeLists.txt
++++ b/FEXCore/Source/CMakeLists.txt
+@@ -10,7 +10,7 @@ set(FEXCORE_BASE_SRCS
+   Utils/SpinWaitLock.cpp
+   Utils/WildcardMatcher.cpp)
+ 
+-if (NOT MINGW)
++if (NOT MINGW AND NOT APPLE)
+   list(APPEND FEXCORE_BASE_SRCS
+     Utils/Allocator/64BitAllocator.cpp)
+ endif()
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index df242dc..e515d0e 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -1156,7 +1156,11 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
+ 
+   FEXCORE_PROFILE_SCOPED("FinalizeCodePages");
+ 
+-#ifndef _WIN32
++#if defined(__APPLE__)
++  // Darwin has no mremap. Only AOT images (LoadLinkedCache) are used there,
++  // and their code is final, so nothing is ever finalized lazily.
++  ERROR_AND_DIE_FMT("{}: lazily finalized code caches are not supported on Darwin", __FUNCTION__);
++#elif !defined(_WIN32)
+   // Atomicity is critical when making the finalized code data visible.
+   // We ensure this by remapping a temporary buffer onto the PROT_NONE
+   // placeholder page in CodeBuffer. Some constraints to keep in mind are:
+diff --git a/FEXCore/Source/Interface/Core/Interpreter/Fallbacks/F80Fallbacks.h b/FEXCore/Source/Interface/Core/Interpreter/Fallbacks/F80Fallbacks.h
+index 5c0e656..4b8f9b1 100644
+--- a/FEXCore/Source/Interface/Core/Interpreter/Fallbacks/F80Fallbacks.h
++++ b/FEXCore/Source/Interface/Core/Interpreter/Fallbacks/F80Fallbacks.h
+@@ -369,7 +369,7 @@ struct OpHandlers<IR::OP_F64SINCOS> {
+   FEXCORE_PRESERVE_ALL_ATTR static VectorScalarF64Pair handle(double src, FEXCore::Core::CpuStateFrame* Frame) {
+     FEXCORE_PROFILE_INSTANT_INCREMENT(Frame->Thread, AccumulatedFloatFallbackCount, 1);
+     double sin, cos;
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__APPLE__)
+     sin = ::sin(src);
+     cos = ::cos(src);
+ #else
+diff --git a/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp b/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp
+index 6e8df95..8e4e3ce 100644
+--- a/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp
+@@ -5,7 +5,10 @@ tags: backend|arm64
+ $end_info$
+ */
+ 
+-#ifndef _WIN32
++#if defined(__APPLE__)
++// Guest-visible Linux syscall number, not a host syscall
++#define SYS_getcpu 168
++#elif !defined(_WIN32)
+ #include <syscall.h>
+ #endif
+ 
+diff --git a/FEXCore/Source/Utils/Allocator.cpp b/FEXCore/Source/Utils/Allocator.cpp
+index 18495ce..09db891 100644
+--- a/FEXCore/Source/Utils/Allocator.cpp
++++ b/FEXCore/Source/Utils/Allocator.cpp
+@@ -21,7 +21,9 @@
+ #include <cstdint>
+ #include <cstdio>
+ #include <fcntl.h>
+-#ifndef _WIN32
++#if defined(__APPLE__)
++#include <sys/mman.h>
++#elif !defined(_WIN32)
+ #include <sys/mman.h>
+ #include <sys/user.h>
+ #endif
+@@ -34,7 +36,50 @@ std::pmr::memory_resource* get_default_resource() {
+ } // namespace fextl::pmr
+ 
+ namespace FEXCore::Allocator {
+-#ifndef _WIN32
++#if defined(__APPLE__)
++// Darwin (iOS): FEX's 64-bit allocator and glibc hooks are not built; the
++// guest lives wherever the frontend maps it, so the system allocator is used.
++MMAP_Hook mmap {::mmap};
++MUNMAP_Hook munmap {::munmap};
++
++void VirtualName(const char*, void*, size_t) {}
++
++void SetupHooks(size_t) {}
++
++void ClearHooks() {
++  FEXCore::Allocator::mmap = ::mmap;
++  FEXCore::Allocator::munmap = ::munmap;
++}
++
++FEX_DEFAULT_VISIBILITY size_t GetHostVABits() {
++  // Darwin does not report the user VA width; arm64 iOS processes get at most 47 bits.
++  return 47;
++}
++
++fextl::vector<MemoryRegion> CollectMemoryGaps(uintptr_t, uintptr_t, int) {
++  return {};
++}
++
++fextl::vector<MemoryRegion> StealMemoryRegion(uintptr_t, uintptr_t) {
++  return {};
++}
++
++fextl::vector<MemoryRegion> Setup48BitAllocatorIfExists(size_t) {
++  return {};
++}
++
++void ReclaimMemoryRegion(const fextl::vector<MemoryRegion>& Regions) {
++  for (const auto& Region : Regions) {
++    ::munmap(Region.Ptr, Region.Size);
++  }
++}
++
++void RegisterTLSData(FEXCore::Core::InternalThreadState*) {}
++void UninstallTLSData(FEXCore::Core::InternalThreadState*) {}
++
++void LockBeforeFork(FEXCore::Core::InternalThreadState*) {}
++void UnlockAfterFork(FEXCore::Core::InternalThreadState*, bool) {}
++#elif !defined(_WIN32)
+ MMAP_Hook mmap {::mmap};
+ MUNMAP_Hook munmap {::munmap};
+ 
+diff --git a/FEXCore/Source/Utils/FileUtils.cpp b/FEXCore/Source/Utils/FileUtils.cpp
+index d3e62ca..13365ea 100644
+--- a/FEXCore/Source/Utils/FileUtils.cpp
++++ b/FEXCore/Source/Utils/FileUtils.cpp
+@@ -24,7 +24,73 @@ extern "C" NTSTATUS RtlUnicodeToUTF8N(OUT PCHAR UTF8StringDestination, IN ULONG
+ #endif
+ 
+ namespace FEXCore::FileUtils {
+-#ifndef _WIN32
++#if defined(__APPLE__)
++// Darwin has no getdents64; the same walks go through fdopendir/readdir.
++static inline bool unlinkat(int fd, const char* path, bool dir) {
++  if (::unlinkat(fd, path, dir ? AT_REMOVEDIR : 0) == -1) {
++    return errno == ENOENT;
++  }
++  return true;
++}
++
++static DIR* OpenDirectoryAt(int parent_fd, const char* Directory) {
++  int dir_fd = ::openat(parent_fd, Directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++  if (dir_fd == -1) {
++    return nullptr;
++  }
++  DIR* Dir = ::fdopendir(dir_fd);
++  if (!Dir) {
++    close(dir_fd);
++  }
++  return Dir;
++}
++
++static bool RecursiveRemoveDirectory(int parent_fd, const char* Directory) {
++  DIR* Dir = OpenDirectoryAt(parent_fd, Directory);
++  if (!Dir) {
++    // Probably raced something. Non-error.
++    return errno == ENOENT;
++  }
++
++  bool Result = true;
++  while (auto* Entry = ::readdir(Dir)) {
++    std::string_view Name = Entry->d_name;
++    if (Name == "." || Name == "..") {
++      continue;
++    }
++    const bool IsDir = Entry->d_type == DT_DIR;
++    if ((IsDir && !RecursiveRemoveDirectory(dirfd(Dir), Entry->d_name)) || !unlinkat(dirfd(Dir), Entry->d_name, IsDir)) {
++      LogMan::Msg::IFmt("Failed to remove file: {}", Name);
++      Result = false;
++      break;
++    }
++  }
++  ::closedir(Dir);
++  return Result;
++}
++
++FEX_DEFAULT_VISIBILITY bool RecursiveRemoveDirectory(const fextl::string& Directory) {
++  return RecursiveRemoveDirectory(AT_FDCWD, Directory.c_str()) && unlinkat(AT_FDCWD, Directory.c_str(), true);
++}
++
++FEX_DEFAULT_VISIBILITY void WalkDirectory(std::string_view Directory,
++                                          fextl::move_only_function<void(std::string_view name, bool is_dir, const void* user_data)> Callback,
++                                          const void* user_data) {
++  DIR* Dir = OpenDirectoryAt(AT_FDCWD, fextl::string(Directory).c_str());
++  if (!Dir) {
++    return;
++  }
++  while (auto* Entry = ::readdir(Dir)) {
++    std::string_view Name = Entry->d_name;
++    if (Name == "." || Name == "..") {
++      continue;
++    }
++    Callback(Name, Entry->d_type == DT_DIR, user_data);
++  }
++  ::closedir(Dir);
++}
++
++#elif !defined(_WIN32)
+ static inline bool unlinkat(int fd, const char* path, bool dir) {
+   if (::unlinkat(fd, path, dir ? AT_REMOVEDIR : 0) == -1) {
+     return errno == ENOENT;
+diff --git a/FEXCore/Source/Utils/Profiler.cpp b/FEXCore/Source/Utils/Profiler.cpp
+index 67fe0ca..6761961 100644
+--- a/FEXCore/Source/Utils/Profiler.cpp
++++ b/FEXCore/Source/Utils/Profiler.cpp
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ #include <cstdint>
+ #include <fcntl.h>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <linux/magic.h>
+ #include <sys/stat.h>
+ #include <sys/vfs.h>
+diff --git a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+index c4cadf4..31203d7 100644
+--- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
++++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+@@ -6,7 +6,9 @@
+ 
+ #ifndef _WIN32
+ #include <stdlib.h>
++#ifndef __APPLE__
+ #include <malloc.h>
++#endif
+ #include <sys/mman.h>
+ #else
+ #define NTDDI_VERSION 0x0A000005
+@@ -143,7 +145,9 @@ inline bool VirtualProtect(void* Ptr, size_t Size, ProtectOptions options) {
+ }
+ 
+ inline void VirtualTHPControl(const void* Ptr, size_t Size, THPControl Control) {
++#if defined(MADV_HUGEPAGE) && defined(MADV_NOHUGEPAGE)
+   ::madvise(const_cast<void*>(Ptr), Size, Control == THPControl::Enable ? MADV_HUGEPAGE : MADV_NOHUGEPAGE);
++#endif
+ }
+ 
+ #endif
+diff --git a/FEXCore/include/FEXCore/Utils/InterruptableConditionVariable.h b/FEXCore/include/FEXCore/Utils/InterruptableConditionVariable.h
+index d81c376..d67bdc5 100644
+--- a/FEXCore/include/FEXCore/Utils/InterruptableConditionVariable.h
++++ b/FEXCore/include/FEXCore/Utils/InterruptableConditionVariable.h
+@@ -5,7 +5,12 @@
+ #include <chrono>
+ #include <climits>
+ #include <cstdint>
+-#ifndef _WIN32
++#if defined(__APPLE__)
++#include <cerrno>
++#include <ctime>
++#include <os/clock.h>
++#include <os/os_sync_wait_on_address.h>
++#elif !defined(_WIN32)
+ #include <linux/futex.h>
+ #include <sys/syscall.h>
+ #else
+@@ -24,7 +29,73 @@ namespace FEXCore {
+  * call can leave the condition variable in an invalid state that breaks later
+  * uses of that object and may cause hangs as a consequence.
+  */
+-#ifndef _WIN32
++#if defined(__APPLE__)
++// Darwin: the same futex scheme with os_sync_wait_on_address (iOS 17.4+).
++class InterruptableConditionVariable final {
++public:
++  bool Wait(struct timespec* Timeout = nullptr) {
++    while (true) {
++      uint32_t Expected = SIGNALED;
++      uint32_t Desired = UNSIGNALED;
++
++      // If the mutex was already signaled then we can early exit
++      if (Mutex.compare_exchange_strong(Expected, Desired)) {
++        return true;
++      }
++
++      // Sleeps while the word is still `Desired`
++      int Result;
++      if (Timeout) {
++        const uint64_t TimeoutNS = static_cast<uint64_t>(Timeout->tv_sec) * 1'000'000'000ULL + Timeout->tv_nsec;
++        Result = os_sync_wait_on_address_with_timeout(&Mutex, Desired, sizeof(Mutex), OS_SYNC_WAIT_ON_ADDRESS_NONE,
++                                                      OS_CLOCK_MACH_ABSOLUTE_TIME, TimeoutNS);
++      } else {
++        Result = os_sync_wait_on_address(&Mutex, Desired, sizeof(Mutex), OS_SYNC_WAIT_ON_ADDRESS_NONE);
++      }
++
++      if (Timeout && Result == -1 && errno == ETIMEDOUT) {
++        return false;
++      }
++    }
++  }
++
++  template<class Rep, class Period>
++  bool WaitFor(const std::chrono::duration<Rep, Period>& time) {
++    struct timespec Timeout {};
++    auto SecondsDuration = std::chrono::duration_cast<std::chrono::seconds>(time);
++    Timeout.tv_sec = SecondsDuration.count();
++    Timeout.tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(time - SecondsDuration).count();
++    return Wait(&Timeout);
++  }
++
++  void NotifyOne() {
++    DoNotify(false);
++  }
++
++  void NotifyAll() {
++    DoNotify(true);
++  }
++
++private:
++  std::atomic<uint32_t> Mutex {};
++  constexpr static uint32_t SIGNALED = 1;
++  constexpr static uint32_t UNSIGNALED = 0;
++
++  void DoNotify(bool All) {
++    uint32_t Expected = UNSIGNALED;
++    uint32_t Desired = SIGNALED;
++
++    // If the mutex was in an unsignaled state then signal
++    if (Mutex.compare_exchange_strong(Expected, Desired)) {
++      if (All) {
++        os_sync_wake_by_address_all(&Mutex, sizeof(Mutex), OS_SYNC_WAKE_BY_ADDRESS_NONE);
++      } else {
++        os_sync_wake_by_address_any(&Mutex, sizeof(Mutex), OS_SYNC_WAKE_BY_ADDRESS_NONE);
++      }
++    }
++  }
++};
++#elif !defined(_WIN32)
+ class InterruptableConditionVariable final {
+ public:
+   bool Wait(struct timespec* Timeout = nullptr) {
+diff --git a/FEXCore/include/FEXCore/Utils/PrctlUtils.h b/FEXCore/include/FEXCore/Utils/PrctlUtils.h
+index f0211fc..c6e6d2d 100644
+--- a/FEXCore/include/FEXCore/Utils/PrctlUtils.h
++++ b/FEXCore/include/FEXCore/Utils/PrctlUtils.h
+@@ -3,7 +3,14 @@
+ 
+ #ifndef _WIN32
+ 
++#ifdef __APPLE__
++// No prctl on iOS; the constants below keep shared code compiling and every call fails
++inline int prctl(int, ...) {
++  return -1;
++}
++#else
+ #include <sys/prctl.h>
++#endif
+ 
+ #ifndef PR_SET_VMA
+ #define PR_SET_VMA 0x53564d41
+diff --git a/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h b/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h
+index 9616a6e..613244e 100644
+--- a/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h
++++ b/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h
+@@ -8,8 +8,10 @@
+ #include <mutex>
+ #include <optional>
+ #include <signal.h>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <sys/syscall.h>
++#elif defined(__APPLE__)
++#include <pthread.h>
+ #endif
+ #include <unistd.h>
+ #include <variant>
+@@ -158,7 +160,14 @@ public:
+   explicit ScopedSignalMasker(uint64_t Mask)
+     : OriginalMask(0) {
+     // Mask all signals, storing the original incoming mask
++#if defined(__linux__)
+     ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, &*OriginalMask, sizeof(*OriginalMask));
++#elif defined(__APPLE__)
++    // Darwin's sigset_t holds signals 1-32 as bits 0-31, like the low half of Linux's
++    sigset_t NewMask = static_cast<sigset_t>(Mask), OldMask {};
++    pthread_sigmask(SIG_SETMASK, &NewMask, &OldMask);
++    OriginalMask = OldMask;
++#endif
+   }
+ 
+   // Move-only type
+@@ -171,7 +180,12 @@ public:
+ 
+   ~ScopedSignalMasker() {
+     if (OriginalMask) {
++#if defined(__linux__)
+       ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &OriginalMask, nullptr, sizeof(*OriginalMask));
++#elif defined(__APPLE__)
++      sigset_t OldMask = static_cast<sigset_t>(*OriginalMask);
++      pthread_sigmask(SIG_SETMASK, &OldMask, nullptr);
++#endif
+     }
+   }
+ private:
+diff --git a/FEXCore/include/FEXCore/Utils/SpinWaitLock.h b/FEXCore/include/FEXCore/Utils/SpinWaitLock.h
+index af59a6e..90e7af7 100644
+--- a/FEXCore/include/FEXCore/Utils/SpinWaitLock.h
++++ b/FEXCore/include/FEXCore/Utils/SpinWaitLock.h
+@@ -101,6 +101,13 @@ static inline uint64_t LoadExclusive(uint64_t* Futex) {
+   return Result;
+ }
+ 
++#ifdef __APPLE__
++// size_t is unsigned long here, a distinct type from uint64_t (unsigned long long)
++static inline unsigned long LoadExclusive(unsigned long* Futex) {
++  return LoadExclusive(reinterpret_cast<uint64_t*>(Futex));
++}
++#endif
++
+ static inline uint8_t WFELoadAtomic(uint8_t* Futex) {
+   uint8_t Result {};
+   __asm volatile(SPINLOOP_8BIT : [Result] "=r"(Result), [Futex] "+r"(Futex)::"memory");
+@@ -129,6 +136,12 @@ static inline uint64_t WFELoadAtomic(uint64_t* Futex) {
+   return Result;
+ }
+ 
++#ifdef __APPLE__
++static inline unsigned long WFELoadAtomic(unsigned long* Futex) {
++  return WFELoadAtomic(reinterpret_cast<uint64_t*>(Futex));
++}
++#endif
++
+ template<typename Pred, typename T>
+ static inline void WaitPred(T* Futex, T ComparisonValue) {
+   auto AtomicFutex = std::atomic_ref<T>(*Futex);
+diff --git a/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h b/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
+index bf1bd2b..13eaa82 100644
+--- a/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
++++ b/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h
+@@ -4,7 +4,9 @@
+ #include <cstdint>
+ #include <limits.h>
+ 
+-#if !defined(_WIN32)
++#if defined(__APPLE__)
++#include <os/os_sync_wait_on_address.h>
++#elif !defined(_WIN32)
+ #include <linux/futex.h> /* Definition of FUTEX_* constants */
+ #include <sys/syscall.h> /* Definition of SYS_* constants */
+ #include <unistd.h>
+@@ -271,7 +273,25 @@ public:
+ 
+ private:
+ 
+-#if !defined(_WIN32)
++#if defined(__APPLE__)
++  // Darwin has no wait bitsets and waits on whole 32-bit words: readers and
++  // writers share the word, so every wake wakes everyone and each re-checks.
++  void FutexWaitForWriteAvailable(uint32_t Expected) {
++    os_sync_wait_on_address(&Futex, Expected, sizeof(Futex), OS_SYNC_WAIT_ON_ADDRESS_NONE);
++  }
++
++  void FutexWaitForReadAvailable(uint32_t Expected) {
++    os_sync_wait_on_address(&Futex, Expected, sizeof(Futex), OS_SYNC_WAIT_ON_ADDRESS_NONE);
++  }
++
++  void FutexWakeWriter() {
++    os_sync_wake_by_address_all(&Futex, sizeof(Futex), OS_SYNC_WAKE_BY_ADDRESS_NONE);
++  }
++
++  void FutexWakeReaders() {
++    os_sync_wake_by_address_all(&Futex, sizeof(Futex), OS_SYNC_WAKE_BY_ADDRESS_NONE);
++  }
++#elif !defined(_WIN32)
+   void FutexWaitForWriteAvailable(uint32_t Expected) {
+     ::syscall(SYS_futex, &Futex, FUTEX_PRIVATE_FLAG | FUTEX_WAIT_BITSET, Expected, nullptr, nullptr, FUTEX_BITSET_WAIT_WRITERS);
+   }
+diff --git a/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h b/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h
+index b00cc58..4aaca28 100644
+--- a/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h
++++ b/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h
+@@ -9,9 +9,12 @@
+ #include <fcntl.h>
+ #include <memory_resource>
+ #include <string_view>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <linux/limits.h>
+ #include <sys/sendfile.h>
++#elif defined(__APPLE__)
++#include <limits.h>
++#include <copyfile.h>
+ #else
+ #include <filesystem>
+ #endif
+@@ -56,7 +59,7 @@ inline std::error_code RenameFile(const fextl::string& From, const fextl::string
+   return rename(From.c_str(), To.c_str()) == 0 ? std::error_code {} : std::make_error_code(std::errc::io_error);
+ }
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32)
+ inline bool ExistsAt(int FD, const fextl::string& Path) {
+   return faccessat(FD, Path.c_str(), F_OK, 0) == 0;
+ }
+@@ -216,7 +219,11 @@ inline bool CopyFile(const fextl::string& From, const fextl::string& To, CopyOpt
+       close(SourceFD);
+       return false;
+     }
++#if defined(__APPLE__)
++    bool Result = fcopyfile(SourceFD, DestinationFD, 0, COPYFILE_ALL) == 0;
++#else
+     bool Result = sendfile(DestinationFD, SourceFD, nullptr, buf.st_size) == buf.st_size;
++#endif
+     close(DestinationFD);
+     close(SourceFD);
+     return Result;
+diff --git a/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h b/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
+index dae3d3b..c71e48c 100644
+--- a/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
++++ b/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
+@@ -7,8 +7,11 @@
+ #include <sched.h>
+ #include <signal.h>
+ #include <stdio.h>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <syscall.h>
++#elif defined(__APPLE__)
++#include <pthread.h>
++#include <stdlib.h>
+ #else
+ #include <processthreadsapi.h>
+ #endif
+@@ -16,9 +19,14 @@
+ #include <unistd.h>
+ 
+ namespace FHU::Syscalls {
+-#ifndef MAP_FIXED_NOREPLACE
++#if !defined(MAP_FIXED_NOREPLACE)
++#ifdef __APPLE__
++// MAP_FIXED_NOREPLACE doesn't exist on macOS; define to 0 so it's a no-op flag
++#define MAP_FIXED_NOREPLACE 0
++#else
+ #define MAP_FIXED_NOREPLACE 0x100000
+ #endif
++#endif
+ 
+ #ifndef SEM_STAT_ANY
+ #define SEM_STAT_ANY 20
+@@ -51,9 +59,8 @@ namespace FHU::Syscalls {
+ #define SYS_pidfd_open 434
+ #endif
+ 
+-#ifndef _WIN32
++#if defined(__linux__)
+ inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
+-  // Third argument is unused
+ #if defined(HAS_SYSCALL_GETCPU) && HAS_SYSCALL_GETCPU
+   return ::getcpu(cpu, node);
+ #else
+@@ -100,6 +107,32 @@ inline int32_t pidfd_open(pid_t pid, unsigned int flags) {
+ inline ssize_t getrandom(void* buf, size_t buflen, unsigned int flags) {
+   return ::syscall(SYS_getrandom, buf, buflen, flags);
+ }
++#elif defined(__APPLE__)
++inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
++  if (cpu) {
++    *cpu = 0;
++  }
++  if (node) {
++    *node = 0;
++  }
++  return 0;
++}
++
++inline int32_t gettid() {
++  uint64_t tid;
++  pthread_threadid_np(nullptr, &tid);
++  return static_cast<int32_t>(tid);
++}
++
++inline int32_t tgkill(pid_t tgid, pid_t tid, int sig) {
++  // Only signals to the calling thread are supported
++  return pthread_kill(pthread_self(), sig);
++}
++
++inline ssize_t getrandom(void* buf, size_t buflen, unsigned int flags) {
++  arc4random_buf(buf, buflen);
++  return buflen;
++}
+ #else
+ 
+ inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
