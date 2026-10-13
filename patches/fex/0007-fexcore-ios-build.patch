@@ -11,7 +11,7 @@ are unchanged.
 - Linux-only headers and syscalls get Darwin equivalents: gettid via
   pthread_threadid_np, signal masks via pthread_sigmask, prctl as a stub
   that fails, file copies via fcopyfile, no malloc.h or transparent huge
-  pages.
+  pages, random bytes via arc4random_buf, directory walks via readdir.
 - Futex waits (InterruptableConditionVariable, WritePriorityMutex) use
   os_sync_wait_on_address, public since iOS 17.4.
 - The allocator uses the system mmap; FEX's 64-bit allocator, which reserves
@@ -219,6 +219,85 @@ index 18495ce..09db891 100644
  MMAP_Hook mmap {::mmap};
  MUNMAP_Hook munmap {::munmap};
  
+diff --git a/FEXCore/Source/Utils/FileUtils.cpp b/FEXCore/Source/Utils/FileUtils.cpp
+index d3e62ca..13365ea 100644
+--- a/FEXCore/Source/Utils/FileUtils.cpp
++++ b/FEXCore/Source/Utils/FileUtils.cpp
+@@ -24,7 +24,73 @@ extern "C" NTSTATUS RtlUnicodeToUTF8N(OUT PCHAR UTF8StringDestination, IN ULONG
+ #endif
+ 
+ namespace FEXCore::FileUtils {
+-#ifndef _WIN32
++#if defined(__APPLE__)
++// Darwin has no getdents64; the same walks go through fdopendir/readdir.
++static inline bool unlinkat(int fd, const char* path, bool dir) {
++  if (::unlinkat(fd, path, dir ? AT_REMOVEDIR : 0) == -1) {
++    return errno == ENOENT;
++  }
++  return true;
++}
++
++static DIR* OpenDirectoryAt(int parent_fd, const char* Directory) {
++  int dir_fd = ::openat(parent_fd, Directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++  if (dir_fd == -1) {
++    return nullptr;
++  }
++  DIR* Dir = ::fdopendir(dir_fd);
++  if (!Dir) {
++    close(dir_fd);
++  }
++  return Dir;
++}
++
++static bool RecursiveRemoveDirectory(int parent_fd, const char* Directory) {
++  DIR* Dir = OpenDirectoryAt(parent_fd, Directory);
++  if (!Dir) {
++    // Probably raced something. Non-error.
++    return errno == ENOENT;
++  }
++
++  bool Result = true;
++  while (auto* Entry = ::readdir(Dir)) {
++    std::string_view Name = Entry->d_name;
++    if (Name == "." || Name == "..") {
++      continue;
++    }
++    const bool IsDir = Entry->d_type == DT_DIR;
++    if ((IsDir && !RecursiveRemoveDirectory(dirfd(Dir), Entry->d_name)) || !unlinkat(dirfd(Dir), Entry->d_name, IsDir)) {
++      LogMan::Msg::IFmt("Failed to remove file: {}", Name);
++      Result = false;
++      break;
++    }
++  }
++  ::closedir(Dir);
++  return Result;
++}
++
++FEX_DEFAULT_VISIBILITY bool RecursiveRemoveDirectory(const fextl::string& Directory) {
++  return RecursiveRemoveDirectory(AT_FDCWD, Directory.c_str()) && unlinkat(AT_FDCWD, Directory.c_str(), true);
++}
++
++FEX_DEFAULT_VISIBILITY void WalkDirectory(std::string_view Directory,
++                                          fextl::move_only_function<void(std::string_view name, bool is_dir, const void* user_data)> Callback,
++                                          const void* user_data) {
++  DIR* Dir = OpenDirectoryAt(AT_FDCWD, fextl::string(Directory).c_str());
++  if (!Dir) {
++    return;
++  }
++  while (auto* Entry = ::readdir(Dir)) {
++    std::string_view Name = Entry->d_name;
++    if (Name == "." || Name == "..") {
++      continue;
++    }
++    Callback(Name, Entry->d_type == DT_DIR, user_data);
++  }
++  ::closedir(Dir);
++}
++
++#elif !defined(_WIN32)
+ static inline bool unlinkat(int fd, const char* path, bool dir) {
+   if (::unlinkat(fd, path, dir ? AT_REMOVEDIR : 0) == -1) {
+     return errno == ENOENT;
 diff --git a/FEXCore/Source/Utils/Profiler.cpp b/FEXCore/Source/Utils/Profiler.cpp
 index 67fe0ca..6761961 100644
 --- a/FEXCore/Source/Utils/Profiler.cpp
@@ -525,10 +604,10 @@ index b00cc58..4aaca28 100644
      close(SourceFD);
      return Result;
 diff --git a/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h b/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
-index dae3d3b..9ba25a5 100644
+index dae3d3b..c71e48c 100644
 --- a/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
 +++ b/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
-@@ -7,8 +7,10 @@
+@@ -7,8 +7,11 @@
  #include <sched.h>
  #include <signal.h>
  #include <stdio.h>
@@ -537,10 +616,11 @@ index dae3d3b..9ba25a5 100644
  #include <syscall.h>
 +#elif defined(__APPLE__)
 +#include <pthread.h>
++#include <stdlib.h>
  #else
  #include <processthreadsapi.h>
  #endif
-@@ -16,9 +18,14 @@
+@@ -16,9 +19,14 @@
  #include <unistd.h>
  
  namespace FHU::Syscalls {
@@ -556,7 +636,7 @@ index dae3d3b..9ba25a5 100644
  
  #ifndef SEM_STAT_ANY
  #define SEM_STAT_ANY 20
-@@ -51,9 +58,8 @@ namespace FHU::Syscalls {
+@@ -51,9 +59,8 @@ namespace FHU::Syscalls {
  #define SYS_pidfd_open 434
  #endif
  
@@ -567,7 +647,7 @@ index dae3d3b..9ba25a5 100644
  #if defined(HAS_SYSCALL_GETCPU) && HAS_SYSCALL_GETCPU
    return ::getcpu(cpu, node);
  #else
-@@ -100,6 +106,27 @@ inline int32_t pidfd_open(pid_t pid, unsigned int flags) {
+@@ -100,6 +107,32 @@ inline int32_t pidfd_open(pid_t pid, unsigned int flags) {
  inline ssize_t getrandom(void* buf, size_t buflen, unsigned int flags) {
    return ::syscall(SYS_getrandom, buf, buflen, flags);
  }
@@ -591,6 +671,11 @@ index dae3d3b..9ba25a5 100644
 +inline int32_t tgkill(pid_t tgid, pid_t tid, int sig) {
 +  // Only signals to the calling thread are supported
 +  return pthread_kill(pthread_self(), sig);
++}
++
++inline ssize_t getrandom(void* buf, size_t buflen, unsigned int flags) {
++  arc4random_buf(buf, buflen);
++  return buflen;
 +}
  #else
  
