@@ -3,7 +3,9 @@ FEXCore on macOS, and cache generation with NoJIT (FEX 14c9268, on top of 0009)
 macOS runs the same Darwin code as iOS (0007) and allows the same test
 without an iPad, so the CMake checks accept CMAKE_SYSTEM_NAME Darwin too.
 The allocator shim tools link (JemallocDummy) uses <malloc/malloc.h>,
-posix_memalign and malloc_size on Apple.
+posix_memalign (also for aligned_alloc, which on Darwin
+rejects sizes that are not a multiple of the alignment) and malloc_size on
+Apple.
 
 With NoJIT=1 a process can now also generate a cache: CompileBlock only
 stops on a missing block while the guest runs, not while compiling blocks
@@ -74,7 +76,7 @@ index 58223f3..0fb29d8 100644
    EmitDispatcher();
  
 diff --git a/FEXCore/Source/Utils/AllocatorHooks.cpp b/FEXCore/Source/Utils/AllocatorHooks.cpp
-index e85f09a..749c33f 100644
+index e85f09a..9e75bc1 100644
 --- a/FEXCore/Source/Utils/AllocatorHooks.cpp
 +++ b/FEXCore/Source/Utils/AllocatorHooks.cpp
 @@ -13,7 +13,11 @@
@@ -102,7 +104,7 @@ index e85f09a..749c33f 100644
  }
  void* valloc(size_t size) {
    return ::valloc(size);
-@@ -226,7 +235,11 @@ void free(void* ptr) {
+@@ -226,10 +235,21 @@ void free(void* ptr) {
    return ::free(ptr);
  }
  size_t malloc_usable_size(void* ptr) {
@@ -113,4 +115,14 @@ index e85f09a..749c33f 100644
 +#endif
  }
  void* aligned_alloc(size_t a, size_t s) {
++#ifdef __APPLE__
++  // Darwin's aligned_alloc returns null unless the size is a multiple of the
++  // alignment, which fextl's allocations do not guarantee.
++  void* r {};
++  return ::posix_memalign(&r, a < sizeof(void*) ? sizeof(void*) : a, s) == 0 ? r : nullptr;
++#else
    return ::aligned_alloc(a, s);
++#endif
+ }
+ void aligned_free(void* ptr) {
+   return ::free(ptr);
