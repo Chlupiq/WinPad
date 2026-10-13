@@ -327,7 +327,10 @@ int WinPadProbeMain(int argc, char** argv) {
     CTX->FlushAndCloseCodeMap();
   }
   const auto R12 = State.gregs[FEXCore::X86State::REG_R12];
-  printf("guest wrote \"%s\", r12=%llu\n", Output == "ok\n" ? "ok\\n" : Output.c_str(), static_cast<unsigned long long>(R12));
+  // r13: the guest's check that ran last (guest.S), 6 when all passed
+  const auto R13 = State.gregs[FEXCore::X86State::REG_R13];
+  printf("guest wrote \"%s\", r12=%llu, r13=%llu\n", Output == "ok\n" ? "ok\\n" : Output.c_str(),
+         static_cast<unsigned long long>(R12), static_cast<unsigned long long>(R13));
   Cache.reset();
   CTX->DestroyThread(Thread);
   return Output == "ok\n" ? 0 : 1;
