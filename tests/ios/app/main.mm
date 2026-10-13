@@ -56,6 +56,8 @@ NSString* ReadLog() {
 - (void)runProbe {
   NSString* Image = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"probe-aot.dylib"];
   // FEX and the probe write with stdio; send both streams to the log file.
+  // The log also goes to the original stderr at the end: Xcode's console.
+  const int Console = dup(fileno(stderr));
   freopen(LogPath().fileSystemRepresentation, "w", stdout);
   dup2(fileno(stdout), fileno(stderr));
   setvbuf(stdout, nullptr, _IONBF, 0);
@@ -68,6 +70,8 @@ NSString* ReadLog() {
   NSString* Summary = Status == 0 ? @"OK: the x86 program ran from the AOT image without a JIT.\n\n" :
                                     [NSString stringWithFormat:@"FAILED (exit %d)\n\n", Status];
   NSString* Log = ReadLog();
+  NSData* LogData = [[Summary stringByAppendingString:Log] dataUsingEncoding:NSUTF8StringEncoding];
+  write(Console, LogData.bytes, LogData.length);
   dispatch_async(dispatch_get_main_queue(), ^{
     self.text.text = [Summary stringByAppendingString:Log];
   });

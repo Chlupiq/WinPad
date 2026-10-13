@@ -102,6 +102,16 @@ jobs:
           name: WinPadProbe-ipa
           path: ${{ runner.temp }}/ipa/WinPadProbe.ipa
           if-no-files-found: error
+      - name: iPad test app as an Xcode project
+        run: |
+          brew install xcodegen
+          sh tests/ios/build-xcode.sh "$RUNNER_TEMP/fex-ios-app" "$RUNNER_TEMP/ipa" "$RUNNER_TEMP/xcode"
+      - name: Upload Xcode project
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinPadProbe-xcode
+          path: ${{ runner.temp }}/xcode/WinPadProbe-xcode
+          if-no-files-found: error
 
   fexcore-ios:
     runs-on: macos-15
