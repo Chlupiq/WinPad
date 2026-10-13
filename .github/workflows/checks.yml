@@ -43,7 +43,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/fex-build
-          key: fex-build-${{ runner.arch }}-${{ hashFiles('tests/fex-cache/fex-commit', 'tests/fex-cache/build-fex.sh', 'patches/fex/*.patch') }}
+          key: fex-build-${{ runner.arch }}-${{ hashFiles('tests/fex-cache/fex-commit', 'tests/fex-cache/build-fex.sh', 'tests/fex-cache/fetch-fex.sh', 'patches/fex/*.patch') }}
       - name: Build FEX and generate a code cache
         env:
           WORK_DIR: ${{ runner.temp }}/fex-work
@@ -64,3 +64,12 @@ jobs:
             ${{ runner.temp }}/fex-work/aot.so
             ${{ runner.temp }}/fex-work/home/.cache/fex-emu
           if-no-files-found: warn
+
+  fexcore-ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install ninja
+      - name: Build FEXCore for iOS
+        run: sh tests/ios/build-fexcore.sh "$RUNNER_TEMP/fex" "$RUNNER_TEMP/fex-ios"
