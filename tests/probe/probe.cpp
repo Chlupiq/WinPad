@@ -193,7 +193,9 @@ int Usage() {
 }
 } // namespace
 
-int main(int argc, char** argv) {
+// The iOS test app (tests/ios/app) links this file with WINPAD_PROBE_LIBRARY
+// and calls WinPadProbeMain itself.
+int WinPadProbeMain(int argc, char** argv) {
   if (argc < 3) {
     return Usage();
   }
@@ -330,3 +332,9 @@ int main(int argc, char** argv) {
   CTX->DestroyThread(Thread);
   return Output == "ok\n" ? 0 : 1;
 }
+
+#ifndef WINPAD_PROBE_LIBRARY
+int main(int argc, char** argv) {
+  return WinPadProbeMain(argc, argv);
+}
+#endif

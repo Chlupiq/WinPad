@@ -11,6 +11,18 @@ add_custom_command(
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/guest.o ${CMAKE_CURRENT_SOURCE_DIR}/elf2h.py
   VERBATIM)
 
-add_executable(winpad-probe probe.cpp ${CMAKE_CURRENT_BINARY_DIR}/guest.h)
-target_include_directories(winpad-probe PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(winpad-probe PRIVATE FEXCore FEXCore_Base JemallocDummy ${CMAKE_DL_LIBS})
+if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # The iPad test app's executable (tests/ios/app); tests/ios/build-app.sh
+  # puts it in an app bundle.
+  enable_language(OBJCXX)
+  set(app ${CMAKE_CURRENT_SOURCE_DIR}/../ios/app)
+  add_executable(WinPadProbe ${app}/main.mm probe.cpp ${CMAKE_CURRENT_BINARY_DIR}/guest.h)
+  target_compile_definitions(WinPadProbe PRIVATE WINPAD_PROBE_LIBRARY)
+  target_compile_options(WinPadProbe PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+  target_include_directories(WinPadProbe PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(WinPadProbe PRIVATE FEXCore FEXCore_Base JemallocDummy "-framework UIKit" "-framework Foundation")
+else()
+  add_executable(winpad-probe probe.cpp ${CMAKE_CURRENT_BINARY_DIR}/guest.h)
+  target_include_directories(winpad-probe PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+  target_link_libraries(winpad-probe PRIVATE FEXCore FEXCore_Base JemallocDummy ${CMAKE_DL_LIBS})
+endif()
