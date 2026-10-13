@@ -94,6 +94,14 @@ jobs:
           name: probe-macos
           path: ${{ runner.temp }}/probe
           if-no-files-found: warn
+      - name: iPad test app as an unsigned IPA
+        run: sh tests/ios/build-app.sh "$RUNNER_TEMP/fex" "$RUNNER_TEMP/fex-ios-app" "$RUNNER_TEMP/ipa" "$RUNNER_TEMP/probe"
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinPadProbe-ipa
+          path: ${{ runner.temp }}/ipa/WinPadProbe.ipa
+          if-no-files-found: error
 
   fexcore-ios:
     runs-on: macos-15
