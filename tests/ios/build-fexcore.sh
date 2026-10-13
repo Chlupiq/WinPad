@@ -18,5 +18,6 @@ cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DENABLE_LTO=False -DENABLE_ASSERTIONS=True -DBUILD_TESTING=False \
     -DBUILD_THUNKS=False -DBUILD_FEX_LINUX_TESTS=False -DBUILD_FEXCONFIG=False \
     -DENABLE_FEX_ALLOCATOR=False
-cmake --build "$build" --target FEXCore FEXCore_Base
+# -k 0: report every file that does not compile yet, not just the first
+cmake --build "$build" --target FEXCore FEXCore_Base -- -k 0
 find "$build" -name '*.a' | sort

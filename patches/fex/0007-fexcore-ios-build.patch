@@ -1,0 +1,288 @@
+FEXCore builds for iOS (FEX 14c9268, on top of 0006)
+
+WinPad's iPad test app links FEXCore as static libraries, as Madeira does
+(its fork willfaust/FEX, branch ios-port-2607, made the same kind of
+changes; the portable ones are taken from there). Linux and Windows builds
+are unchanged.
+
+- CMake accepts CMAKE_SYSTEM_NAME=iOS and then builds only FEXHeaderUtils,
+  CodeEmitter and FEXCore (no Linux frontend, no FEX allocators, no
+  pthread library to link).
+- Linux-only headers and syscalls get Darwin equivalents: gettid via
+  pthread_threadid_np, signal masks via pthread_sigmask, prctl as a stub
+  that fails, file copies via fcopyfile.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 71d8a73..0cdaa03 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -61,9 +61,9 @@ if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+   message(FATAL_ERROR "Unsupported pointer size ${CMAKE_SIZEOF_VOID_P}."
+     " FEX only supports 64-bit (8-byte pointer) systems."
+     " If you believe this is in error, file an issue.")
+-elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
++elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "iOS"))
+   message(FATAL_ERROR "Unsupported system type ${CMAKE_SYSTEM_NAME}."
+-    " FEX only supports Linux and Windows."
++    " FEX only supports Linux and Windows (and FEXCore on iOS)."
+     " If you believe this is in error, file an issue.")
+ endif()
+ 
+@@ -77,6 +77,11 @@ elseif (MINGW)
+   message(STATUS "Building for MinGW")
+   set(ENABLE_FEX_ALLOCATOR TRUE)
+   set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
++elseif (APPLE)
++  # iOS: only FEXCore is built, for an app to link; the system allocator is used
++  message(STATUS "Building FEXCore for iOS")
++  set(ENABLE_FEX_ALLOCATOR FALSE)
++  set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
+ else ()
+   message(STATUS "Clang version ${CMAKE_CXX_COMPILER_VERSION}")
+   set(CLANG_MINIMUM_VERSION 13.0)
+@@ -278,7 +283,11 @@ if (ENABLE_COMPILE_TIME_TRACE)
+   link_libraries(-ftime-trace)
+ endif()
+ 
+-set(PTHREAD_LIB pthread)
++if (APPLE)
++  set(PTHREAD_LIB "")
++else()
++  set(PTHREAD_LIB pthread)
++endif()
+ 
+ if (USE_LINKER)
+   message(STATUS "Overriding linker to: ${USE_LINKER}")
+@@ -330,7 +339,7 @@ if (ENABLE_JEMALLOC_GLIBC_ALLOC)
+   # Required for thunks to work.
+   # All host native libraries will use this allocator, while *most* other FEX internal allocations will use the other jemalloc allocator.
+   add_subdirectory(External/jemalloc_glibc/)
+-elseif (NOT MINGW)
++elseif (NOT MINGW AND NOT APPLE)
+   message(STATUS
+     " jemalloc glibc allocator disabled!\n"
+     " This is not a recommended configuration!\n"
+@@ -341,7 +350,7 @@ endif()
+ if (ENABLE_FEX_ALLOCATOR)
+   # The rpmalloc subproject that all FEXCore fextl objects allocate through.
+   add_subdirectory(External/rpmalloc/)
+-elseif (NOT MINGW)
++elseif (NOT MINGW AND NOT APPLE)
+   message (STATUS
+     " FEX allocator is disabled!\n"
+     " This is not a recommended configuration!\n"
+@@ -631,6 +640,7 @@ add_subdirectory(FEXHeaderUtils/)
+ add_subdirectory(CodeEmitter/)
+ add_subdirectory(FEXCore/)
+ 
++if (NOT APPLE)
+ if (ARCHITECTURE_arm64 AND NOT MINGW AND NOT BUILD_STEAM_SUPPORT)
+   # Binfmt_misc files must be installed prior to Source/ installs
+   add_subdirectory(Data/binfmts/)
+@@ -641,6 +651,7 @@ add_subdirectory(Source/)
+ if (NOT BUILD_STEAM_SUPPORT)
+   add_subdirectory(Data/AppConfig/)
+ endif()
++endif()
+ 
+ # Install the ThunksDB file
+ file(GLOB CONFIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Data/*.json)
+diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
+index dd8e4aa..76c38f0 100644
+--- a/FEXCore/Source/CMakeLists.txt
++++ b/FEXCore/Source/CMakeLists.txt
+@@ -10,7 +10,7 @@ set(FEXCORE_BASE_SRCS
+   Utils/SpinWaitLock.cpp
+   Utils/WildcardMatcher.cpp)
+ 
+-if (NOT MINGW)
++if (NOT MINGW AND NOT APPLE)
+   list(APPEND FEXCORE_BASE_SRCS
+     Utils/Allocator/64BitAllocator.cpp)
+ endif()
+diff --git a/FEXCore/Source/Utils/Profiler.cpp b/FEXCore/Source/Utils/Profiler.cpp
+index 67fe0ca..6761961 100644
+--- a/FEXCore/Source/Utils/Profiler.cpp
++++ b/FEXCore/Source/Utils/Profiler.cpp
+@@ -1,7 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ #include <cstdint>
+ #include <fcntl.h>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <linux/magic.h>
+ #include <sys/stat.h>
+ #include <sys/vfs.h>
+diff --git a/FEXCore/include/FEXCore/Utils/PrctlUtils.h b/FEXCore/include/FEXCore/Utils/PrctlUtils.h
+index f0211fc..c6e6d2d 100644
+--- a/FEXCore/include/FEXCore/Utils/PrctlUtils.h
++++ b/FEXCore/include/FEXCore/Utils/PrctlUtils.h
+@@ -3,7 +3,14 @@
+ 
+ #ifndef _WIN32
+ 
++#ifdef __APPLE__
++// No prctl on iOS; the constants below keep shared code compiling and every call fails
++inline int prctl(int, ...) {
++  return -1;
++}
++#else
+ #include <sys/prctl.h>
++#endif
+ 
+ #ifndef PR_SET_VMA
+ #define PR_SET_VMA 0x53564d41
+diff --git a/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h b/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h
+index 9616a6e..613244e 100644
+--- a/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h
++++ b/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h
+@@ -8,8 +8,10 @@
+ #include <mutex>
+ #include <optional>
+ #include <signal.h>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <sys/syscall.h>
++#elif defined(__APPLE__)
++#include <pthread.h>
+ #endif
+ #include <unistd.h>
+ #include <variant>
+@@ -158,7 +160,14 @@ public:
+   explicit ScopedSignalMasker(uint64_t Mask)
+     : OriginalMask(0) {
+     // Mask all signals, storing the original incoming mask
++#if defined(__linux__)
+     ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &Mask, &*OriginalMask, sizeof(*OriginalMask));
++#elif defined(__APPLE__)
++    // Darwin's sigset_t holds signals 1-32 as bits 0-31, like the low half of Linux's
++    sigset_t NewMask = static_cast<sigset_t>(Mask), OldMask {};
++    pthread_sigmask(SIG_SETMASK, &NewMask, &OldMask);
++    OriginalMask = OldMask;
++#endif
+   }
+ 
+   // Move-only type
+@@ -171,7 +180,12 @@ public:
+ 
+   ~ScopedSignalMasker() {
+     if (OriginalMask) {
++#if defined(__linux__)
+       ::syscall(SYS_rt_sigprocmask, SIG_SETMASK, &OriginalMask, nullptr, sizeof(*OriginalMask));
++#elif defined(__APPLE__)
++      sigset_t OldMask = static_cast<sigset_t>(*OriginalMask);
++      pthread_sigmask(SIG_SETMASK, &OldMask, nullptr);
++#endif
+     }
+   }
+ private:
+diff --git a/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h b/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h
+index b00cc58..4aaca28 100644
+--- a/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h
++++ b/FEXHeaderUtils/FEXHeaderUtils/Filesystem.h
+@@ -9,9 +9,12 @@
+ #include <fcntl.h>
+ #include <memory_resource>
+ #include <string_view>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <linux/limits.h>
+ #include <sys/sendfile.h>
++#elif defined(__APPLE__)
++#include <limits.h>
++#include <copyfile.h>
+ #else
+ #include <filesystem>
+ #endif
+@@ -56,7 +59,7 @@ inline std::error_code RenameFile(const fextl::string& From, const fextl::string
+   return rename(From.c_str(), To.c_str()) == 0 ? std::error_code {} : std::make_error_code(std::errc::io_error);
+ }
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32)
+ inline bool ExistsAt(int FD, const fextl::string& Path) {
+   return faccessat(FD, Path.c_str(), F_OK, 0) == 0;
+ }
+@@ -216,7 +219,11 @@ inline bool CopyFile(const fextl::string& From, const fextl::string& To, CopyOpt
+       close(SourceFD);
+       return false;
+     }
++#if defined(__APPLE__)
++    bool Result = fcopyfile(SourceFD, DestinationFD, 0, COPYFILE_ALL) == 0;
++#else
+     bool Result = sendfile(DestinationFD, SourceFD, nullptr, buf.st_size) == buf.st_size;
++#endif
+     close(DestinationFD);
+     close(SourceFD);
+     return Result;
+diff --git a/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h b/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
+index dae3d3b..9ba25a5 100644
+--- a/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
++++ b/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h
+@@ -7,8 +7,10 @@
+ #include <sched.h>
+ #include <signal.h>
+ #include <stdio.h>
+-#ifndef _WIN32
++#if defined(__linux__)
+ #include <syscall.h>
++#elif defined(__APPLE__)
++#include <pthread.h>
+ #else
+ #include <processthreadsapi.h>
+ #endif
+@@ -16,9 +18,14 @@
+ #include <unistd.h>
+ 
+ namespace FHU::Syscalls {
+-#ifndef MAP_FIXED_NOREPLACE
++#if !defined(MAP_FIXED_NOREPLACE)
++#ifdef __APPLE__
++// MAP_FIXED_NOREPLACE doesn't exist on macOS; define to 0 so it's a no-op flag
++#define MAP_FIXED_NOREPLACE 0
++#else
+ #define MAP_FIXED_NOREPLACE 0x100000
+ #endif
++#endif
+ 
+ #ifndef SEM_STAT_ANY
+ #define SEM_STAT_ANY 20
+@@ -51,9 +58,8 @@ namespace FHU::Syscalls {
+ #define SYS_pidfd_open 434
+ #endif
+ 
+-#ifndef _WIN32
++#if defined(__linux__)
+ inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
+-  // Third argument is unused
+ #if defined(HAS_SYSCALL_GETCPU) && HAS_SYSCALL_GETCPU
+   return ::getcpu(cpu, node);
+ #else
+@@ -100,6 +106,27 @@ inline int32_t pidfd_open(pid_t pid, unsigned int flags) {
+ inline ssize_t getrandom(void* buf, size_t buflen, unsigned int flags) {
+   return ::syscall(SYS_getrandom, buf, buflen, flags);
+ }
++#elif defined(__APPLE__)
++inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
++  if (cpu) {
++    *cpu = 0;
++  }
++  if (node) {
++    *node = 0;
++  }
++  return 0;
++}
++
++inline int32_t gettid() {
++  uint64_t tid;
++  pthread_threadid_np(nullptr, &tid);
++  return static_cast<int32_t>(tid);
++}
++
++inline int32_t tgkill(pid_t tgid, pid_t tid, int sig) {
++  // Only signals to the calling thread are supported
++  return pthread_kill(pthread_self(), sig);
++}
+ #else
+ 
+ inline int32_t getcpu(uint32_t* cpu, uint32_t* node) {
