@@ -1,0 +1,26 @@
+Build hook for WinPad's probe frontend (FEX 14c9268, on top of 0008)
+
+tests/probe is a minimal frontend that links FEXCore directly, without
+FEX's Linux frontend: it maps one x86-64 test program, records its code
+map, generates an AOT cache and runs it from a linked AOT image with
+NoJIT. The iOS test app uses FEXCore the same way. Setting the CMake
+cache variable WINPAD_PROBE_DIR to that directory builds it inside FEX's
+tree, so it gets FEXCore's include paths and generated headers.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0cdaa03..11eaf89 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -640,6 +640,12 @@ add_subdirectory(FEXHeaderUtils/)
+ add_subdirectory(CodeEmitter/)
+ add_subdirectory(FEXCore/)
+ 
++# WinPad: a frontend kept outside this tree (its tests/probe) that links FEXCore
++set(WINPAD_PROBE_DIR "" CACHE PATH "WinPad probe frontend source directory")
++if (WINPAD_PROBE_DIR)
++  add_subdirectory(${WINPAD_PROBE_DIR} WinPadProbe)
++endif()
++
+ if (NOT APPLE)
+ if (ARCHITECTURE_arm64 AND NOT MINGW AND NOT BUILD_STEAM_SUPPORT)
+   # Binfmt_misc files must be installed prior to Source/ installs
