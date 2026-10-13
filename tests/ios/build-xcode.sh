@@ -1,117 +1,126 @@
 #!/bin/sh
 # Packs the iPad test app (tests/ios/app) as an Xcode project for a Mac with
-# Xcode: open WinPadProbe.xcodeproj, pick a team, Run on the iPad. Xcode signs
-# the app with the user's account and shows the probe's log in its console.
+# Xcode: open WinPadProbe.xcodeproj, pick a team, Run on the iPad or on an
+# iPad simulator (Apple Silicon Macs). Xcode signs the app with the user's
+# account and shows the probe's log in its console.
 #
-# Everything that needs FEX's sources is prebuilt: the probe and FEXCore as
-# static libraries (from build-app.sh's build directory) and the AOT image
-# (probe-aot.dylib from build-app.sh's output). Only main.mm is compiled.
-# The project is generated with XcodeGen and then checked with xcodebuild.
+# Everything that needs FEX's sources is prebuilt, once for the device
+# (iphoneos) and once for the simulator (iphonesimulator): the probe and
+# FEXCore as static libraries in lib/<platform>/ and the AOT image in
+# Frameworks/<platform>/probe-aot.dylib. Only main.mm is compiled. The device
+# parts come from build-app.sh; this script builds the simulator ones.
+# The project is generated with XcodeGen, built for both platforms with
+# xcodebuild, and the simulator build is run on an iPad simulator.
 #
-# Usage: build-xcode.sh APP_BUILD_DIR APP_OUT_DIR OUT_DIR
+# Usage: build-xcode.sh SRC_DIR APP_BUILD_DIR APP_OUT_DIR SIM_BUILD_DIR PROBE_WORK_DIR OUT_DIR
 #   APP_BUILD_DIR, APP_OUT_DIR: build-app.sh's BUILD_DIR and OUT_DIR
-# Needs: Xcode, ninja, xcodegen, python3. Writes OUT_DIR/WinPadProbe-xcode.zip.
+#   PROBE_WORK_DIR: run-macos.sh's work directory (cache file, dispatcher.bin)
+# Needs: Xcode, cmake, ninja, xcodegen, python3. Writes OUT_DIR/WinPadProbe-xcode.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-build=$1
-app_out=$2
-out=$3
+root=$(cd "$here/../.." && pwd)
+src=$1
+build=$2
+app_out=$3
+sim_build=$4
+probe_work=$5
+out=$6
 min_ios=17.4
+bundle=com.chlupiq.winpad.probe
 proj="$out/WinPadProbe-xcode"
 rm -rf "${proj:?}"
-mkdir -p "$proj/lib" "$proj/Frameworks"
+mkdir -p "$proj/Frameworks/iphoneos" "$proj/Frameworks/iphonesimulator"
 
-# Libraries and flags from CMake's link of the app, in link order.
-ninja -C "$build" -t commands WinPadProbe | tail -n 1 >"$out/link-command.txt"
-python3 -I - "$build" "$out/link-command.txt" "$proj/lib" "$proj/ldflags.txt" <<'EOF'
-import os, shlex, shutil, sys
-build, command, libdir, flags_out = sys.argv[1:]
-# CMake's Ninja link rule is ": && <link> && :".
-args = shlex.split(max(open(command).read().split("&&"), key=len))
-flags, seen = [], set()
-i = 0
-while i < len(args):
-    a = args[i]
-    if a.endswith(".a"):
-        name = os.path.basename(a)
-        if name in seen:
-            sys.exit("two libraries named " + name)
-        seen.add(name)
-        shutil.copy(os.path.join(build, a), os.path.join(libdir, name))
-        flags.append("$(PROJECT_DIR)/lib/" + name)
-    elif a == "-framework":
-        flags += [a, args[i + 1]]
-        i += 1
-    elif a.startswith("-framework "):
-        flags += a.split()
-    elif a.startswith("-l"):
-        flags.append(a)
-    i += 1
-if not any(f.endswith("libWinPadProbeCore.a") for f in flags):
-    sys.exit("libWinPadProbeCore.a is not on the link line")
-open(flags_out, "w").write("\n".join(flags) + "\n")
-print("\n".join(flags))
-EOF
+# The simulator build: the same FEXCore and probe for arm64-apple-ios-simulator.
+cmake -S "$src" -B "$sim_build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT=iphonesimulator \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=$min_ios \
+    -DENABLE_LTO=False -DENABLE_ASSERTIONS=True -DBUILD_TESTING=False \
+    -DBUILD_THUNKS=False -DBUILD_FEX_LINUX_TESTS=False -DBUILD_FEXCONFIG=False \
+    -DENABLE_FEX_ALLOCATOR=False -DTUNE_CPU=none -DWINPAD_PROBE_DIR="$root/tests/probe"
+cmake --build "$sim_build" --target WinPadProbe
+
+# The AOT image for the simulator; the device one is build-app.sh's.
+cache=$(ls "$probe_work"/winpad-probe-guest-*)
+c2m="$root/tools/cache2macho"
+sim="$out/simulator"
+mkdir -p "$sim"
+python3 -I "$c2m/cache2macho.py" --ios-simulator $min_ios "$cache" "$sim/aot.o"
+python3 -I "$c2m/cache2macho.py" --dispatcher "$probe_work/dispatcher.bin" "$sim/dispatcher.s"
+xcrun --sdk iphonesimulator clang -target arm64-apple-ios$min_ios-simulator -c -o "$sim/dispatcher.o" "$sim/dispatcher.s"
+xcrun --sdk iphonesimulator clang -target arm64-apple-ios$min_ios-simulator -dynamiclib \
+    -install_name @rpath/probe-aot.dylib -o "$sim/probe-aot.dylib" "$sim/aot.o" "$sim/dispatcher.o"
+python3 -I "$c2m/check_linked.py" "$cache" "$sim/probe-aot.dylib"
+cp "$app_out/probe-aot.dylib" "$proj/Frameworks/iphoneos/"
+cp "$sim/probe-aot.dylib" "$proj/Frameworks/iphonesimulator/"
+
+# libs BUILD PLATFORM: copies the libraries of CMake's link of the app to
+# lib/PLATFORM and writes the link flags, in link order, to PLATFORM.flags.
+libs() {
+    mkdir -p "$proj/lib/$2"
+    ninja -C "$1" -t commands WinPadProbe | tail -n 1 >"$out/link-command-$2.txt"
+    python3 -I "$here/xcode/link-libs.py" "$1" "$out/link-command-$2.txt" "$proj/lib/$2" "$out/$2.flags"
+}
+libs "$build" iphoneos
+libs "$sim_build" iphonesimulator
+# One list of flags serves both platforms through $(PLATFORM_NAME).
+cmp "$out/iphoneos.flags" "$out/iphonesimulator.flags" ||
+    { echo "the device and simulator builds link different libraries" >&2; exit 1; }
 
 cp "$here/app/main.mm" "$proj/"
-cp "$app_out/probe-aot.dylib" "$proj/Frameworks/"
 # Xcode fills in the bundle id and executable name from the build settings.
 sed -e "s/\${WINPAD_IOS_MIN}/$min_ios/" \
     -e 's/<string>com.chlupiq.winpad.probe</<string>$(PRODUCT_BUNDLE_IDENTIFIER)</' \
     -e 's/<string>WinPadProbe<\/string>/<string>$(EXECUTABLE_NAME)<\/string>/' \
     "$here/app/Info.plist.in" >"$proj/Info.plist"
-# Xcode sets UIDeviceFamily from TARGETED_DEVICE_FAMILY.
+# Xcode sets UIDeviceFamily from TARGETED_DEVICE_FAMILY and the platform itself.
 plutil -remove UIDeviceFamily "$proj/Info.plist"
+plutil -remove CFBundleSupportedPlatforms "$proj/Info.plist"
 plutil -lint "$proj/Info.plist"
 
 {
-    cat <<EOF
-name: WinPadProbe
-options:
-  deploymentTarget:
-    iOS: "$min_ios"
-targets:
-  WinPadProbe:
-    type: application
-    platform: iOS
-    sources:
-      - main.mm
-    dependencies:
-      # The AOT image: copied into Frameworks/ and signed, never linked;
-      # the probe loads it with dlopen.
-      - framework: Frameworks/probe-aot.dylib
-        embed: true
-        link: false
-        codeSign: true
-    settings:
-      base:
-        INFOPLIST_FILE: Info.plist
-        PRODUCT_BUNDLE_IDENTIFIER: com.chlupiq.winpad.probe
-        TARGETED_DEVICE_FAMILY: "1,2"
-        SUPPORTED_PLATFORMS: iphoneos
-        CLANG_ENABLE_OBJC_ARC: YES
-        CODE_SIGN_STYLE: Automatic
-        LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
-        OTHER_LDFLAGS:
-EOF
-    sed 's/^/          - "/; s/$/"/' "$proj/ldflags.txt"
+    sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/xcode/project.yml.in"
+    sed 's/^/          - "/; s/$/"/' "$out/iphoneos.flags"
 } >"$proj/project.yml"
-rm "$proj/ldflags.txt"
 cp "$here/xcode/README.md" "$proj/"
 (cd "$proj" && xcodegen generate --spec project.yml)
 
-# The project must build and embed the image; signing is the user's part.
-xcodebuild -project "$proj/WinPadProbe.xcodeproj" -scheme WinPadProbe -configuration Debug \
-    -sdk iphoneos -derivedDataPath "$out/xcode-derived" CODE_SIGNING_ALLOWED=NO build
-product="$out/xcode-derived/Build/Products/Debug-iphoneos/WinPadProbe.app"
-test -f "$product/Frameworks/probe-aot.dylib" ||
-    { echo "the Xcode build did not embed probe-aot.dylib" >&2; exit 1; }
-# Debug builds keep the app's code in WinPadProbe.debug.dylib (Xcode 16).
-code="$product/WinPadProbe.debug.dylib"
-[ -f "$code" ] || code="$product/WinPadProbe"
-nm "$code" | grep -q WinPadProbeMain ||
-    { echo "the Xcode build did not link the probe" >&2; exit 1; }
+# build SDK: builds the project with xcodebuild and checks the product;
+# prints the app's path. Signing for the device is the user's part.
+build() {
+    sign=
+    [ "$1" = iphoneos ] && sign=CODE_SIGNING_ALLOWED=NO
+    xcodebuild -project "$proj/WinPadProbe.xcodeproj" -scheme WinPadProbe -configuration Debug \
+        -sdk "$1" -derivedDataPath "$out/xcode-derived" $sign build >&2
+    product="$out/xcode-derived/Build/Products/Debug-$1/WinPadProbe.app"
+    test -f "$product/Frameworks/probe-aot.dylib" ||
+        { echo "the $1 build did not embed probe-aot.dylib" >&2; exit 1; }
+    # Debug builds keep the app's code in WinPadProbe.debug.dylib (Xcode 16).
+    code="$product/WinPadProbe.debug.dylib"
+    [ -f "$code" ] || code="$product/WinPadProbe"
+    nm "$code" | grep -q WinPadProbeMain ||
+        { echo "the $1 build did not link the probe" >&2; exit 1; }
+    echo "$product"
+}
+build iphoneos >/dev/null
+sim_app=$(build iphonesimulator)
 
-(cd "$out" && rm -f WinPadProbe-xcode.zip && zip -qr WinPadProbe-xcode.zip WinPadProbe-xcode)
-ls -l "$out/WinPadProbe-xcode.zip"
+# Run the simulator build on an iPad simulator and read the app's log.
+udid=$(xcrun simctl list devices available -j | python3 -I "$here/xcode/pick-ipad.py" $min_ios)
+[ -n "$udid" ] || { echo "no iPad simulator with iOS $min_ios or later" >&2; exit 1; }
+xcrun simctl boot "$udid" 2>/dev/null || true
+xcrun simctl bootstatus "$udid" -b
+xcrun simctl install "$udid" "$sim_app"
+xcrun simctl launch "$udid" "$bundle"
+log="$(xcrun simctl get_app_container "$udid" "$bundle" data)/Documents/probe.log"
+for _ in $(seq 120); do
+    grep -q '== finished' "$log" 2>/dev/null && break
+    sleep 1
+done
+cat "$log" || true
+xcrun simctl shutdown "$udid" || true
+grep -q '== finished, exit 0' "$log" ||
+    { echo "the app did not run the guest on the simulator" >&2; exit 1; }
+grep -q 'Dispatcher: static code from AOT image' "$log" ||
+    { echo "FEX did not run the dispatcher from the AOT image on the simulator" >&2; exit 1; }

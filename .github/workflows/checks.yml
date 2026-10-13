@@ -102,10 +102,12 @@ jobs:
           name: WinPadProbe-ipa
           path: ${{ runner.temp }}/ipa/WinPadProbe.ipa
           if-no-files-found: error
-      - name: iPad test app as an Xcode project
+      - name: iPad test app as an Xcode project, run on an iPad simulator
+        timeout-minutes: 60
         run: |
           brew install xcodegen
-          sh tests/ios/build-xcode.sh "$RUNNER_TEMP/fex-ios-app" "$RUNNER_TEMP/ipa" "$RUNNER_TEMP/xcode"
+          sh tests/ios/build-xcode.sh "$RUNNER_TEMP/fex" "$RUNNER_TEMP/fex-ios-app" "$RUNNER_TEMP/ipa" \
+              "$RUNNER_TEMP/fex-ios-sim" "$RUNNER_TEMP/probe" "$RUNNER_TEMP/xcode"
       - name: Upload Xcode project
         uses: actions/upload-artifact@v4
         with:
