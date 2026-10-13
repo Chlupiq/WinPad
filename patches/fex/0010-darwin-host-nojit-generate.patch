@@ -1,0 +1,116 @@
+FEXCore on macOS, and cache generation with NoJIT (FEX 14c9268, on top of 0009)
+
+macOS runs the same Darwin code as iOS (0007) and allows the same test
+without an iPad, so the CMake checks accept CMAKE_SYSTEM_NAME Darwin too.
+The allocator shim tools link (JemallocDummy) uses <malloc/malloc.h>,
+posix_memalign and malloc_size on Apple.
+
+With NoJIT=1 a process can now also generate a cache: CompileBlock only
+stops on a missing block while the guest runs, not while compiling blocks
+for a cache, and the dispatcher FEX generates (and dumps for the AOT image)
+is not made executable. That way the cache and dispatcher for the iPad are
+made by a build with the same Darwin data layout, without executable memory.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 11eaf89..81248c5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -61,9 +61,9 @@ if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+   message(FATAL_ERROR "Unsupported pointer size ${CMAKE_SIZEOF_VOID_P}."
+     " FEX only supports 64-bit (8-byte pointer) systems."
+     " If you believe this is in error, file an issue.")
+-elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "iOS"))
++elseif (NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "iOS" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+   message(FATAL_ERROR "Unsupported system type ${CMAKE_SYSTEM_NAME}."
+-    " FEX only supports Linux and Windows (and FEXCore on iOS)."
++    " FEX only supports Linux and Windows (and FEXCore on iOS and macOS)."
+     " If you believe this is in error, file an issue.")
+ endif()
+ 
+@@ -78,8 +78,8 @@ elseif (MINGW)
+   set(ENABLE_FEX_ALLOCATOR TRUE)
+   set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
+ elseif (APPLE)
+-  # iOS: only FEXCore is built, for an app to link; the system allocator is used
+-  message(STATUS "Building FEXCore for iOS")
++  # iOS and macOS: only FEXCore is built, for an app to link; the system allocator is used
++  message(STATUS "Building FEXCore for ${CMAKE_SYSTEM_NAME}")
+   set(ENABLE_FEX_ALLOCATOR FALSE)
+   set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
+ else ()
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index dbcd985..083281b 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -875,7 +875,8 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+     return HostCode;
+   }
+ 
+-  if (Config.NoJIT()) {
++  // Generating a cache compiles blocks that are never run here.
++  if (Config.NoJIT() && !CodeCache.IsGeneratingCache) {
+     ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image", GuestRIP);
+   }
+ 
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index 58223f3..0fb29d8 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -53,8 +53,15 @@ static bool WantsStaticCode() {
+ #endif
+ }
+ 
++// With NoJIT the generated dispatcher never runs, so it needs no executable
++// memory either (cache generation dumps it for an AOT image).
++static bool DispatcherExecutable() {
++  FEX_CONFIG_OPT(NoJIT, NOJIT);
++  return !WantsStaticCode() && !NoJIT();
++}
++
+ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
+-  : Arm64Emitter(ctx, FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, !WantsStaticCode()), MAX_DISPATCHER_CODE_SIZE)
++  : Arm64Emitter(ctx, FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, DispatcherExecutable()), MAX_DISPATCHER_CODE_SIZE)
+   , CTX {ctx} {
+   EmitDispatcher();
+ 
+diff --git a/FEXCore/Source/Utils/AllocatorHooks.cpp b/FEXCore/Source/Utils/AllocatorHooks.cpp
+index e85f09a..749c33f 100644
+--- a/FEXCore/Source/Utils/AllocatorHooks.cpp
++++ b/FEXCore/Source/Utils/AllocatorHooks.cpp
+@@ -13,7 +13,11 @@
+ #endif
+ 
+ #include <cstdint>
++#ifdef __APPLE__
++#include <malloc/malloc.h>
++#else
+ #include <malloc.h>
++#endif
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -211,7 +215,12 @@ void* calloc(size_t n, size_t size) {
+   return ::calloc(n, size);
+ }
+ void* memalign(size_t align, size_t s) {
++#ifdef __APPLE__
++  void* r {};
++  return ::posix_memalign(&r, align, s) == 0 ? r : nullptr;
++#else
+   return ::memalign(align, s);
++#endif
+ }
+ void* valloc(size_t size) {
+   return ::valloc(size);
+@@ -226,7 +235,11 @@ void free(void* ptr) {
+   return ::free(ptr);
+ }
+ size_t malloc_usable_size(void* ptr) {
++#ifdef __APPLE__
++  return ::malloc_size(ptr);
++#else
+   return ::malloc_usable_size(ptr);
++#endif
+ }
+ void* aligned_alloc(size_t a, size_t s) {
+   return ::aligned_alloc(a, s);
