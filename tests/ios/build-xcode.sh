@@ -61,6 +61,8 @@ sed -e "s/\${WINPAD_IOS_MIN}/$min_ios/" \
     -e 's/<string>com.chlupiq.winpad.probe</<string>$(PRODUCT_BUNDLE_IDENTIFIER)</' \
     -e 's/<string>WinPadProbe<\/string>/<string>$(EXECUTABLE_NAME)<\/string>/' \
     "$here/app/Info.plist.in" >"$proj/Info.plist"
+# Xcode sets UIDeviceFamily from TARGETED_DEVICE_FAMILY.
+plutil -remove UIDeviceFamily "$proj/Info.plist"
 plutil -lint "$proj/Info.plist"
 
 {
@@ -105,7 +107,10 @@ xcodebuild -project "$proj/WinPadProbe.xcodeproj" -scheme WinPadProbe -configura
 product="$out/xcode-derived/Build/Products/Debug-iphoneos/WinPadProbe.app"
 test -f "$product/Frameworks/probe-aot.dylib" ||
     { echo "the Xcode build did not embed probe-aot.dylib" >&2; exit 1; }
-nm "$product/WinPadProbe" | grep -q WinPadProbeMain ||
+# Debug builds keep the app's code in WinPadProbe.debug.dylib (Xcode 16).
+code="$product/WinPadProbe.debug.dylib"
+[ -f "$code" ] || code="$product/WinPadProbe"
+nm "$code" | grep -q WinPadProbeMain ||
     { echo "the Xcode build did not link the probe" >&2; exit 1; }
 
 (cd "$out" && rm -f WinPadProbe-xcode.zip && zip -qr WinPadProbe-xcode.zip WinPadProbe-xcode)
