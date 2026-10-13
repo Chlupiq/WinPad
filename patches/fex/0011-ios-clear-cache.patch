@@ -1,0 +1,35 @@
+iOS: __clear_cache for an app executable (FEX 14c9268, on top of 0010)
+
+FEXCore calls __builtin___clear_cache after writing code. The compiler
+lowers that to compiler-rt's __clear_cache, which macOS's libSystem
+exports but iOS's does not, so linking an app failed. On iOS FEXCore now
+defines it with sys_icache_invalidate. (With NoJIT the written code is
+never run, but the calls stay.)
+
+diff --git a/FEXCore/Source/Utils/Allocator.cpp b/FEXCore/Source/Utils/Allocator.cpp
+index 09db891..59ced89 100644
+--- a/FEXCore/Source/Utils/Allocator.cpp
++++ b/FEXCore/Source/Utils/Allocator.cpp
+@@ -22,12 +22,22 @@
+ #include <cstdio>
+ #include <fcntl.h>
+ #if defined(__APPLE__)
++#include <TargetConditionals.h>
++#include <libkern/OSCacheControl.h>
+ #include <sys/mman.h>
+ #elif !defined(_WIN32)
+ #include <sys/mman.h>
+ #include <sys/user.h>
+ #endif
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++// __builtin___clear_cache calls this compiler-rt function, which iOS's
++// libSystem does not export (macOS's does).
++extern "C" void __clear_cache(void* Begin, void* End) {
++  sys_icache_invalidate(Begin, static_cast<char*>(End) - static_cast<char*>(Begin));
++}
++#endif
++
+ namespace fextl::pmr {
+ static fextl::pmr::default_resource FEXDefaultResource;
+ std::pmr::memory_resource* get_default_resource() {
