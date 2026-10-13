@@ -6,7 +6,8 @@
 //
 // Guest exceptions: the guest registers a handler (syscall 0x5750), and ud2,
 // int3 and faulting memory reads continue there instead of killing the
-// process, see OnHostSignal.
+// process, see OnHostSignal. It can also start threads (syscall 0x5751) and
+// wait for them (0x5752), see StartGuestThread.
 //
 // Modes (each one process, as they would be on a build machine and a device):
 //   record CODEMAP          run with the JIT and record the executed blocks
@@ -33,6 +34,7 @@
 #include <FEXCore/Utils/LogManager.h>
 #include <FEXCore/fextl/fmt.h>
 #include <FEXCore/fextl/memory.h>
+#include <FEXCore/fextl/vector.h>
 
 #include <cerrno>
 #include <csignal>
@@ -41,6 +43,8 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <fstream>
+#include <mutex>
+#include <pthread.h>
 #include <string>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -98,7 +102,11 @@ class ProbeSignalDelegator final : public FEXCore::SignalDelegator {};
 uint64_t GuestExceptionHandler;
 ProbeSignalDelegator* Signals;
 FEXCore::Context::Context* ExceptionCTX;
-FEXCore::Core::InternalThreadState* ExceptionThread;
+// The FEX thread running on this host thread.
+thread_local FEXCore::Core::InternalThreadState* ExceptionThread;
+
+uint64_t StartGuestThread(uint64_t Entry, uint64_t StackTop, uint64_t Arg);
+uint64_t JoinGuestThread(uint64_t Handle);
 
 // Host registers in a signal's ucontext.
 #ifdef __APPLE__
@@ -229,6 +237,14 @@ public:
       // WinPad probe: set the exception handler to rdi
       GuestExceptionHandler = Regs[FEXCore::X86State::REG_RDI];
       Regs[FEXCore::X86State::REG_RAX] = 0;
+    } else if (Regs[FEXCore::X86State::REG_RAX] == 0x5751) {
+      // WinPad probe: start a thread at rdi with stack rsi and rdi = rdx;
+      // returns a handle for 0x5752, -1 on failure
+      Regs[FEXCore::X86State::REG_RAX] =
+        StartGuestThread(Regs[FEXCore::X86State::REG_RDI], Regs[FEXCore::X86State::REG_RSI], Regs[FEXCore::X86State::REG_RDX]);
+    } else if (Regs[FEXCore::X86State::REG_RAX] == 0x5752) {
+      // WinPad probe: wait until the thread with handle rdi has stopped (HLT)
+      Regs[FEXCore::X86State::REG_RAX] = JoinGuestThread(Regs[FEXCore::X86State::REG_RDI]);
     } else {
       Regs[FEXCore::X86State::REG_RAX] = -ENOSYS;
     }
@@ -313,6 +329,66 @@ bool SetupCallRetStack(FEXCore::Core::InternalThreadState* Thread) {
   Thread->CallRetStackBase = Alloc + Page;
   Thread->CurrentFrame->State.callret_sp = reinterpret_cast<uintptr_t>(Alloc + Page) + Size / 4;
   return true;
+}
+
+// Guest threads, the way a CreateThread would map onto FEX: one FEX thread
+// per host thread, all sharing the context and its code (JIT or AOT image).
+// Each stops on HLT like the main thread.
+struct GuestThread {
+  pthread_t Host;
+  FEXCore::Core::InternalThreadState* Thread;
+  bool Joined;
+};
+std::mutex GuestThreadsLock;
+fextl::vector<GuestThread> GuestThreads;
+
+void* RunGuestThread(void* Arg) {
+  ExceptionThread = static_cast<FEXCore::Core::InternalThreadState*>(Arg);
+  ExceptionCTX->ExecuteThread(ExceptionThread);
+  return nullptr;
+}
+
+uint64_t StartGuestThread(uint64_t Entry, uint64_t StackTop, uint64_t Arg) {
+  auto* Thread = ExceptionCTX->CreateThread();
+  SetupThreadState(Thread);
+  if (!SetupCallRetStack(Thread)) {
+    ExceptionCTX->DestroyThread(Thread);
+    return ~uint64_t {0};
+  }
+  auto& State = Thread->CurrentFrame->State;
+  State.rip = Entry;
+  State.gregs[FEXCore::X86State::REG_RSP] = StackTop;
+  State.gregs[FEXCore::X86State::REG_RDI] = Arg;
+
+  // Secondary threads get small stacks by default (512 KB on Apple); give
+  // them what the main thread has.
+  pthread_attr_t Attr;
+  pthread_attr_init(&Attr);
+  pthread_attr_setstacksize(&Attr, 8 * 1024 * 1024);
+  pthread_t Host;
+  const int Error = pthread_create(&Host, &Attr, RunGuestThread, Thread);
+  pthread_attr_destroy(&Attr);
+  if (Error != 0) {
+    fprintf(stderr, "pthread_create: %s\n", strerror(Error));
+    ExceptionCTX->DestroyThread(Thread);
+    return ~uint64_t {0};
+  }
+  std::lock_guard Lock {GuestThreadsLock};
+  GuestThreads.push_back({Host, Thread, false});
+  return GuestThreads.size() - 1;
+}
+
+uint64_t JoinGuestThread(uint64_t Handle) {
+  pthread_t Host;
+  {
+    std::lock_guard Lock {GuestThreadsLock};
+    if (Handle >= GuestThreads.size() || GuestThreads[Handle].Joined) {
+      return -EINVAL;
+    }
+    GuestThreads[Handle].Joined = true;
+    Host = GuestThreads[Handle].Host;
+  }
+  return pthread_join(Host, nullptr) == 0 ? 0 : -EINVAL;
 }
 
 int Usage() {
@@ -461,10 +537,18 @@ int WinPadProbeMain(int argc, char** argv) {
     CTX->FlushAndCloseCodeMap();
   }
   const auto R12 = State.gregs[FEXCore::X86State::REG_R12];
-  // r13: the guest's check that ran last (guest.S), 9 when all passed
+  // r13: the guest's check that ran last (guest.S), 10 when all passed
   const auto R13 = State.gregs[FEXCore::X86State::REG_R13];
   printf("guest wrote \"%s\", r12=%llu, r13=%llu\n", Output == "ok\n" ? "ok\\n" : Output.c_str(),
          static_cast<unsigned long long>(R12), static_cast<unsigned long long>(R13));
+  // Threads the guest did not wait for (it stopped early) still have to stop
+  // before their state goes away.
+  for (auto& G : GuestThreads) {
+    if (!G.Joined) {
+      pthread_join(G.Host, nullptr);
+    }
+    CTX->DestroyThread(G.Thread);
+  }
   Cache.reset();
   CTX->DestroyThread(Thread);
   return Output == "ok\n" ? 0 : 1;
