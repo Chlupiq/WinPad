@@ -50,6 +50,7 @@ jobs:
           FEX_BUILD: ${{ runner.temp }}/fex-build
         run: sh tests/fex-cache/run.sh
       - name: Probe frontend runs the guest from an AOT image
+        timeout-minutes: 20
         env:
           WORK_DIR: ${{ runner.temp }}/fex-work
           FEX_BUILD: ${{ runner.temp }}/fex-build

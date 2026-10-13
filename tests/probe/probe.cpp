@@ -100,9 +100,11 @@ public:
       auto* Buf = reinterpret_cast<const char*>(Regs[FEXCore::X86State::REG_RSI]);
       Output.append(Buf, Regs[FEXCore::X86State::REG_RDX]);
       Regs[FEXCore::X86State::REG_RAX] = Regs[FEXCore::X86State::REG_RDX];
-      return;
+    } else {
+      Regs[FEXCore::X86State::REG_RAX] = -ENOSYS;
     }
-    Regs[FEXCore::X86State::REG_RAX] = -ENOSYS;
+    // The handler moves the guest past its 2-byte syscall instruction.
+    Frame->State.rip += 2;
   }
 
   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState*, uint64_t Address) override {

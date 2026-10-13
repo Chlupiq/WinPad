@@ -24,11 +24,22 @@ fi
 cmake --build "$build" --target winpad-probe
 probe="$build/Bin/winpad-probe"
 
-# step ARGS...: run the probe; if it fails, run it again under gdb for a backtrace.
+# step ARGS...: run the probe; if it fails, run it again under gdb for a
+# backtrace, and if it hangs, attach gdb to a second run.
 step() {
+    echo "== winpad-probe $*"
     status=0
-    "$probe" "$@" || status=$?
+    timeout 120 "$probe" "$@" || status=$?
     [ "$status" = 0 ] && return
+    if [ "$status" = 124 ]; then
+        echo "winpad-probe $1 did not finish in 120 s" >&2
+        "$probe" "$@" &
+        pid=$!
+        sleep 20
+        sudo gdb -q -batch -p "$pid" -ex 'thread apply all bt' -ex 'x/20i $pc-0x30' -ex 'info registers' 2>&1 || true
+        kill -9 "$pid" 2>/dev/null || true
+        exit 1
+    fi
     echo "winpad-probe $1 failed with exit $status" >&2
     if command -v gdb >/dev/null; then
         gdb -q -batch -ex run -ex bt -ex 'x/20i $pc-0x30' -ex 'info registers' \
@@ -50,9 +61,9 @@ clang -shared -nostdlib -fuse-ld=lld -o "$work/probe-aot.so" "$work/aot.o" "$wor
 python3 -I "$c2m/check_linked.py" "$cache" "$work/probe-aot.so"
 
 status=0
-"$probe" run "$work/probe-aot.so" >"$work/run.out" 2>"$work/run.log" || status=$?
-cat "$work/run.log" "$work/run.out"
-[ "$status" = 0 ] || { echo "the guest did not run from the AOT image (exit $status)" >&2; exit 1; }
+(step run "$work/probe-aot.so") >"$work/run.log" 2>&1 || status=$?
+cat "$work/run.log"
+[ "$status" = 0 ] || { echo "the guest did not run from the AOT image" >&2; exit 1; }
 grep -q 'AOT image linked:' "$work/run.log" ||
     { echo "FEX did not load the probe's AOT image" >&2; exit 1; }
 grep -q 'Dispatcher: static code from AOT image' "$work/run.log" ||
