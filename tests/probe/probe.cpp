@@ -167,6 +167,23 @@ uint8_t* MapGuest(uintptr_t Hint, size_t Size) {
   return static_cast<uint8_t*>(P);
 }
 
+// The JIT keeps a stack of guest return addresses next to the guest stack
+// (State.callret_sp, x25 in JIT code), which a frontend has to provide, the
+// way FEX's ThreadManager does: guard pages on both sides, starting a quarter
+// in so that a few returns more than calls are harmless.
+bool SetupCallRetStack(FEXCore::Core::InternalThreadState* Thread) {
+  const size_t Page = sysconf(_SC_PAGESIZE);
+  const size_t Size = FEXCore::Core::InternalThreadState::CALLRET_STACK_SIZE;
+  auto* Alloc = static_cast<uint8_t*>(mmap(nullptr, Size + 2 * Page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+  if (Alloc == MAP_FAILED || mprotect(Alloc + Page, Size, PROT_READ | PROT_WRITE) != 0) {
+    perror("call-ret stack");
+    return false;
+  }
+  Thread->CallRetStackBase = Alloc + Page;
+  Thread->CurrentFrame->State.callret_sp = reinterpret_cast<uintptr_t>(Alloc + Page) + Size / 4;
+  return true;
+}
+
 int Usage() {
   fprintf(stderr, "usage: winpad-probe record CODEMAP | generate CODEMAP DIR | run IMAGE\n");
   return 2;
@@ -234,6 +251,9 @@ int main(int argc, char** argv) {
 
   auto* Thread = CTX->CreateThread();
   SetupThreadState(Thread);
+  if (!SetupCallRetStack(Thread)) {
+    return 1;
+  }
 
   if (Generate) {
     std::ifstream MapFile {argv[2], std::ios::binary};
