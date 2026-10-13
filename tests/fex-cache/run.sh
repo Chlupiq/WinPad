@@ -48,7 +48,9 @@ export PATH="$build/Bin:$PATH"
 FEXServer -f -p 5 >>"$work/fexserver.log" 2>&1 &
 server=$!
 sleep 1
-out=$(FEX "$guest")
+# Every run also writes out FEX's dispatcher (patches/fex/0006): it must be the
+# same bytes in every process to be linked into an app.
+out=$(FEX_DUMPDISPATCHER="$work/dispatcher1.bin" FEX "$guest")
 [ "$out" = ok ] || { echo "guest printed '$out'" >&2; exit 1; }
 FEXServer -k >/dev/null 2>&1 || true
 wait "$server" || true
@@ -117,7 +119,11 @@ run_cached() {
 
 # Regular cache: the baseline every AOT change is measured against.
 generate census
+export FEX_DUMPDISPATCHER="$work/dispatcher2.bin"
 run_cached cached census
+unset FEX_DUMPDISPATCHER
+cmp "$work/dispatcher1.bin" "$work/dispatcher2.bin" ||
+    { echo "the dispatcher differs between two FEX processes" >&2; exit 1; }
 
 # AOT cache (patches/fex/0002-0004): every relocation only fills the data area
 # (guest RIP slots, block link records, block tails), so FEX maps the code
@@ -150,7 +156,13 @@ for c in $(find "$cachedir" -type f ! -name '*.tmp' ! -name '*.lock'); do
     python3 -I "$root/tools/cache2macho/cache2macho.py" --elf-asm "$c" "$work/aot$n.s"
     clang -c -o "$work/aot$n-elf.o" "$work/aot$n.s"
 done
-clang -shared -nostdlib -fuse-ld=lld -o "$work/aot.so" "$work"/aot*-elf.o
+# The dispatcher goes into the same images.
+python3 -I "$root/tools/cache2macho/cache2macho.py" --dispatcher "$work/dispatcher1.bin" "$work/dispatcher-macho.s"
+clang --target=arm64-apple-ios15.0 -c -o "$work/dispatcher-macho.o" "$work/dispatcher-macho.s"
+"$ld64" -arch arm64 -platform_version ios 15.0 15.0 -dylib -o "$work/aot-dispatcher.dylib" "$work/dispatcher-macho.o" "$work/aot1.o"
+python3 -I "$root/tools/cache2macho/cache2macho.py" --dispatcher --elf-asm "$work/dispatcher1.bin" "$work/dispatcher.s"
+clang -c -o "$work/dispatcher-elf.o" "$work/dispatcher.s"
+clang -shared -nostdlib -fuse-ld=lld -o "$work/aot.so" "$work"/aot*-elf.o "$work/dispatcher-elf.o"
 for c in $(find "$cachedir" -type f ! -name '*.tmp' ! -name '*.lock'); do
     python3 -I "$root/tools/cache2macho/check_linked.py" "$c" "$work/aot.so"
 done
@@ -161,8 +173,9 @@ grep -Eq 'AOT data area: .*\([1-9][0-9]* link records\)' "$work/fex-aot-run.log"
 grep -q 'AOT code mapped read+execute:' "$work/fex-aot-run.log" ||
     { echo "FEX did not map the AOT code read-only" >&2; exit 1; }
 
-# Linked AOT code (patches/fex/0005): FEX takes code and data area from the
-# shared object instead of the cache files, which are moved away to be sure.
+# Linked AOT code (patches/fex/0005, 0006): FEX takes code and data area from
+# the shared object instead of the cache files, which are moved away to be
+# sure, and runs the dispatcher from it; the one it generates is not executable.
 mv "$cachedir" "$cachedir.files"
 export FEX_AOTIMAGE="$work/aot.so"
 run_cached aot-image aot-census
@@ -170,3 +183,5 @@ unset FEX_AOTIMAGE
 mv "$cachedir.files" "$cachedir"
 grep -q 'AOT image linked:' "$work/fex-aot-image-run.log" ||
     { echo "FEX did not load the linked AOT image" >&2; exit 1; }
+grep -q 'Dispatcher: static code from AOT image' "$work/fex-aot-image-run.log" ||
+    { echo "FEX did not run the dispatcher from the AOT image" >&2; exit 1; }

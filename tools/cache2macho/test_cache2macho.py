@@ -83,6 +83,17 @@ class ConvertTest(unittest.TestCase):
         with self.assertRaises(c2m.ConvertError):
             c2m.default_prefix("guest.bin")
 
+    def test_dispatcher_asm(self):
+        code = struct.pack("<II", 0xD503201F, 0xD65F03C0)  # nop; ret
+        elf = c2m.convert_dispatcher_asm(code, True).splitlines()
+        self.assertIn("fexaot_dispatcher_text:", elf)
+        self.assertIn("\t.inst 0xd65f03c0", elf)
+        self.assertIn("\t.byte 70,88,65,68,1,0,0,0,8,0,0,0,0,0,0,0", elf)  # "FXAD", version 1, 8 bytes
+        macho = c2m.convert_dispatcher_asm(code, False)
+        self.assertIn("_fexaot_dispatcher_meta:", macho.splitlines())
+        with self.assertRaises(c2m.ConvertError):
+            c2m.convert_dispatcher_asm(b"\0\0", True)
+
     def test_rejects_cache_that_patches_code(self):
         data = build_cache(blocks=[(0x1000, 0, [])], relocs=[(0x10, GUEST_RIP_MOVE, b"")], code=aot_code())
         with self.assertRaises(c2m.ConvertError):

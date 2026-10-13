@@ -1,0 +1,286 @@
+Dispatcher code that is the same in every process, and run from an AOT image (FEX 14c9268, on top of 0005)
+
+iOS without JIT can only run code that is signed into the app, so FEX's
+dispatcher (generated at startup) has to be built in advance like the AOT
+caches. Its code was position independent except for four 64-bit literals:
+the context and the addresses of SleepThread, CompileBlock and
+CompileSingleStep. Those now live in the thread's JITPointers
+(DispatcherCTX, DispatcherSleepThread, DispatcherCompileBlock,
+DispatcherCompileSingleStep), filled by InitThreadPointers, and the
+dispatcher loads them from there. Its code is then identical in every
+process of the same build and configuration (except in the VIXL simulator,
+whose indirect calls embed host addresses).
+
+The DumpDispatcher option writes the generated code to a file; WinPad's
+tools/cache2macho --dispatcher turns it into assembly with the symbols
+fexaot_dispatcher_text and fexaot_dispatcher_meta. With AOTImage set, the
+dispatcher is still generated, but into memory that is not executable; if
+the image's copy is byte for byte the same, every entry point is moved to
+it ("Dispatcher: static code from AOT image"), otherwise FEX makes its own
+copy executable and uses that as before.
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index b701301..f253a18 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -49,7 +49,16 @@
+         "AffectsCodeGen": "false",
+         "Desc": [
+           "Shared object with AOT code caches linked in (WinPad tools/cache2macho --elf-asm).",
+-          "Used instead of cache files for the binaries it has code for."
++          "Used instead of cache files for the binaries it has code for.",
++          "If it holds a dispatcher matching this build, FEX runs that instead of generating one."
++        ]
++      },
++      "DumpDispatcher": {
++        "Type": "str",
++        "Default": "",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "Write the generated dispatcher code to this file (for WinPad tools/cache2macho --dispatcher)"
+         ]
+       },
+       "EnableCodeCacheValidation": {
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index 2f4babd..e7379b7 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -25,6 +25,12 @@
+ #endif
+ 
+ #include <array>
++#ifndef _WIN32
++#include <dlfcn.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
++#endif
+ #include <bit>
+ #include <cstring>
+ 
+@@ -36,11 +42,44 @@ static void SleepThread(FEXCore::Context::ContextImpl* CTX, FEXCore::Core::CpuSt
+ 
+ constexpr size_t MAX_DISPATCHER_CODE_SIZE = FEXCore::Utils::FEX_PAGE_SIZE * 4;
+ 
++// With AOTImage set, the dispatcher is emitted into memory that is not
++// executable: only the copy in the image runs (see UseStaticCode).
++static bool WantsStaticCode() {
++#ifdef _WIN32
++  return false;
++#else
++  FEX_CONFIG_OPT(AOTImage, AOTIMAGE);
++  return !AOTImage().empty();
++#endif
++}
++
+ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
+-  : Arm64Emitter(ctx, FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, true), MAX_DISPATCHER_CODE_SIZE)
++  : Arm64Emitter(ctx, FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, !WantsStaticCode()), MAX_DISPATCHER_CODE_SIZE)
+   , CTX {ctx} {
+   EmitDispatcher();
+ 
++#ifndef _WIN32
++  FEX_CONFIG_OPT(DumpDispatcher, DUMPDISPATCHER);
++  if (!DumpDispatcher().empty()) {
++    const auto Size = End - reinterpret_cast<uint64_t>(GetBufferBase());
++    int FD = open(DumpDispatcher().c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++    if (FD == -1 || write(FD, GetBufferBase(), Size) != static_cast<ssize_t>(Size)) {
++      LogMan::Msg::EFmt("Failed to write dispatcher code to {}", DumpDispatcher());
++    }
++    if (FD != -1) {
++      close(FD);
++    }
++  }
++
++  if (WantsStaticCode()) {
++    FEX_CONFIG_OPT(AOTImage, AOTIMAGE);
++    if (!UseStaticCode(AOTImage())) {
++      // Run the generated code after all
++      mprotect(GetBufferBase(), MAX_DISPATCHER_CODE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
++    }
++  }
++#endif
++
+   FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(GetBufferBase()), MAX_DISPATCHER_CODE_SIZE);
+ }
+ 
+@@ -68,10 +107,6 @@ void Dispatcher::EmitDispatcher() {
+   //    Ptr();
+   // }
+ 
+-  ARMEmitter::ForwardLabel l_CTX;
+-  ARMEmitter::ForwardLabel l_Sleep;
+-  ARMEmitter::ForwardLabel l_CompileBlock;
+-  ARMEmitter::ForwardLabel l_CompileSingleStep;
+ 
+   // Push all the register we need to save
+   PushCalleeSavedRegisters();
+@@ -324,11 +359,11 @@ void Dispatcher::EmitDispatcher() {
+         mov(ARMEmitter::XReg::x2, RipReg);
+       }
+ 
+-      ldr(ARMEmitter::XReg::x0, &l_CTX);
++      ldr(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, Pointers.DispatcherCTX));
+       mov(ARMEmitter::XReg::x1, STATE);
+       // x2 contains guest RIP
+       mov(ARMEmitter::XReg::x3, 0);
+-      ldr(ARMEmitter::XReg::x4, &l_CompileBlock);
++      ldr(ARMEmitter::XReg::x4, STATE_PTR(CpuStateFrame, Pointers.DispatcherCompileBlock));
+ 
+       if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+         GenerateIndirectRuntimeCall<uintptr_t, void*, void*, uint64_t, uint64_t>(ARMEmitter::Reg::r4);
+@@ -358,10 +393,10 @@ void Dispatcher::EmitDispatcher() {
+         mov(ARMEmitter::XReg::x2, RipReg);
+       }
+ 
+-      ldr(ARMEmitter::XReg::x0, &l_CTX);
++      ldr(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, Pointers.DispatcherCTX));
+       mov(ARMEmitter::XReg::x1, STATE);
+       // x2 contains guest RIP
+-      ldr(ARMEmitter::XReg::x4, &l_CompileSingleStep);
++      ldr(ARMEmitter::XReg::x4, STATE_PTR(CpuStateFrame, Pointers.DispatcherCompileSingleStep));
+ 
+       if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+         GenerateIndirectRuntimeCall<uintptr_t, void*, void*, uint64_t>(ARMEmitter::Reg::r4);
+@@ -448,9 +483,9 @@ void Dispatcher::EmitDispatcher() {
+     // We will have faulted and jumped to this location at this point
+ 
+     // Call our sleep handler
+-    ldr(ARMEmitter::XReg::x0, &l_CTX);
++    ldr(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, Pointers.DispatcherCTX));
+     mov(ARMEmitter::XReg::x1, STATE);
+-    ldr(ARMEmitter::XReg::x2, &l_Sleep);
++    ldr(ARMEmitter::XReg::x2, STATE_PTR(CpuStateFrame, Pointers.DispatcherSleepThread));
+     if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+       GenerateIndirectRuntimeCall<void, void*, void*>(ARMEmitter::Reg::r2);
+     } else {
+@@ -651,18 +686,6 @@ void Dispatcher::EmitDispatcher() {
+     }
+   }
+ 
+-  (void)Bind(&l_CTX);
+-  dc64(reinterpret_cast<uintptr_t>(CTX));
+-  (void)Bind(&l_Sleep);
+-  dc64(reinterpret_cast<uint64_t>(SleepThread));
+-  (void)Bind(&l_CompileBlock);
+-  FEXCore::Utils::MemberFunctionToPointerCast PMFCompileBlock(&FEXCore::Context::ContextImpl::CompileBlock);
+-  dc64(PMFCompileBlock.GetConvertedPointer());
+-  (void)Bind(&l_CompileSingleStep);
+-
+-  FEXCore::Utils::MemberFunctionToPointerCast PMFCompileSingleStep(&FEXCore::Context::ContextImpl::CompileSingleStep);
+-  dc64(PMFCompileSingleStep.GetConvertedPointer());
+-
+   Start = reinterpret_cast<uint64_t>(DispatchPtr);
+   End = GetCursorAddress<uint64_t>();
+   ClearICache(reinterpret_cast<void*>(DispatchPtr), End - reinterpret_cast<uint64_t>(DispatchPtr));
+@@ -2704,6 +2727,12 @@ void Dispatcher::InitThreadPointers(FEXCore::Core::InternalThreadState* Thread)
+     Ptrs.F64FYL2XP1Handler = F64FYL2XP1HandlerAddress;
+     Ptrs.F64FPREMHandler = F64FPREMHandlerAddress;
+     Ptrs.F64FPREM1Handler = F64FPREM1HandlerAddress;
++    Ptrs.DispatcherCTX = reinterpret_cast<uint64_t>(CTX);
++    Ptrs.DispatcherSleepThread = reinterpret_cast<uint64_t>(SleepThread);
++    FEXCore::Utils::MemberFunctionToPointerCast PMFCompileBlock(&FEXCore::Context::ContextImpl::CompileBlock);
++    Ptrs.DispatcherCompileBlock = PMFCompileBlock.GetConvertedPointer();
++    FEXCore::Utils::MemberFunctionToPointerCast PMFCompileSingleStep(&FEXCore::Context::ContextImpl::CompileSingleStep);
++    Ptrs.DispatcherCompileSingleStep = PMFCompileSingleStep.GetConvertedPointer();
+ 
+     // Fill in the fallback handlers
+     InterpreterOps::FillFallbackIndexPointers(Ptrs.FallbackHandlerPointers, &ABIPointers[0]);
+@@ -2757,6 +2786,68 @@ SignalDelegatorConfig Dispatcher::MakeSignalDelegatorConfig() const {
+   };
+ }
+ 
++bool Dispatcher::UseStaticCode(const fextl::string& ImagePath) {
++#ifdef _WIN32
++  return false;
++#else
++  // The image holds the dispatcher as dumped with DumpDispatcher (WinPad
++  // tools/cache2macho --dispatcher). Its code has no absolute addresses, so it
++  // is only used if it is byte for byte what this FEX build and configuration
++  // just generated; then every entry point moves to the image's copy.
++  auto* Handle = dlopen(ImagePath.c_str(), RTLD_NOW | RTLD_LOCAL);
++  if (!Handle) {
++    LogMan::Msg::EFmt("Failed to load AOT image {}: {}", ImagePath, dlerror());
++    return false;
++  }
++  auto* Meta = static_cast<const std::byte*>(dlsym(Handle, "fexaot_dispatcher_meta"));
++  auto* Code = static_cast<const std::byte*>(dlsym(Handle, "fexaot_dispatcher_text"));
++  struct {
++    char Magic[4];
++    uint32_t Version;
++    uint64_t Size;
++  } Header {};
++  if (Meta) {
++    memcpy(&Header, Meta, sizeof(Header));
++  }
++  const auto Base = reinterpret_cast<uint64_t>(GetBufferBase());
++  const auto Size = End - Base;
++  if (!Meta || !Code || memcmp(Header.Magic, "FXAD", 4) != 0 || Header.Version != 1) {
++    LogMan::Msg::IFmt("AOT image {} has no dispatcher; generating it", ImagePath);
++    dlclose(Handle);
++    return false;
++  }
++  if (Header.Size != Size || memcmp(Code, GetBufferBase(), Size) != 0) {
++    LogMan::Msg::EFmt("Dispatcher in AOT image {} differs from this FEX build and configuration; generating it", ImagePath);
++    dlclose(Handle);
++    return false;
++  }
++
++  const auto Delta = reinterpret_cast<uint64_t>(Code) - Base;
++  auto Move = [Delta](uint64_t& Address) {
++    if (Address) {
++      Address += Delta;
++    }
++  };
++  DispatchPtr = reinterpret_cast<AsmDispatch>(reinterpret_cast<uint64_t>(DispatchPtr) + Delta);
++  CallbackPtr = reinterpret_cast<JITCallback>(reinterpret_cast<uint64_t>(CallbackPtr) + Delta);
++  for (auto* Address :
++       {&ThreadStopHandlerAddress, &ThreadStopHandlerAddressSpillSRA, &AbsoluteLoopTopAddress, &AbsoluteLoopTopAddressFillSRA,
++        &AbsoluteLoopTopAddressEnterEC, &AbsoluteLoopTopAddressEnterECFillSRA, &ThreadPauseHandlerAddress, &ThreadPauseHandlerAddressSpillSRA,
++        &ThreadDispatchSyscallHandler, &ThreadDispatchRemoveCodeEntry, &ExitFunctionLinkerAddress, &SignalHandlerReturnAddress,
++        &SignalHandlerReturnAddressRT, &GuestSignal_SIGILL, &GuestSignal_SIGTRAP, &GuestSignal_SIGSEGV, &PauseReturnInstruction, &Start, &End,
++        &LUDIVHandlerAddress, &LDIVHandlerAddress, &F64SinHandlerAddress, &F64CosHandlerAddress, &F64TanHandlerAddress,
++        &F64F2XM1HandlerAddress, &F64ScaleHandlerAddress, &F64AtanHandlerAddress, &F64FYL2XHandlerAddress, &F64FYL2XP1HandlerAddress,
++        &F64FPREMHandlerAddress, &F64FPREM1HandlerAddress}) {
++    Move(*Address);
++  }
++  for (auto& Address : ABIPointers) {
++    Move(Address);
++  }
++  LogMan::Msg::IFmt("Dispatcher: static code from AOT image, {} bytes at {}", Size, fmt::ptr(Code));
++  return true;
++#endif
++}
++
+ fextl::unique_ptr<Dispatcher> Dispatcher::Create(FEXCore::Context::ContextImpl* CTX) {
+   return fextl::make_unique<Dispatcher>(CTX);
+ }
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
+index 9df667e..c6687cd 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
+@@ -114,6 +114,7 @@ private:
+   uint64_t F64FPREM1HandlerAddress {};
+ 
+   void EmitDispatcher();
++  bool UseStaticCode(const fextl::string& ImagePath);
+   uint64_t GenerateABICall(FallbackABI ABI);
+ 
+   // Inline softfloat conversion emitters - avoid FPCR save/restore overhead
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index 80514bf..a17f037 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -391,6 +391,12 @@ struct JITPointers {
+   uint64_t F64FYL2XP1Handler {};
+   uint64_t F64FPREMHandler {};
+   uint64_t F64FPREM1Handler {};
++  // Values the dispatcher calls with; kept here instead of in its code so that
++  // the dispatcher's code is the same in every process (see Dispatcher::UseStaticCode)
++  uint64_t DispatcherCTX {};
++  uint64_t DispatcherSleepThread {};
++  uint64_t DispatcherCompileBlock {};
++  uint64_t DispatcherCompileSingleStep {};
+   /**  @} */
+ 
+   // Copy of process-wide named vector constants data.
