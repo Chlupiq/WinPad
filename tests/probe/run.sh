@@ -20,9 +20,10 @@ if [ "$(uname -m)" != aarch64 ]; then
     exit 1
 fi
 
-# The FEX build is cached by CI, so make sure the probe itself is current.
-cmake --build "$build" --target winpad-probe
+# build-fex.sh builds the probe along with FEX; CI keys its cached build on
+# tests/probe too, and the FEX sources are gone when it restores one.
 probe="$build/Bin/winpad-probe"
+[ -x "$probe" ] || { echo "$probe missing; build with tests/fex-cache/build-fex.sh" >&2; exit 1; }
 
 # step ARGS...: run the probe; if it fails, run it again under gdb for a
 # backtrace, and if it hangs, attach gdb to a second run.
