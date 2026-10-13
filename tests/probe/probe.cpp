@@ -154,6 +154,19 @@ void SetupThreadState(FEXCore::Core::InternalThreadState* Thread) {
   State.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(*CS);
 }
 
+uint8_t* MapGuest(uintptr_t Hint, size_t Size) {
+  void* P = mmap(reinterpret_cast<void*>(Hint), Size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (P == MAP_FAILED) {
+    perror("mmap");
+    return nullptr;
+  }
+  if (reinterpret_cast<uintptr_t>(P) + Size > (uintptr_t {1} << 47)) {
+    fprintf(stderr, "guest memory at %p is outside the x86-64 address space\n", P);
+    return nullptr;
+  }
+  return static_cast<uint8_t*>(P);
+}
+
 int Usage() {
   fprintf(stderr, "usage: winpad-probe record CODEMAP | generate CODEMAP DIR | run IMAGE\n");
   return 2;
@@ -190,12 +203,14 @@ int main(int argc, char** argv) {
     FEXCore::Config::Set(FEXCore::Config::CONFIG_NOJIT, "1");
   }
 
-  // The guest: its bytes at an address the system picks, plus a stack.
+  // The guest: its bytes plus a stack. x86-64 addresses only have 47 bits, and
+  // mmap on ARM64 Linux hands out addresses above that by default, so ask for
+  // low ones; the hints are free on both Linux and iOS (above its 4 GB
+  // page zero) and only a hint, so any address under the limit will do.
   const size_t GuestSize = (sizeof(GuestCode) + 4095) & ~size_t {4095};
-  auto* Guest = static_cast<uint8_t*>(mmap(nullptr, GuestSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-  auto* Stack = static_cast<uint8_t*>(mmap(nullptr, StackSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
-  if (Guest == MAP_FAILED || Stack == MAP_FAILED) {
-    perror("mmap");
+  auto* Guest = MapGuest(0x2'0000'0000, GuestSize);
+  auto* Stack = MapGuest(0x2'1000'0000, StackSize);
+  if (!Guest || !Stack) {
     return 1;
   }
   memcpy(Guest, GuestCode, sizeof(GuestCode));

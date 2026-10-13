@@ -24,8 +24,21 @@ fi
 cmake --build "$build" --target winpad-probe
 probe="$build/Bin/winpad-probe"
 
-"$probe" record "$work/guest.map"
-"$probe" generate "$work/guest.map" "$work"
+# step ARGS...: run the probe; if it fails, run it again under gdb for a backtrace.
+step() {
+    status=0
+    "$probe" "$@" || status=$?
+    [ "$status" = 0 ] && return
+    echo "winpad-probe $1 failed with exit $status" >&2
+    if command -v gdb >/dev/null; then
+        gdb -q -batch -ex run -ex bt -ex 'info registers pc' \
+            --args "$probe" "$@" 2>&1 || true
+    fi
+    exit 1
+}
+
+step record "$work/guest.map"
+step generate "$work/guest.map" "$work"
 cache=$(ls "$work"/winpad-probe-guest-*)
 
 c2m="$root/tools/cache2macho"
