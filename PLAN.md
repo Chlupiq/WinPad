@@ -53,7 +53,7 @@ Unix strana (Wine unix libs, wineserver, DXMT unix) už je staticky linkovaná d
 | **M3: Wine bez JITu** | PE-in-Mach-O pro `ntdll`/`kernel32`/`user32`; Win32 okno s GDI na iPadu. | CI + iPad |
 | **M4: grafika** | DXMT D3D9 vzorek (kostka) bez JITu. | CI + iPad |
 | **M5: první hry** | HoMM3 (GOG, 32bit DirectDraw), pak FlatOut 2 (GOG, DX9). Měření FPS s JITem a bez něj. | iPad |
-| **M6: Nahrávací workflow** | Nahrávání cache přímo v Madeiře s JITem + export, build IPA v CI z cache. | iPad + CI |
+| **M6: Příprava hry na Macu** | Mac aplikace: uživatel přetáhne instalátor/ISO/složku hry, aplikace sama hru nainstaluje do Wine, statickou analýzou exe/DLL přeloží nalezené funkce, hru krátce spustí (intro, menu) a zaznamená zbylý kód, sestaví obraz, podepíše ho účtem uživatele a nainstaluje na iPad. Hraní na Macu jen volitelně pro lepší pokrytí. Bloky, které na iPadu chyběly, se při další synchronizaci přeloží taky. (Požadavek uživatele 2026-10-13.) | Mac + iPad |
 | **M7: Interpret jako záloha** | Varianta D2. | – |
 
 ## 4. Infrastruktura
@@ -63,6 +63,7 @@ Unix strana (Wine unix libs, wineserver, DXMT unix) už je staticky linkovaná d
 - **Testy na zařízení:** iOS Simulator v CI ověří jen část (simulátor vynucuje podpis kódu jinak). Rozhodující test je vždy na skutečném iPadu.
 
 ## 5. Otevřené otázky
+- M6: na čem na Macu nahrávat kód hry? FEX pro macOS upstream není (máme jen FEXCore z M2), varianty: FEX + Wine přímo na macOS, nebo ARM64 Linux ve VM (Virtualization.framework). Statická analýza: jak spolehlivě najít funkce v PE (exporty, call graf, .pdata u x64, heuristiky u 32bit).
 1. Kolik relokací je v kódových sekcích Wine ARM64EC DLL? (M1)
 2. Jsou položky FEX disk cache relokovatelné, nebo obsahují absolutní host adresy? (M1)
 3. Jak se FEX chová k 32bit „guest window" (`B + zext32(EA)`) v cache? Báze `B` se liší mezi běhy. (M1/M2)
