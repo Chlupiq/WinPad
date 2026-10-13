@@ -31,7 +31,7 @@ step() {
     [ "$status" = 0 ] && return
     echo "winpad-probe $1 failed with exit $status" >&2
     if command -v gdb >/dev/null; then
-        gdb -q -batch -ex run -ex bt -ex 'info registers pc' \
+        gdb -q -batch -ex run -ex bt -ex 'x/20i $pc-0x30' -ex 'info registers' \
             --args "$probe" "$@" 2>&1 || true
     fi
     exit 1
