@@ -4,6 +4,10 @@
 // an iOS app. The guest is mapped at whatever address mmap returns and only
 // needs the write syscall; it stops with HLT.
 //
+// Guest exceptions: the guest registers a handler (syscall 0x5750), and ud2,
+// int3 and faulting memory reads continue there instead of killing the
+// process, see OnHostSignal.
+//
 // Modes (each one process, as they would be on a build machine and a device):
 //   record CODEMAP          run with the JIT and record the executed blocks
 //   generate CODEMAP DIR    compile the recorded blocks into an AOT code cache
@@ -31,6 +35,7 @@
 #include <FEXCore/fextl/memory.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -39,6 +44,9 @@
 #include <string>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 
 #include "guest.h"
 
@@ -86,6 +94,122 @@ FEXCore::HostFeatures BaselineFeatures() {
 
 class ProbeSignalDelegator final : public FEXCore::SignalDelegator {};
 
+// The guest's exception handler (0: none) and what OnHostSignal needs to reach it.
+uint64_t GuestExceptionHandler;
+ProbeSignalDelegator* Signals;
+FEXCore::Context::Context* ExceptionCTX;
+FEXCore::Core::InternalThreadState* ExceptionThread;
+
+// Host registers in a signal's ucontext.
+#ifdef __APPLE__
+uint64_t& HostPc(ucontext_t* U) {
+  return U->uc_mcontext->__ss.__pc;
+}
+uint64_t& HostSp(ucontext_t* U) {
+  return U->uc_mcontext->__ss.__sp;
+}
+uint64_t& HostX(ucontext_t* U, int N) {
+  return N == 29 ? U->uc_mcontext->__ss.__fp : N == 30 ? U->uc_mcontext->__ss.__lr : U->uc_mcontext->__ss.__x[N];
+}
+const __uint128_t* HostV(ucontext_t* U) {
+  return U->uc_mcontext->__ns.__v;
+}
+#else
+uint64_t& HostPc(ucontext_t* U) {
+  return reinterpret_cast<uint64_t&>(U->uc_mcontext.pc);
+}
+uint64_t& HostSp(ucontext_t* U) {
+  return reinterpret_cast<uint64_t&>(U->uc_mcontext.sp);
+}
+uint64_t& HostX(ucontext_t* U, int N) {
+  return reinterpret_cast<uint64_t&>(U->uc_mcontext.regs[N]);
+}
+const __uint128_t* HostV(ucontext_t* U) {
+  // The kernel puts struct fpsimd_context (magic, size, fpsr, fpcr, vregs[32])
+  // first in __reserved.
+  auto* Reserved = reinterpret_cast<const uint8_t*>(U->uc_mcontext.__reserved);
+  uint32_t Magic;
+  memcpy(&Magic, Reserved, sizeof(Magic));
+  return Magic == 0x46508001 ? reinterpret_cast<const __uint128_t*>(Reserved + 16) : nullptr;
+}
+#endif
+
+// FEX raises guest exceptions as host signals:
+// - ud2 and int3 jump to a dispatcher stub that stores all guest registers in
+//   the thread's state, with rip already set, and traps: hlt #0 (SIGILL) or
+//   brk #0 (SIGTRAP).
+// - A guest memory access that faults traps inside the translated block
+//   (SIGSEGV, SIGBUS on Darwin), with guest registers still in host registers.
+// The probe then runs the guest's handler, a much simplified Windows exception
+// dispatch: rip = handler, rdi = x86 trap number, rsi = guest rip (of the
+// instruction, after it for int3), rdx = fault address, other registers as they
+// were. The faulting code is never resumed, so the host continues at the
+// dispatcher's loop top on its outermost stack frame.
+void OnHostSignal(int Signal, siginfo_t* Info, void* UContext) {
+  auto* U = static_cast<ucontext_t*>(UContext);
+  auto* Frame = ExceptionThread ? ExceptionThread->CurrentFrame : nullptr;
+  const auto& Config = Signals->GetConfig();
+  const uint64_t PC = HostPc(U);
+  uint64_t TrapNo;
+  uint64_t FaultAddress = 0;
+  if (!Frame || !GuestExceptionHandler) {
+    TrapNo = ~uint64_t {0};
+  } else if ((Signal == SIGILL || Signal == SIGTRAP) && Frame->SynchronousFaultData.FaultToTopAndGeneratedException &&
+             PC >= Config.DispatcherBegin && PC < Config.DispatcherEnd) {
+    TrapNo = Frame->SynchronousFaultData.TrapNo;
+    Frame->SynchronousFaultData.FaultToTopAndGeneratedException = false;
+  } else if ((Signal == SIGSEGV || Signal == SIGBUS) && ExceptionCTX->IsAddressInCodeBuffer(ExceptionThread, PC)) {
+    auto& State = Frame->State;
+    for (size_t i = 0; i < Config.SRAGPRCount; ++i) {
+      State.gregs[i] = HostX(U, Config.SRAGPRMapping[i]);
+    }
+    if (const auto* V = HostV(U)) {
+      for (size_t i = 0; i < Config.SRAFPRCount; ++i) {
+        memcpy(&State.xmm.sse.data[i][0], &V[Config.SRAFPRMapping[i]], sizeof(__uint128_t));
+      }
+    }
+    State.rip = ExceptionCTX->RestoreRIPFromHostPC(ExceptionThread, PC);
+    TrapNo = 14; // #PF
+    FaultAddress = reinterpret_cast<uint64_t>(Info->si_addr);
+  } else {
+    TrapNo = ~uint64_t {0};
+  }
+  if (TrapNo == ~uint64_t {0}) {
+    // Not the guest's: crash the way the process would have without us.
+    signal(Signal, SIG_DFL);
+    return;
+  }
+
+  auto& State = Frame->State;
+  State.gregs[FEXCore::X86State::REG_RDI] = TrapNo;
+  State.gregs[FEXCore::X86State::REG_RSI] = State.rip;
+  State.gregs[FEXCore::X86State::REG_RDX] = FaultAddress;
+  State.rip = GuestExceptionHandler;
+  HostPc(U) = Config.AbsoluteLoopTopAddressFillSRA;
+  HostSp(U) = Frame->ReturningStackLocation;
+  HostX(U, 1) = 0; // ENTRY_FILL_SRA_SINGLE_INST_REG: a normal block, not one instruction
+}
+
+bool InstallSignalHandlers() {
+  struct sigaction Action {};
+  Action.sa_sigaction = OnHostSignal;
+  Action.sa_flags = SA_SIGINFO;
+  sigemptyset(&Action.sa_mask);
+  for (int Signal : {SIGILL, SIGTRAP, SIGSEGV, SIGBUS}) {
+    if (sigaction(Signal, &Action, nullptr) != 0) {
+      perror("sigaction");
+      return false;
+    }
+  }
+#ifdef __APPLE__
+  // Under a debugger (Xcode) these faults stop in the debugger first. Hand
+  // them straight to the signal handlers instead.
+  task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_BREAKPOINT, MACH_PORT_NULL,
+                           EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+#endif
+  return true;
+}
+
 class ProbeSyscallHandler final : public FEXCore::HLE::SyscallHandler, public FEXCore::CodeMapOpener {
 public:
   ProbeSyscallHandler(const FEXCore::ExecutableFileInfo& FileInfo, uintptr_t Base, size_t Size, const char* CodeMapPath)
@@ -101,6 +225,10 @@ public:
       auto* Buf = reinterpret_cast<const char*>(Regs[FEXCore::X86State::REG_RSI]);
       Output.append(Buf, Regs[FEXCore::X86State::REG_RDX]);
       Regs[FEXCore::X86State::REG_RAX] = Regs[FEXCore::X86State::REG_RDX];
+    } else if (Regs[FEXCore::X86State::REG_RAX] == 0x5750) {
+      // WinPad probe: set the exception handler to rdi
+      GuestExceptionHandler = Regs[FEXCore::X86State::REG_RDI];
+      Regs[FEXCore::X86State::REG_RAX] = 0;
     } else {
       Regs[FEXCore::X86State::REG_RAX] = -ENOSYS;
     }
@@ -243,13 +371,14 @@ int WinPadProbeMain(int argc, char** argv) {
 
   FEXCore::ExecutableFileInfo FileInfo {nullptr, GuestFileId, "winpad-probe-guest"};
   ProbeSyscallHandler Syscalls {FileInfo, Base, GuestSize, Record ? argv[2] : nullptr};
-  ProbeSignalDelegator Signals;
+  ProbeSignalDelegator Delegator;
+  Signals = &Delegator;
 
   auto CTX = FEXCore::Context::Context::CreateNewContext(BaselineFeatures());
   if (Generate) {
     CTX->GetCodeCache().InitiateCacheGeneration();
   }
-  CTX->SetSignalDelegator(&Signals);
+  CTX->SetSignalDelegator(&Delegator);
   CTX->SetSyscallHandler(&Syscalls);
   CTX->EnableExitOnHLT();
   if (!CTX->InitCore()) {
@@ -318,6 +447,11 @@ int WinPadProbeMain(int argc, char** argv) {
     CTX->GetCodeCache().EnableLoadedSection(Thread, *Cache, Syscalls.Section());
   }
 
+  ExceptionCTX = CTX.get();
+  ExceptionThread = Thread;
+  if (!InstallSignalHandlers()) {
+    return 1;
+  }
   auto& State = Thread->CurrentFrame->State;
   State.rip = Base;
   State.gregs[FEXCore::X86State::REG_RSP] = reinterpret_cast<uintptr_t>(Stack) + StackSize - 64;
@@ -327,7 +461,7 @@ int WinPadProbeMain(int argc, char** argv) {
     CTX->FlushAndCloseCodeMap();
   }
   const auto R12 = State.gregs[FEXCore::X86State::REG_R12];
-  // r13: the guest's check that ran last (guest.S), 6 when all passed
+  // r13: the guest's check that ran last (guest.S), 9 when all passed
   const auto R13 = State.gregs[FEXCore::X86State::REG_R13];
   printf("guest wrote \"%s\", r12=%llu, r13=%llu\n", Output == "ok\n" ? "ok\\n" : Output.c_str(),
          static_cast<unsigned long long>(R12), static_cast<unsigned long long>(R13));
