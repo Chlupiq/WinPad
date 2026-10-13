@@ -76,4 +76,14 @@ Dispatcher FEX (smyčka hledání bloků, obsluha signálů, volání kompiláto
 
 Na iOS tak FEX nepotřebuje spustitelnou paměť pro dispatcher ani pro bloky v AOT cache. Bloky, které v cache nejsou, ale pořád překládá JIT. Bez JITu je musí obsloužit interpret, nebo musí být v cache všechny.
 
-Zbývá: iOS build a test na iPadu, včetně cesty pro bloky mimo cache.
+## Režim bez JITu (patch 0008)
+
+Volba `NoJIT` zaručí, že FEX nikdy nežádá o spustitelnou paměť, což je na iOS bez debuggeru podmínka:
+
+- Paměť pro JIT kód se alokuje jen pro čtení a zápis.
+- Když blok hosta není v lookup cache (tedy ani v AOT obrazu), `CompileBlock` FEX zastaví s chybou s adresou bloku. Nic nepřekládá.
+- Dispatcher musí být z obrazu. Když tam žádný odpovídající není, FEX skončí, místo aby udělal spustitelný vlastní.
+
+CI spouští běh z `.so` s `FEX_NOJIT=1`, takže ověřuje, že testovací program proběhne celý jen z AOT kódu. Pro skutečné hry zůstává otázka bloků, které při nahrávání neproběhly: interpret, nebo opakované nahrávání, dokud cache nepokryje vše.
+
+Zbývá: iOS build a test na iPadu.

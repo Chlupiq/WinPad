@@ -1,0 +1,98 @@
+NoJIT option: run only code from the AOT image (FEX 14c9268, on top of 0007)
+
+On iOS without a debugger attached, memory can never be made executable.
+With NoJIT=1 FEX does not ask for it:
+
+- JIT code buffers are allocated read+write only; nothing runs from them.
+- ContextImpl::CompileBlock stops FEX with an error naming the guest block
+  when a block is not in the lookup cache, i.e. not in the AOT image,
+  instead of compiling it.
+- The dispatcher must come from the AOT image (patch 0006); if the image
+  has none matching this build, FEX stops instead of making its own
+  dispatcher executable.
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index f253a18..58dd2a1 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -53,6 +53,15 @@
+           "If it holds a dispatcher matching this build, FEX runs that instead of generating one."
+         ]
+       },
++      "NoJIT": {
++        "Type": "bool",
++        "Default": "false",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "Never make memory executable: run only code from the AOT image (dispatcher and",
++          "cached blocks). A block missing from the image stops FEX with an error."
++        ]
++      },
+       "DumpDispatcher": {
+         "Type": "str",
+         "Default": "",
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index 91e67d5..8e6a898 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -377,6 +377,7 @@ public:
+     FEX_CONFIG_OPT(SoftwareRNG, SOFTWARERNG);
+     FEX_CONFIG_OPT(StrictInProcessSplitLocks, STRICTINPROCESSSPLITLOCKS);
+     FEX_CONFIG_OPT(MonoHacks, MONOHACKS);
++    FEX_CONFIG_OPT(NoJIT, NOJIT);
+   } Config;
+ 
+   bool SoftwareRNGEnabled() const {
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 63280a4..dbcd985 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -875,6 +875,10 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+     return HostCode;
+   }
+ 
++  if (Config.NoJIT()) {
++    ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image", GuestRIP);
++  }
++
+   Thread->FrontendDecoder->SetupDecodeInstructionsAtEntry(Thread, GuestRIP, MaxInst);
+ 
+   std::optional<ExecutableFileSectionInfo> Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index e7379b7..58223f3 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -74,6 +74,10 @@ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
+   if (WantsStaticCode()) {
+     FEX_CONFIG_OPT(AOTImage, AOTIMAGE);
+     if (!UseStaticCode(AOTImage())) {
++      FEX_CONFIG_OPT(NoJIT, NOJIT);
++      if (NoJIT()) {
++        ERROR_AND_DIE_FMT("NoJIT: AOT image {} has no dispatcher matching this build", AOTImage());
++      }
+       // Run the generated code after all
+       mprotect(GetBufferBase(), MAX_DISPATCHER_CODE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC);
+     }
+diff --git a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
+index eee5023..ffcb557 100644
+--- a/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
++++ b/FEXCore/Source/Interface/Core/SharedCodeBufferManager.cpp
+@@ -2,6 +2,7 @@
+ #include "Interface/Core/LookupCache.h"
+ #include "Interface/Core/SharedCodeBufferManager.h"
+ 
++#include <FEXCore/Config/Config.h>
+ #include <FEXCore/fextl/memory.h>
+ #include <FEXCore/Utils/AllocatorHooks.h>
+ #include <FEXCore/Utils/LogManager.h>
+@@ -18,7 +19,9 @@ static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;
+ 
+ CodeBuffer::CodeBuffer(size_t Size, bool ShouldBeNamed)
+   : AllocatedSize(Size) {
+-  Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, true));
++  // NoJIT: blocks are never run from here (see ContextImpl::CompileBlock)
++  FEX_CONFIG_OPT(NoJIT, NOJIT);
++  Ptr = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(Size, !NoJIT()));
+   LOGMAN_THROW_A_FMT(!!Ptr, "Couldn't allocate code buffer");
+ 
+   // Protect the last page of the allocated buffer to trigger SIGSEGV on write access
