@@ -78,16 +78,33 @@ NSString* ReadLog() {
 }
 @end
 
-@interface ProbeAppDelegate : UIResponder <UIApplicationDelegate>
+// Apps built with the iOS 27 SDK must use the scene life cycle.
+@interface ProbeSceneDelegate : UIResponder <UIWindowSceneDelegate>
 @property(nonatomic, strong) UIWindow* window;
+@end
+
+@implementation ProbeSceneDelegate
+- (void)scene:(UIScene*)scene willConnectToSession:(UISceneSession*)session options:(UISceneConnectionOptions*)options {
+  self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
+  self.window.rootViewController = [ProbeViewController new];
+  [self.window makeKeyAndVisible];
+}
+@end
+
+@interface ProbeAppDelegate : UIResponder <UIApplicationDelegate>
 @end
 
 @implementation ProbeAppDelegate
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)options {
-  self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-  self.window.rootViewController = [ProbeViewController new];
-  [self.window makeKeyAndVisible];
   return YES;
+}
+
+- (UISceneConfiguration*)application:(UIApplication*)application
+    configurationForConnectingSceneSession:(UISceneSession*)session
+                                   options:(UISceneConnectionOptions*)options {
+  UISceneConfiguration* Config = [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:session.role];
+  Config.delegateClass = [ProbeSceneDelegate class];
+  return Config;
 }
 @end
 
