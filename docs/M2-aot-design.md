@@ -56,4 +56,14 @@ Na Linuxu ARM64 v CI: AOT cache se namapuje ze souboru jen `r-x` (bez staging bu
 
 Ověření bez iPadu: `tests/fex-cache/run.sh` převede AOT cache z CI, slinkuje ji `ld64.lld` jako iOS dylib a `check_linked.py` ve výsledku dekóduje každý odkaz do datové oblasti a porovná ho s offsetem, který by použil zavaděč FEX. Ostatní bajty kódu musí zůstat stejné a segment s kódem musí být `r-x`.
 
-Zbývá: zavaděč v FEX, který místo souboru vezme kód a data ze symbolů `_PREFIX_text`/`_data`/`_meta` (bez kopírování a `mprotect`), a statický dispatcher (bod 5 z M1). To patří k iOS buildu.
+Symboly se jmenují `fexaot_<file id>_<config id>_text`/`_data`/`_meta` podle jména cache souboru, takže FEX najde kód pro konkrétní binárku a do jedné aplikace jde slinkovat víc cache.
+
+## Zavaděč z nalinkovaného obrazu (patch 0005)
+
+`CodeCache::LoadLinkedCache` vezme tři symboly obrazu: z `_meta` přečte bloky a relokace, vyplní datovou oblast v `_data` a kód v `_text` použije na místě. Nic nekopíruje, nevolá `mprotect` a do kódu nezapisuje; všechny stránky jsou rovnou načtené a kód je `ReadOnlyCode`. `ExternalCode` zabrání tomu, aby FEX paměť obrazu uvolnil.
+
+Na Linuxu volba `AOTImage` (`FEX_AOTIMAGE`) ukazuje na sdílenou knihovnu z `cache2macho.py --elf-asm` (stejný obraz jako AArch64 assembler; odkazy do dat řeší assembler a `ld.lld`). FEX ji načte přes `dlopen` a symboly najde přes `dlsym`; když pro binárku nic nemá, použije se cache soubor jako dřív. CI tak spouští host s kódem, který FEX nikdy nekopíroval ani neupravoval: cache soubory se před během přesunou pryč a log musí obsahovat `AOT image linked:`.
+
+Na iOS bude zavaděč stejný, jen symboly hledá v aplikaci (`dlsym(RTLD_DEFAULT, …)`) místo v `.so`.
+
+Zbývá: statický dispatcher (bod 5 z M1), pak iOS build a test na iPadu.

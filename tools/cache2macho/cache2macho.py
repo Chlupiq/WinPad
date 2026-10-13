@@ -19,13 +19,21 @@ Sections of the object:
   __TEXT,__fexaot_meta  "FXAM" header followed by the cache file without its
                         code (header, block list, relocations, code pages), for
                         the runtime loader.
-Global symbols: _PREFIX_text, _PREFIX_data, _PREFIX_meta (PREFIX defaults to
-"fexaot"; give each cache its own when linking several into one app).
+Global symbols: _PREFIX_text, _PREFIX_data, _PREFIX_meta. PREFIX defaults to
+fexaot_<file id>_<config id>, taken from the cache file name
+(<binary>-<file id>-<config id>); FEX looks the symbols up under that name
+(patches/fex/0005), so several caches can be linked into one app.
 
-Usage: cache2macho.py [--prefix NAME] [--min-ios 15.0] CACHE_FILE OUT.o
+With --elf-asm the same image is written as AArch64 assembly for Linux
+instead (sections .text.fexaot, .rodata.fexaot, .bss.fexaot); assembled and
+linked into a shared object, FEX can load it with the AOTImage option. This is
+how CI runs linked AOT code without an iPad.
+
+Usage: cache2macho.py [--prefix NAME] [--min-ios 15.0] [--elf-asm] CACHE_FILE OUT
 """
 import argparse
 import os
+import re
 import struct
 import sys
 
@@ -56,7 +64,8 @@ ARM64_RELOC_PAGE21 = 3
 ARM64_RELOC_PAGEOFF12 = 4
 ARM64_RELOC_ADDEND = 10
 
-META_HEADER = struct.Struct("<4sIQQQ")  # magic, version, code size, data size, code offset in cache file
+# magic, version, code size, data size, code offset in cache file, size of the cache file without code
+META_HEADER = struct.Struct("<4sIQQQQ")
 
 
 class ConvertError(Exception):
@@ -109,6 +118,29 @@ def layout(relocs):
     return slots, index * 8
 
 
+def default_prefix(path):
+    m = re.search(r"-([0-9a-f]{16})-([0-9a-f]{16})$", os.path.basename(path))
+    if not m:
+        raise ConvertError("cache file name does not end in -<file id>-<config id>; pass --prefix")
+    return f"fexaot_{m.group(1)}_{m.group(2)}"
+
+
+def prepare(data):
+    """Parsed cache pieces shared by both output formats."""
+    info = fi.parse(data)
+    if not info["blocks"]:
+        raise ConvertError("empty cache")
+    relocs = read_relocations(data, info)
+    slots, data_size = layout(relocs)
+    if not data_size:
+        raise ConvertError("cache has no data area; generate it with AOTCodeCacheWIP")
+    code_off = info["code_offset"]
+    code_size = info["code_bytes"]
+    rest = data[:code_off] + data[code_off + code_size:]
+    meta = META_HEADER.pack(b"FXAM", 1, code_size, data_size, code_off, len(rest)) + rest
+    return relocs, slots, data_size, data[code_off:code_off + code_size], meta
+
+
 class Symbols:
     def __init__(self):
         self.locals = []  # (name, section index, value)
@@ -130,18 +162,9 @@ def reloc_entry(address, symbolnum, pcrel, length, extern, rtype):
 
 
 def convert(data, prefix, min_ios):
-    info = fi.parse(data)
-    if not info["blocks"]:
-        raise ConvertError("empty cache")
-    relocs = read_relocations(data, info)
-    slots, data_size = layout(relocs)
-    if not data_size:
-        raise ConvertError("cache has no data area; generate it with AOTCodeCacheWIP")
-
-    code_off = info["code_offset"]
-    code_size = info["code_bytes"]
-    text = bytearray(data[code_off:code_off + code_size])
-    meta = META_HEADER.pack(b"FXAM", 1, code_size, data_size, code_off) + data[:code_off] + data[code_off + code_size:]
+    relocs, slots, data_size, code, meta = prepare(data)
+    code_size = len(code)
+    text = bytearray(code)
 
     # Section addresses inside the object: text, meta, data
     text_addr = 0
@@ -245,23 +268,72 @@ def convert(data, prefix, min_ios):
     return bytes(out), {"code_bytes": code_size, "data_bytes": data_size, "relocations": len(rel)}
 
 
+def convert_elf_asm(data, prefix):
+    """The same image as AArch64 ELF assembly; the assembler emits the relocations."""
+    relocs, slots, data_size, code, meta = prepare(data)
+    sites = {}
+    for r, slot in zip(relocs, slots):
+        site = r["offset"]
+        if r["type"] in ("GUEST_RIP_DATA_SLOT", "GUEST_RIP_LINK_RECORD"):
+            adrp, lo = struct.unpack_from("<II", code, site)
+            if adrp & 0x9F000000 != 0x90000000:
+                raise ConvertError(f"expected adrp at code+{site:#x}, found {adrp:#010x}")
+            reg = adrp & 0x1F
+            target = f".Lfexaot_data+{slot}"
+            sites[site] = f"adrp x{reg}, {target}"
+            if r["type"] == "GUEST_RIP_DATA_SLOT":
+                if lo & 0xFFC00000 != 0xF9400000:
+                    raise ConvertError(f"expected ldr at code+{site + 4:#x}, found {lo:#010x}")
+                sites[site + 4] = f"ldr x{lo & 0x1F}, [x{(lo >> 5) & 0x1F}, :lo12:{target}]"
+            else:
+                if lo & 0xFFC00000 != 0x91000000:
+                    raise ConvertError(f"expected add at code+{site + 4:#x}, found {lo:#010x}")
+                sites[site + 4] = f"add x{lo & 0x1F}, x{(lo >> 5) & 0x1F}, :lo12:{target}"
+        elif r["type"] == "AOT_BLOCK_TAIL":
+            sites[site - r["offset_from_header"]] = f".word .Lfexaot_data+{slot}-."
+
+    def symbol(name, section):
+        return [f"\t.globl {name}", f"\t.type {name}, {section}", f"{name}:"]
+
+    out = ["\t.section .text.fexaot,\"ax\",@progbits", f"\t.p2align {TEXT_ALIGN_LOG2}"]
+    out += symbol(f"{prefix}_text", "%function")
+    for off in range(0, len(code), 4):
+        out.append("\t" + sites.get(off, f".inst {struct.unpack_from('<I', code, off)[0]:#010x}"))
+    out += [f"\t.size {prefix}_text, {len(code)}", "", "\t.section .rodata.fexaot,\"a\",@progbits", "\t.p2align 3"]
+    out += symbol(f"{prefix}_meta", "%object")
+    for off in range(0, len(meta), 16):
+        out.append("\t.byte " + ",".join(str(b) for b in meta[off:off + 16]))
+    out += [f"\t.size {prefix}_meta, {len(meta)}", "", "\t.section .bss.fexaot,\"aw\",@nobits",
+            f"\t.p2align {TEXT_ALIGN_LOG2}"]
+    out += symbol(f"{prefix}_data", "%object")
+    out += [".Lfexaot_data:", f"\t.zero {data_size}", f"\t.size {prefix}_data, {data_size}", ""]
+    return "\n".join(out), {"code_bytes": len(code), "data_bytes": data_size, "relocations": len(sites)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cache")
     ap.add_argument("output")
-    ap.add_argument("--prefix", default="fexaot", help="symbol and section name prefix")
+    ap.add_argument("--prefix", help="symbol name prefix (default: from the cache file name)")
     ap.add_argument("--min-ios", default="15.0")
+    ap.add_argument("--elf-asm", action="store_true", help="write AArch64 ELF assembly for Linux instead")
     args = ap.parse_args()
     with open(args.cache, "rb") as fh:
         data = fh.read()
     try:
-        obj, stats = convert(data, args.prefix, args.min_ios)
+        prefix = args.prefix or default_prefix(args.cache)
+        if args.elf_asm:
+            text, stats = convert_elf_asm(data, prefix)
+            obj = text.encode()
+        else:
+            obj, stats = convert(data, prefix, args.min_ios)
     except (ConvertError, fi.FormatError) as e:
         sys.exit(f"{args.cache}: {e}")
     with open(args.output, "wb") as fh:
         fh.write(obj)
-    print(f"{args.output}: code {stats['code_bytes']} bytes, data area {stats['data_bytes']} bytes, "
-          f"{stats['relocations']} Mach-O relocations")
+    kind = "relocated instructions" if args.elf_asm else "Mach-O relocations"
+    print(f"{args.output}: {prefix}, code {stats['code_bytes']} bytes, data area {stats['data_bytes']} bytes, "
+          f"{stats['relocations']} {kind}")
 
 
 if __name__ == "__main__":

@@ -60,6 +60,29 @@ class ConvertTest(unittest.TestCase):
         text_off = obj.index(struct.pack("<II", ADRP_X0, LDR_X0))  # immediates cleared
         self.assertEqual(struct.unpack_from("<i", obj, text_off - 0x10)[0], 32 - 0)  # tail slot 32 minus header 0
 
+    def test_elf_asm_references_data_area(self):
+        tail = struct.pack("<IQI", 16, 0x1000, 0x60)
+        data = build_cache(
+            blocks=[(0x1000, 4, [0x1000])],
+            relocs=[(0x10, DATA_SLOT, b""), (0x20, LINK_RECORD, b""), (0x60, BLOCK_TAIL, tail)],
+            code=aot_code(),
+        )
+        text, stats = c2m.convert_elf_asm(data, "t")
+        lines = [line.strip() for line in text.splitlines()]
+        self.assertEqual(stats["relocations"], 5)
+        self.assertEqual(lines.count(".word .Lfexaot_data+32-."), 1)  # header at code+0
+        self.assertIn("adrp x0, .Lfexaot_data+0", lines)
+        self.assertIn("ldr x0, [x0, :lo12:.Lfexaot_data+0]", lines)
+        self.assertIn("adrp x0, .Lfexaot_data+8", lines)
+        self.assertIn("add x0, x0, :lo12:.Lfexaot_data+8", lines)
+        self.assertIn(".zero 48", lines)
+
+    def test_default_prefix(self):
+        self.assertEqual(c2m.default_prefix("/c/guest-00000000deadbeef-0123456789abcdef"),
+                         "fexaot_00000000deadbeef_0123456789abcdef")
+        with self.assertRaises(c2m.ConvertError):
+            c2m.default_prefix("guest.bin")
+
     def test_rejects_cache_that_patches_code(self):
         data = build_cache(blocks=[(0x1000, 0, [])], relocs=[(0x10, GUEST_RIP_MOVE, b"")], code=aot_code())
         with self.assertRaises(c2m.ConvertError):
