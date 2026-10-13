@@ -158,6 +158,40 @@ load_at:
         jmp     done                    # the read did not fault
 after_load:
 
+        # 10: threads. Two guest threads and this one each add 1 to a counter
+        # on this stack 100000 times with lock inc; the probe runs the guest
+        # threads on host threads (syscall 0x5751 start, 0x5752 wait).
+        inc     r13d
+        sub     rsp, 16
+        mov     qword ptr [rsp], 0
+        mov     eax, 0x5751
+        lea     rdi, [rip + worker]
+        lea     rsi, [rsp - 0x40000]    # its stack: further down this one
+        mov     rdx, rsp                # its rdi: the counter
+        syscall
+        mov     r14, rax
+        mov     eax, 0x5751
+        lea     rdi, [rip + worker]
+        lea     rsi, [rsp - 0x80000]
+        mov     rdx, rsp
+        syscall
+        mov     r15, rax
+        mov     rdi, rsp
+        call    count
+        mov     eax, 0x5752
+        mov     rdi, r14
+        syscall
+        test    rax, rax
+        jnz     done
+        mov     eax, 0x5752
+        mov     rdi, r15
+        syscall
+        test    rax, rax
+        jnz     done
+        cmp     qword ptr [rsp], 300000
+        lea     rsp, [rsp + 16]
+        jne     done
+
         mov     eax, 1                  # write(1, msg, 3)
         mov     edi, 1
         lea     rsi, [rip + msg]
@@ -165,6 +199,18 @@ after_load:
         syscall
 done:
         hlt                             # the probe runs FEX with exit on HLT
+
+worker:
+        call    count
+        hlt                             # stops this thread only
+
+count:
+        mov     ecx, 100000
+1:
+        lock inc qword ptr [rdi]
+        dec     ecx
+        jnz     1b
+        ret
 
 on_exception:
         cmp     rdi, r8
