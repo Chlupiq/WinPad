@@ -3,7 +3,8 @@
 # x86-64 guest with code caching enabled so FEX records a code map, has
 # FEXOfflineCompiler turn it into a code cache, counts what is in that cache
 # with tools/fxcc-inspect and checks that a second run loads it. Then does
-# the same with an AOT cache (patches/fex/0002-0004).
+# the same with an AOT cache (patches/fex/0002-0004), and with that cache
+# linked into a shared object (tools/cache2macho, patches/fex/0005).
 #
 # This is the baseline for the AOT mode (docs/M1-findings.md, section B): every
 # relocation reported here is a write into code that iOS without JIT forbids.
@@ -137,14 +138,21 @@ PY
 
 # The AOT cache as a Mach-O object for iOS (tools/cache2macho): link it the way
 # the app would and check that the linker resolved every data-area reference.
+# The same caches as ELF assembly go into one shared object for the run below.
 ld64=$(command -v ld64.lld || ls /usr/lib/llvm-*/bin/ld64.lld 2>/dev/null | tail -n 1)
 [ -n "$ld64" ] || { echo "ld64.lld not found" >&2; exit 1; }
 n=0
 for c in $(find "$cachedir" -type f ! -name '*.tmp' ! -name '*.lock'); do
     n=$((n + 1))
-    python3 -I "$root/tools/cache2macho/cache2macho.py" --prefix "fexaot$n" "$c" "$work/aot$n.o"
+    python3 -I "$root/tools/cache2macho/cache2macho.py" "$c" "$work/aot$n.o"
     "$ld64" -arch arm64 -platform_version ios 15.0 15.0 -dylib -o "$work/aot$n.dylib" "$work/aot$n.o"
     python3 -I "$root/tools/cache2macho/check_linked.py" "$c" "$work/aot$n.dylib"
+    python3 -I "$root/tools/cache2macho/cache2macho.py" --elf-asm "$c" "$work/aot$n.s"
+    clang -c -o "$work/aot$n-elf.o" "$work/aot$n.s"
+done
+clang -shared -nostdlib -fuse-ld=lld -o "$work/aot.so" "$work"/aot*-elf.o
+for c in $(find "$cachedir" -type f ! -name '*.tmp' ! -name '*.lock'); do
+    python3 -I "$root/tools/cache2macho/check_linked.py" "$c" "$work/aot.so"
 done
 
 run_cached aot aot-census
@@ -152,3 +160,13 @@ grep -Eq 'AOT data area: .*\([1-9][0-9]* link records\)' "$work/fex-aot-run.log"
     { echo "FEX did not set up the AOT data area with link records" >&2; exit 1; }
 grep -q 'AOT code mapped read+execute:' "$work/fex-aot-run.log" ||
     { echo "FEX did not map the AOT code read-only" >&2; exit 1; }
+
+# Linked AOT code (patches/fex/0005): FEX takes code and data area from the
+# shared object instead of the cache files, which are moved away to be sure.
+mv "$cachedir" "$cachedir.files"
+export FEX_AOTIMAGE="$work/aot.so"
+run_cached aot-image aot-census
+unset FEX_AOTIMAGE
+mv "$cachedir.files" "$cachedir"
+grep -q 'AOT image linked:' "$work/fex-aot-image-run.log" ||
+    { echo "FEX did not load the linked AOT image" >&2; exit 1; }

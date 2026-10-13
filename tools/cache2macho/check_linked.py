@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Check a linked Mach-O image built from cache2macho output.
+"""Check a linked image built from cache2macho output (Mach-O, or ELF with --elf-asm).
 
 For every data-area reference in the AOT cache, decodes the adrp/ldr or
 adrp/add pair (or the block header's 32-bit tail offset) in the linked image
 and checks that it reaches the same data area offset FEX's loader would use.
 All other code bytes must be identical to the cache, and the code must sit in
 a read+execute segment, so the image needs no fix-ups in code at load time.
+
+An ELF image may hold several caches; the one checked is found by the
+symbol names cache2macho derives from the cache file name.
 
 Usage: check_linked.py CACHE_FILE LINKED_IMAGE
 """
@@ -22,7 +25,37 @@ import fxcc_inspect as fi  # noqa: E402
 VM_PROT_READ, VM_PROT_WRITE, VM_PROT_EXECUTE = 1, 2, 4
 
 
-def sections(image):
+def elf_sections(image, prefix):
+    """The exported _text/_data symbols of an ELF image; lld folds .text.fexaot into .text."""
+    shoff, = struct.unpack_from("<Q", image, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", image, 0x3A)
+    shdrs = [struct.unpack_from("<IIQQQQIIQQ", image, shoff + i * shentsize) for i in range(shnum)]
+    phoff, = struct.unpack_from("<Q", image, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", image, 0x36)
+    loads = [struct.unpack_from("<IIQQQQQ", image, phoff + i * phentsize) for i in range(phnum)]
+    found = {}
+    for sh in shdrs:
+        if sh[1] != 11:  # SHT_DYNSYM
+            continue
+        strtab = shdrs[sh[6]][4]
+        for i in range(sh[5] // 24):
+            name_off, _, _, _, value, size = struct.unpack_from("<IBBHQQ", image, sh[4] + 24 * i)
+            name = image[strtab + name_off:image.index(b"\0", strtab + name_off)].decode()
+            kind = name.rsplit("_", 1)[-1]
+            if name not in (f"{prefix}_text", f"{prefix}_data"):
+                continue
+            # PF_X=1, PF_W=2, PF_R=4 of the PT_LOAD segment holding the symbol
+            load = next(p for p in loads if p[0] == 1 and p[3] <= value < p[3] + p[6])
+            flags = load[1]
+            prot = (VM_PROT_READ if flags & 4 else 0) | (VM_PROT_WRITE if flags & 2 else 0) | (VM_PROT_EXECUTE if flags & 1 else 0)
+            found["__fexaot_" + kind] = {"segment": name, "prot": prot, "addr": value, "size": size,
+                                        "offset": load[2] + value - load[3]}
+    return found
+
+
+def sections(image, prefix):
+    if image[:4] == b"\x7fELF":
+        return elf_sections(image, prefix)
     magic, _, _, _, ncmds, _, _, _ = struct.unpack_from("<IiiIIIII", image, 0)
     if magic != c2m.MH_MAGIC_64:
         raise SystemExit("not a 64-bit Mach-O image")
@@ -58,7 +91,7 @@ def main():
     slots, data_size = c2m.layout(relocs)
     code = data[info["code_offset"]:info["code_offset"] + info["code_bytes"]]
 
-    sects = sections(image)
+    sects = sections(image, c2m.default_prefix(cache_path))
     text, area = sects.get("__fexaot_text"), sects.get("__fexaot_data")
     if not text or not area:
         raise SystemExit("image has no __fexaot_text/__fexaot_data sections")
@@ -78,6 +111,9 @@ def main():
         site = r["offset"]
         if r["type"] in ("GUEST_RIP_DATA_SLOT", "GUEST_RIP_LINK_RECORD"):
             adrp, lo = struct.unpack_from("<II", linked, site)
+            want_adrp, want_lo = struct.unpack_from("<II", code, site)
+            if (adrp ^ want_adrp) & 0x9F00001F or (lo ^ want_lo) & 0xFFC003FF:
+                errors.append(f"instructions at code+{site:#x} changed beyond their immediates")
             page = adrp_target(adrp, text["addr"] + site)
             imm12 = (lo >> 10) & 0xFFF
             got = page + (imm12 * 8 if r["type"] == "GUEST_RIP_DATA_SLOT" else imm12)
