@@ -125,7 +125,7 @@ x87_done:
         mov     rdi, rsp
         mov     ecx, 3
         repe cmpsb
-        add     rsp, 16
+        lea     rsp, [rsp + 16]         # keeps the flags of cmpsb
         jne     done
 
         mov     eax, 1                  # write(1, msg, 3)
