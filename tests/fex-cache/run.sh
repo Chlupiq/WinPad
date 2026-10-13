@@ -176,10 +176,12 @@ grep -q 'AOT code mapped read+execute:' "$work/fex-aot-run.log" ||
 # Linked AOT code (patches/fex/0005, 0006): FEX takes code and data area from
 # the shared object instead of the cache files, which are moved away to be
 # sure, and runs the dispatcher from it; the one it generates is not executable.
+# With NoJIT (patch 0008) FEX makes no memory executable and stops if any
+# guest block is missing from the image, as it must on iOS.
 mv "$cachedir" "$cachedir.files"
-export FEX_AOTIMAGE="$work/aot.so"
+export FEX_AOTIMAGE="$work/aot.so" FEX_NOJIT=1
 run_cached aot-image aot-census
-unset FEX_AOTIMAGE
+unset FEX_AOTIMAGE FEX_NOJIT
 mv "$cachedir.files" "$cachedir"
 grep -q 'AOT image linked:' "$work/fex-aot-image-run.log" ||
     { echo "FEX did not load the linked AOT image" >&2; exit 1; }
