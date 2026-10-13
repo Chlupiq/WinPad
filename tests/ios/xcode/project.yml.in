@@ -1,0 +1,39 @@
+name: WinPadProbe
+options:
+  deploymentTarget:
+    iOS: "@MIN_IOS@"
+targets:
+  WinPadProbe:
+    type: application
+    platform: iOS
+    sources:
+      - main.mm
+    postBuildScripts:
+      # The AOT image for the platform being built, copied into Frameworks/
+      # and signed; never linked, the probe loads it with dlopen.
+      - name: Embed AOT image
+        inputFiles:
+          - $(PROJECT_DIR)/Frameworks/$(PLATFORM_NAME)/probe-aot.dylib
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/probe-aot.dylib
+        script: |
+          set -e
+          dst="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          mkdir -p "$dst"
+          cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME/probe-aot.dylib" "$dst/"
+          if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dst/probe-aot.dylib"
+          fi
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        ARCHS: arm64
+        CLANG_ENABLE_OBJC_ARC: YES
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
+        # Libraries for the platform being built: lib/iphoneos or lib/iphonesimulator.
+        OTHER_LDFLAGS:

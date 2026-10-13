@@ -63,7 +63,9 @@ class ConvertTest(unittest.TestCase):
     def test_platform(self):
         data = build_cache(blocks=[(0x1000, 4, [0x1000])], relocs=[(0x10, DATA_SLOT, b"")], code=aot_code())
         for args, platform, version in (((), c2m.PLATFORM_IOS, 15 << 16),
-                                        (("14.4", c2m.PLATFORM_MACOS), c2m.PLATFORM_MACOS, (14 << 16) | (4 << 8))):
+                                        (("14.4", c2m.PLATFORM_MACOS), c2m.PLATFORM_MACOS, (14 << 16) | (4 << 8)),
+                                        (("17.4", c2m.PLATFORM_IOSSIMULATOR), c2m.PLATFORM_IOSSIMULATOR,
+                                         (17 << 16) | (4 << 8))):
             obj, _ = c2m.convert(data, "t", *(args or ("15.0",)))
             cmd = obj.index(struct.pack("<I", c2m.LC_BUILD_VERSION))
             self.assertEqual(struct.unpack_from("<III", obj, cmd + 8), (platform, version, version))

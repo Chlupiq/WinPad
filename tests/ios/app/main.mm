@@ -56,6 +56,8 @@ NSString* ReadLog() {
 - (void)runProbe {
   NSString* Image = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"probe-aot.dylib"];
   // FEX and the probe write with stdio; send both streams to the log file.
+  // The log also goes to the original stderr at the end: Xcode's console.
+  const int Console = dup(fileno(stderr));
   freopen(LogPath().fileSystemRepresentation, "w", stdout);
   dup2(fileno(stdout), fileno(stderr));
   setvbuf(stdout, nullptr, _IONBF, 0);
@@ -68,22 +70,41 @@ NSString* ReadLog() {
   NSString* Summary = Status == 0 ? @"OK: the x86 program ran from the AOT image without a JIT.\n\n" :
                                     [NSString stringWithFormat:@"FAILED (exit %d)\n\n", Status];
   NSString* Log = ReadLog();
+  NSData* LogData = [[Summary stringByAppendingString:Log] dataUsingEncoding:NSUTF8StringEncoding];
+  write(Console, LogData.bytes, LogData.length);
   dispatch_async(dispatch_get_main_queue(), ^{
     self.text.text = [Summary stringByAppendingString:Log];
   });
 }
 @end
 
-@interface ProbeAppDelegate : UIResponder <UIApplicationDelegate>
+// Apps built with the iOS 27 SDK must use the scene life cycle.
+@interface ProbeSceneDelegate : UIResponder <UIWindowSceneDelegate>
 @property(nonatomic, strong) UIWindow* window;
+@end
+
+@implementation ProbeSceneDelegate
+- (void)scene:(UIScene*)scene willConnectToSession:(UISceneSession*)session options:(UISceneConnectionOptions*)options {
+  self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
+  self.window.rootViewController = [ProbeViewController new];
+  [self.window makeKeyAndVisible];
+}
+@end
+
+@interface ProbeAppDelegate : UIResponder <UIApplicationDelegate>
 @end
 
 @implementation ProbeAppDelegate
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)options {
-  self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-  self.window.rootViewController = [ProbeViewController new];
-  [self.window makeKeyAndVisible];
   return YES;
+}
+
+- (UISceneConfiguration*)application:(UIApplication*)application
+    configurationForConnectingSceneSession:(UISceneSession*)session
+                                   options:(UISceneConnectionOptions*)options {
+  UISceneConfiguration* Config = [[UISceneConfiguration alloc] initWithName:@"Default" sessionRole:session.role];
+  Config.delegateClass = [ProbeSceneDelegate class];
+  return Config;
 }
 @end
 
