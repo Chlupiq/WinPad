@@ -60,6 +60,7 @@ jobs:
             ${{ runner.temp }}/fex-work/fex-*-run.log
             ${{ runner.temp }}/fex-work/aot-census.json
             ${{ runner.temp }}/fex-work/aot*.o
+            ${{ runner.temp }}/fex-work/dispatcher1.bin
             ${{ runner.temp }}/fex-work/aot.so
             ${{ runner.temp }}/fex-work/home/.cache/fex-emu
           if-no-files-found: warn

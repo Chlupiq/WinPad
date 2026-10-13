@@ -66,4 +66,14 @@ Na Linuxu volba `AOTImage` (`FEX_AOTIMAGE`) ukazuje na sdílenou knihovnu z `cac
 
 Na iOS bude zavaděč stejný, jen symboly hledá v aplikaci (`dlsym(RTLD_DEFAULT, …)`) místo v `.so`.
 
-Zbývá: statický dispatcher (bod 5 z M1), pak iOS build a test na iPadu.
+## Statický dispatcher (patch 0006, bod 5 z M1)
+
+Dispatcher FEX (smyčka hledání bloků, obsluha signálů, volání kompilátoru, pomocné funkce pro x87) se generuje při startu. Jeho kód byl nezávislý na adrese až na čtyři 64bitové literály: ukazatel na kontext a adresy `SleepThread`, `CompileBlock` a `CompileSingleStep`. Ty se teď čtou ze stavu vlákna (`JITPointers`), takže kód dispatcheru je ve všech procesech stejného buildu a konfigurace bajt po bajtu stejný.
+
+- Volba `DumpDispatcher` zapíše vygenerovaný kód do souboru, `cache2macho.py --dispatcher` z něj udělá assembler (Mach-O, nebo ELF s `--elf-asm`) se symboly `fexaot_dispatcher_text`/`_meta`.
+- S `AOTImage` FEX dispatcher dál vygeneruje, ale do paměti bez práva spouštění. Když se kopie v obrazu shoduje, přesune všechny vstupní body do ní. Jinak (jiný build nebo konfigurace) použije vlastní kopii jako dřív a zaloguje to.
+- CI ověřuje, že dva procesy vygenerují stejné bajty, a spouští hosta s dispatcherem ze `.so`. Pro iOS se dispatcher sestaví a slinkuje s `ld64.lld`.
+
+Na iOS tak FEX nepotřebuje spustitelnou paměť pro dispatcher ani pro bloky v AOT cache. Bloky, které v cache nejsou, ale pořád překládá JIT. Bez JITu je musí obsloužit interpret, nebo musí být v cache všechny.
+
+Zbývá: iOS build a test na iPadu, včetně cesty pro bloky mimo cache.

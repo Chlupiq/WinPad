@@ -29,7 +29,15 @@ instead (sections .text.fexaot, .rodata.fexaot, .bss.fexaot); assembled and
 linked into a shared object, FEX can load it with the AOTImage option. This is
 how CI runs linked AOT code without an iPad.
 
+With --dispatcher the input is FEX's dispatcher as written by the DumpDispatcher
+option (patches/fex/0006) instead of a cache, and the output is assembly with
+the symbols fexaot_dispatcher_text and fexaot_dispatcher_meta ("FXAD" header):
+for Mach-O (iOS) by default, for ELF with --elf-asm. The dispatcher has no
+absolute addresses, so it needs no relocations; FEX uses it only if it matches
+what it would generate itself.
+
 Usage: cache2macho.py [--prefix NAME] [--min-ios 15.0] [--elf-asm] CACHE_FILE OUT
+       cache2macho.py --dispatcher [--elf-asm] DISPATCHER_FILE OUT.s
 """
 import argparse
 import os
@@ -310,6 +318,30 @@ def convert_elf_asm(data, prefix):
     return "\n".join(out), {"code_bytes": len(code), "data_bytes": data_size, "relocations": len(sites)}
 
 
+DISPATCHER_HEADER = struct.Struct("<4sIQ")  # magic, version, code size
+
+
+def convert_dispatcher_asm(code, elf):
+    """FEX's dispatcher code as assembly for an ELF or Mach-O object."""
+    if not code or len(code) % 4:
+        raise ConvertError(f"dispatcher code size {len(code)} is not a whole number of instructions")
+    meta = DISPATCHER_HEADER.pack(b"FXAD", 1, len(code))
+    if elf:
+        text_section = "\t.section .text.fexaot_dispatcher,\"ax\",@progbits"
+        meta_section = "\t.section .rodata.fexaot_dispatcher,\"a\",@progbits"
+        sym = ""
+    else:
+        text_section = "\t.section __TEXT,__fexaot_disp,regular,pure_instructions"
+        meta_section = "\t.section __TEXT,__const"
+        sym = "_"  # C names carry a leading underscore in Mach-O
+    out = [text_section, f"\t.p2align {TEXT_ALIGN_LOG2}", f"\t.globl {sym}fexaot_dispatcher_text",
+           f"{sym}fexaot_dispatcher_text:"]
+    out += [f"\t.inst {struct.unpack_from('<I', code, off)[0]:#010x}" for off in range(0, len(code), 4)]
+    out += ["", meta_section, "\t.p2align 3", f"\t.globl {sym}fexaot_dispatcher_meta", f"{sym}fexaot_dispatcher_meta:",
+            "\t.byte " + ",".join(str(b) for b in meta), ""]
+    return "\n".join(out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("cache")
@@ -317,9 +349,19 @@ def main():
     ap.add_argument("--prefix", help="symbol name prefix (default: from the cache file name)")
     ap.add_argument("--min-ios", default="15.0")
     ap.add_argument("--elf-asm", action="store_true", help="write AArch64 ELF assembly for Linux instead")
+    ap.add_argument("--dispatcher", action="store_true", help="input is a dispatcher dump; write assembly")
     args = ap.parse_args()
     with open(args.cache, "rb") as fh:
         data = fh.read()
+    if args.dispatcher:
+        try:
+            text = convert_dispatcher_asm(data, args.elf_asm)
+        except ConvertError as e:
+            sys.exit(f"{args.cache}: {e}")
+        with open(args.output, "w") as fh:
+            fh.write(text)
+        print(f"{args.output}: dispatcher, {len(data)} bytes")
+        return
     try:
         prefix = args.prefix or default_prefix(args.cache)
         if args.elf_asm:
