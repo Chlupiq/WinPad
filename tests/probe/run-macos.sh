@@ -39,7 +39,18 @@ probe="$build/Bin/winpad-probe"
 cmp "$build/WinPadProbe/guest.h" "$linux/guest.h" ||
     { echo "the guest assembled differently on Linux and macOS" >&2; exit 1; }
 
-"$probe" generate "$linux/guest.map" "$work"
+# step ARGS...: run the probe; if it fails, run it again under lldb for a backtrace.
+step() {
+    echo "== winpad-probe $*"
+    status=0
+    "$probe" "$@" || status=$?
+    [ "$status" = 0 ] && return
+    echo "winpad-probe $1 failed with exit $status" >&2
+    lldb --batch -o run -k 'thread backtrace all' -k 'disassemble -p -c 12' -k 'register read' -- "$probe" "$@" 2>&1 || true
+    exit 1
+}
+
+step generate "$linux/guest.map" "$work"
 cache=$(ls "$work"/winpad-probe-guest-*)
 
 c2m="$root/tools/cache2macho"
@@ -50,13 +61,9 @@ clang -dynamiclib -mmacosx-version-min=14.4 -o "$work/probe-aot.dylib" "$work/ao
 python3 -I "$c2m/check_linked.py" "$cache" "$work/probe-aot.dylib"
 
 status=0
-"$probe" run "$work/probe-aot.dylib" >"$work/run.log" 2>&1 || status=$?
+(step run "$work/probe-aot.dylib") >"$work/run.log" 2>&1 || status=$?
 cat "$work/run.log"
-if [ "$status" != 0 ]; then
-    echo "the guest did not run from the AOT image (exit $status)" >&2
-    lldb --batch -o run -k bt -k 'disassemble -p -c 12' -k 'register read' -- "$probe" run "$work/probe-aot.dylib" 2>&1 || true
-    exit 1
-fi
+[ "$status" = 0 ] || { echo "the guest did not run from the AOT image" >&2; exit 1; }
 grep -q 'AOT image linked:' "$work/run.log" ||
     { echo "FEX did not load the probe's AOT image" >&2; exit 1; }
 grep -q 'Dispatcher: static code from AOT image' "$work/run.log" ||
