@@ -128,6 +128,36 @@ x87_done:
         lea     rsp, [rsp + 16]         # keeps the flags of cmpsb
         jne     done
 
+        # 7-9: exceptions reach the handler the guest registered with the
+        # probe, which gets rdi = trap number, rsi = rip, rdx = fault address
+        # and checks them against r8, r9, r10, then continues at r15.
+        mov     eax, 0x5750             # probe: set the exception handler
+        lea     rdi, [rip + on_exception]
+        syscall
+        inc     r13d                    # 7: ud2, #UD at the instruction
+        mov     r8d, 6
+        lea     r9, [rip + ud2_at]
+        xor     r10d, r10d
+        lea     r15, [rip + after_ud2]
+ud2_at:
+        ud2
+after_ud2:
+        inc     r13d                    # 8: int3, #BP after the instruction
+        mov     r8d, 3
+        lea     r9, [rip + after_int3]
+        lea     r15, [rip + after_int3]
+        int3
+after_int3:
+        inc     r13d                    # 9: read from a null pointer, #PF
+        mov     r8d, 14
+        lea     r9, [rip + load_at]
+        mov     r10d, 0x18
+        lea     r15, [rip + after_load]
+load_at:
+        mov     rax, qword ptr [r10]
+        jmp     done                    # the read did not fault
+after_load:
+
         mov     eax, 1                  # write(1, msg, 3)
         mov     edi, 1
         lea     rsi, [rip + msg]
@@ -135,6 +165,15 @@ x87_done:
         syscall
 done:
         hlt                             # the probe runs FEX with exit on HLT
+
+on_exception:
+        cmp     rdi, r8
+        jne     done
+        cmp     rsi, r9
+        jne     done
+        cmp     rdx, r10
+        jne     done
+        jmp     r15
 
 add_one:
         lea     rax, [rdi + 1]
