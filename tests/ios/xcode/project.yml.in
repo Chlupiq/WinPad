@@ -9,21 +9,26 @@ targets:
     sources:
       - main.mm
     postBuildScripts:
-      # The AOT image for the platform being built, copied into Frameworks/
-      # and signed; never linked, the probe loads it with dlopen.
-      - name: Embed AOT image
+      # The AOT image and the wrapped test DLL for the platform being built,
+      # copied into Frameworks/ and signed; never linked, the app loads them
+      # with dlopen.
+      - name: Embed AOT image and test DLL
         inputFiles:
           - $(PROJECT_DIR)/Frameworks/$(PLATFORM_NAME)/probe-aot.dylib
+          - $(PROJECT_DIR)/Frameworks/$(PLATFORM_NAME)/pe-testdll.dylib
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/probe-aot.dylib
+          - $(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/pe-testdll.dylib
         script: |
           set -e
           dst="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
           mkdir -p "$dst"
-          cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME/probe-aot.dylib" "$dst/"
-          if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
-            codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dst/probe-aot.dylib"
-          fi
+          for dylib in probe-aot.dylib pe-testdll.dylib; do
+            cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME/$dylib" "$dst/"
+            if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dst/$dylib"
+            fi
+          done
     settings:
       base:
         INFOPLIST_FILE: Info.plist

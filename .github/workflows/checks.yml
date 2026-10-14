@@ -78,7 +78,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: brew install ninja
+        run: |
+          brew install ninja lld
+          echo "$(brew --prefix lld)/bin" >>"$GITHUB_PATH"
       - name: Code map and guest from the Linux probe run
         uses: actions/download-artifact@v4
         with:
