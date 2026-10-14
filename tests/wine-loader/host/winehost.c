@@ -111,11 +111,6 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
     fprintf(stderr, "winehost: frame of window %p, %dx%d, dirty %d,%d %dx%d, %ld dark pixels\n",
             hwnd, surf_w, surf_h, dirty_x, dirty_y, dirty_w, dirty_h, dark);
   if (state < 2 && dark > dark_before_typing) dark_before_typing = dark;
-  if (state == 0 && menu_y > 0) {
-    first_window = hwnd;
-    state_time = now();
-    __atomic_store_n(&input_state, 1, __ATOMIC_RELEASE);
-  }
   static int said_text;
   if (hwnd == first_window && state < 4) {
     size_t row = (size_t)surf_w * 4;
@@ -141,6 +136,12 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
       said_changed = 1;
       fprintf(stderr, "winehost: window content changed after the click, %ld pixels\n", changed);
     }
+  }
+  if (hwnd == first_window && state == 5 && !before_click && !said_changed) {
+    // The window showed nothing before the click (winemine's gets no WM_PAINT
+    // when it is shown, see the PR), so its first frame is the change.
+    said_changed = 1;
+    fprintf(stderr, "winehost: window content changed after the click, first frame of the window\n");
   }
   if (state == 3 && hwnd == first_window && dark > dark_before_typing + 50 && !said_text++)
     fprintf(stderr, "winehost: typed text shows up, %ld dark pixels, at most %ld before\n", dark,
@@ -179,10 +180,14 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
                          int cw, int ch) {
   fprintf(stderr, "winehost: window %p at %d,%d %dx%d, visible %d, client %d,%d %dx%d\n", hwnd, x,
           y, w, h, visible, cx, cy, cw, ch);
-  // The menu bar sits right above the client area, its first item at the left.
+  // The first visible window with a menu bar (which sits right above the
+  // client area, its first item at the left) gets the scripted input.
   if (visible && !first_window && cy - y > 30 && cw > 0) {
     menu_x = cx + 12;
     menu_y = cy - 9;
+    first_window = hwnd;
+    state_time = now();
+    __atomic_store_n(&input_state, 1, __ATOMIC_RELEASE);
   }
   if (visible && cw > 0 && (first_window ? hwnd == first_window : cy - y > 30)) {
     client_x = cx;
