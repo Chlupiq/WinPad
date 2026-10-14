@@ -160,7 +160,7 @@ jobs:
           PATH="$(brew --prefix llvm)/bin:$PATH"
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphoneos
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
-      - name: win32u unix side (windows, GDI, display driver) for iOS and the iPad simulator
+      - name: win32u unix side (windows, GDI, fonts, display driver) for iOS and the iPad simulator
         run: |
           PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
           sh tests/wine-loader/build-win32u.sh "$RUNNER_TEMP/wine-loader" iphoneos
