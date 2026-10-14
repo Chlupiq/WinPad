@@ -17,6 +17,9 @@
 # Without PROGRAM it runs cmd.exe /c echo Hello from Wine, which has to print
 # the line and exit with 0; any other program has to show a window. The
 # newest content of each window ends up in WORK_DIR/host-NAME/frames as PNG.
+# With WINEHOST_TYPE set, the host types that text into the first window and
+# it has to show up there; with WINEHOST_CLICK_MENU=1 it clicks the window's
+# first menu, which has to open (a new window).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -112,6 +115,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG=+loaddll \
     SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
     SIMCTL_CHILD_WINEHOST_FRAMES="$out/frames" \
+    SIMCTL_CHILD_WINEHOST_TYPE="${WINEHOST_TYPE:-}" SIMCTL_CHILD_WINEHOST_CLICK_MENU="${WINEHOST_CLICK_MENU:-}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
@@ -159,4 +163,11 @@ if [ -n "$default_program" ]; then
     grep -q '^Hello from Wine' "$out/run.log"
 else
     grep -q '^winehost: frame of window' "$out/run.log"
+fi
+# Keys and taps reach the program through the winios driver.
+if [ -n "${WINEHOST_TYPE:-}" ]; then
+    grep -q '^winehost: typed text shows up' "$out/run.log"
+fi
+if [ "${WINEHOST_CLICK_MENU:-}" = 1 ]; then
+    grep -q '^winehost: new window .* after input$' "$out/run.log"
 fi

@@ -180,6 +180,18 @@ jobs:
           name: wine-window-clock
           path: ${{ runner.temp }}/wine-loader/host-clock/frames
           if-no-files-found: ignore
+      - name: Wine's notepad.exe takes typed keys and a tap on its menu on an iPad simulator
+        env:
+          WINEHOST_TYPE: Hello iPad
+          WINEHOST_CLICK_MENU: 1
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" 'C:\windows\system32\notepad.exe'
+      - name: Window content of notepad
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-window-notepad
+          path: ${{ runner.temp }}/wine-loader/host-notepad/frames
+          if-no-files-found: ignore
 
   fexcore-ios:
     runs-on: macos-15

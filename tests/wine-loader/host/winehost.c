@@ -7,7 +7,9 @@
 // Usage: winehost SECONDS PROGRAM [ARGS...]
 // Environment: WINEPREFIX (created if missing), WINEDLLPATH, optional
 // WINEHOST_NLS (directory with the .nls files) and WINEHOST_FRAMES (directory
-// that gets the newest content of each window as HWND.bmp).
+// that gets the newest content of each window as HWND.bmp). WINEHOST_TYPE
+// types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
+// first window, 2 s after that window first showed (see winios_pProcessEvents).
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
 // came up. Whatever Wine does in the meantime goes to stderr.
 #include <errno.h>
@@ -59,6 +61,23 @@ void fatal_error(const char* err, ...) {
 // into a layer. Here the newest frame of each window goes to a BMP file.
 static const char* frames_dir;
 
+static double now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// Scripted input: 0 = waiting for a window, 1 = window shown, 2 = posting,
+// 3 = posted. What the app's touch and key handlers queue is posted from a
+// Wine thread in winios_pProcessEvents, as Madeira's Winios.m drains it.
+static int input_state;
+static double first_window_time;
+static void* first_window;
+static int menu_x, menu_y;  // a point in the first window's menu bar
+static void* windows_before_input[64];
+static int windows_before_count;
+static long dark_before_input;  // most dark pixels any frame had before
+
 static void put32(unsigned char* p, unsigned v) {
   p[0] = v;
   p[1] = v >> 8;
@@ -68,10 +87,36 @@ static void put32(unsigned char* p, unsigned v) {
 
 int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, int dirty_h,
                            int surf_w, int surf_h, int stride, const void* bits) {
-  static int presents;
-  if (presents++ < 20)
-    fprintf(stderr, "winehost: frame of window %p, %dx%d, dirty %d,%d %dx%d\n", hwnd, surf_w,
-            surf_h, dirty_x, dirty_y, dirty_w, dirty_h);
+  static int presents, after_input;
+  long dark = 0;
+  for (int y = 0; y < surf_h; y++) {
+    const unsigned char* row = (const unsigned char*)bits + (size_t)y * stride;
+    for (int x = 0; x < surf_w; x++)
+      if (row[x * 4] + row[x * 4 + 1] + row[x * 4 + 2] < 3 * 64) dark++;
+  }
+  int state = __atomic_load_n(&input_state, __ATOMIC_ACQUIRE);
+  if (presents++ < 20 || (state == 3 && after_input++ < 20))
+    fprintf(stderr, "winehost: frame of window %p, %dx%d, dirty %d,%d %dx%d, %ld dark pixels\n",
+            hwnd, surf_w, surf_h, dirty_x, dirty_y, dirty_w, dirty_h, dark);
+  if (state < 2) {
+    if (dark > dark_before_input) dark_before_input = dark;
+    int seen = 0;
+    for (int i = 0; i < windows_before_count; i++) seen |= windows_before_input[i] == hwnd;
+    if (!seen && windows_before_count < 64) windows_before_input[windows_before_count++] = hwnd;
+    if (state == 0 && menu_y > 0) {
+      first_window = hwnd;
+      first_window_time = now();
+      __atomic_store_n(&input_state, 1, __ATOMIC_RELEASE);
+    }
+  } else if (state == 3) {
+    static int said_new, said_text;
+    int seen = 0;
+    for (int i = 0; i < windows_before_count; i++) seen |= windows_before_input[i] == hwnd;
+    if (!seen && !said_new++) fprintf(stderr, "winehost: new window %p after input\n", hwnd);
+    if (hwnd == first_window && dark > dark_before_input + 50 && !said_text++)
+      fprintf(stderr, "winehost: typed text shows up, %ld dark pixels, at most %ld before\n", dark,
+              dark_before_input);
+  }
   if (!frames_dir || surf_w <= 0 || surf_h <= 0) return 1;
   // 32-bit top-down BMP: the surface is a 32bpp top-down BGRX DIB already.
   unsigned char header[54] = {'B', 'M'};
@@ -106,6 +151,53 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
                          int cw, int ch) {
   fprintf(stderr, "winehost: window %p at %d,%d %dx%d, visible %d, client %d,%d %dx%d\n", hwnd, x,
           y, w, h, visible, cx, cy, cw, ch);
+  // The menu bar sits right above the client area, its first item at the left.
+  if (visible && !first_window && cy - y > 30 && cw > 0) {
+    menu_x = cx + 12;
+    menu_y = cy - 9;
+  }
+}
+
+// From driver_ios.c: they hand one key or mouse event to the wineserver as
+// hardware input. Absolute mouse coordinates are screen pixels.
+extern void winios_drv_post_key(unsigned short vk, unsigned int flags);
+extern void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_data,
+                                  void* hwnd);
+enum { KEYUP = 2, MOVE = 1, LEFTDOWN = 2, LEFTUP = 4, ABSOLUTE = 0x8000, VK_SHIFT = 0x10 };
+
+static void tap_key(unsigned short vk, int shift) {
+  if (shift) winios_drv_post_key(VK_SHIFT, 0);
+  winios_drv_post_key(vk, 0);
+  winios_drv_post_key(vk, KEYUP);
+  if (shift) winios_drv_post_key(VK_SHIFT, KEYUP);
+}
+
+// win32u calls this on Wine threads that check for input; in desktop mode
+// their message waits wake every 16 ms for it (message_ios.c).
+int winios_pProcessEvents(unsigned int mask) {
+  (void)mask;
+  int expected = 1;
+  if (__atomic_load_n(&input_state, __ATOMIC_ACQUIRE) != 1 || now() < first_window_time + 2 ||
+      !__atomic_compare_exchange_n(&input_state, &expected, 2, 0, __ATOMIC_ACQ_REL,
+                                   __ATOMIC_ACQUIRE))
+    return 0;
+  const char* text = getenv("WINEHOST_TYPE");
+  if (text) {
+    for (const char* c = text; *c; c++) {
+      if (*c >= 'a' && *c <= 'z') tap_key(*c - 'a' + 'A', 0);
+      else if ((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == ' ') tap_key(*c, *c >= 'A');
+    }
+    fprintf(stderr, "winehost: typed \"%s\" into window %p\n", text, first_window);
+  }
+  const char* click = getenv("WINEHOST_CLICK_MENU");
+  if (click && *click == '1') {
+    winios_drv_post_mouse(menu_x, menu_y, MOVE | ABSOLUTE, 0, NULL);
+    winios_drv_post_mouse(menu_x, menu_y, MOVE | LEFTDOWN | ABSOLUTE, 0, NULL);
+    winios_drv_post_mouse(menu_x, menu_y, LEFTUP | ABSOLUTE, 0, NULL);
+    fprintf(stderr, "winehost: clicked %d,%d, the menu of window %p\n", menu_x, menu_y, first_window);
+  }
+  __atomic_store_n(&input_state, 3, __ATOMIC_RELEASE);
+  return 1;
 }
 
 static void* server_thread(void* arg) {
