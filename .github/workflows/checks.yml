@@ -153,8 +153,7 @@ jobs:
           sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
       - name: Whole ntdll unix side for iOS, with the adopt patch
         run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphoneos
-      - name: The same for the iPad simulator (exploratory)
-        continue-on-error: true
+      - name: The same for the iPad simulator
         run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
 
   fexcore-ios:
