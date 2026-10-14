@@ -1,0 +1,46 @@
+--- a/Source/Windows/Common/CRT/CRT_iOS.cpp
++++ b/Source/Windows/Common/CRT/CRT_iOS.cpp
+@@ -21,11 +21,43 @@
+ // ctors/TLS to mingw.
+ #include <rpmalloc/rpmalloc.h>
+ 
++// WinPad: Madeira runs this module from a copy in the JIT pool, and that copy reaches its globals
++// relative to its own code. On the iOS simulator the loader's copy of the image is executable, so
++// mingw's DllMainCRTStartup runs there and constructs the loader copy's globals, leaving every
++// global in the pool copy zeroed (an unconstructed std::unordered_map then throws on first insert).
++// CtorsRan is set by a constructor; if this copy never ran them, run them here, before anything
++// in FEX touches a global.
++extern "C" void (*__CTOR_LIST__[])();
++
++namespace {
++__attribute__((noinline)) int MarkCtorsRan() {
++  static volatile int One = 1;
++  return One;
++}
++volatile int CtorsRan = MarkCtorsRan();
++
++void RunCtorsIfNeeded() {
++  if (CtorsRan) {
++    return;
++  }
++  auto Begin = &__CTOR_LIST__[1];
++  auto End = Begin;
++  while (*End) {
++    End++;
++  }
++  // Same order as mingw's __do_global_ctors: last entry first.
++  while (End != Begin) {
++    (*--End)();
++  }
++}
++} // namespace
++
+ namespace FEX::Windows {
+ void InitCRTProcess() {
+   // mingw's default startup already ran the C++ ctors. Ensure the rpmalloc
+   // global heap is up (idempotent) before any per-thread init below.
+   rpmalloc_initialize(nullptr);
++  RunCtorsIfNeeded();
+ }
+ void InitCRTThread() {
+   // The critical piece that was missing on iOS: give this thread its own
