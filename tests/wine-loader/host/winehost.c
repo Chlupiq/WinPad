@@ -231,7 +231,7 @@ int winios_pProcessEvents(unsigned int mask) {
   if ((state != 1 && state != 3) || now() < state_time + 2) return 0;
   if (state == 1 && advance(1, 2)) {
     const char* text = getenv("WINEHOST_TYPE");
-    if (text) {
+    if (text && *text) {
       for (const char* c = text; *c; c++) {
         if (*c >= 'a' && *c <= 'z') tap_key(*c - 'a' + 'A', 0);
         else if ((*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == ' ')
