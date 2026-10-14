@@ -145,6 +145,11 @@ jobs:
         run: |
           PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
           sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
+      - name: Whole ntdll unix side for iOS, with the adopt patch
+        run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphoneos
+      - name: The same for the iPad simulator (exploratory)
+        continue-on-error: true
+        run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
 
   fexcore-ios:
     runs-on: macos-15
