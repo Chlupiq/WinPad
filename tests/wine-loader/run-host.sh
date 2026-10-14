@@ -15,7 +15,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 work=$1
 shift
-[ $# -gt 0 ] || set -- 'C:\windows\system32\cmd.exe' /c echo Hello from Wine
+default_program=
+if [ $# -eq 0 ]; then
+    default_program=1
+    set -- 'C:\windows\system32\cmd.exe' /c echo Hello from Wine
+fi
 out="$work/host"
 rm -rf "$out"
 mkdir -p "$out"
@@ -115,3 +119,7 @@ fi
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001).
 grep -q 'load_main_exe = 0x0' "$out/run.log"
+# Every DLL comes from its dylib too (load_builtin), and the program runs to
+# its end: cmd.exe prints the line and exits with 0.
+grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
+[ -z "$default_program" ] || grep -q '^Hello from Wine' "$out/run.log"
