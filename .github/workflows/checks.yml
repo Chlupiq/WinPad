@@ -184,7 +184,6 @@ jobs:
         env:
           WINEHOST_TYPE: Hello iPad
           WINEHOST_CLICK_MENU: 1
-          WINEHOST_WINEDEBUG: +loaddll,+font
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" 'C:\windows\system32\notepad.exe'
       - name: Window content of notepad
         if: always()
