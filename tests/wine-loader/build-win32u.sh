@@ -14,6 +14,7 @@ set -eu
 
 work=$1
 sdk_name=$2
+root=$(cd "$(dirname "$0")/../.." && pwd)
 madeira="$work/madeira"
 wine="$madeira/wine"
 src="$madeira/build/win32u-unix"
@@ -90,6 +91,13 @@ for f in "$wine"/dlls/win32u/*.c "$wine"/dlls/win32u/dibdrv/*.c; do
         main) continue ;;  # the PE side (win32u.dll)
         class | winstation | sysparams | defwnd | driver | message | d3dkmt | syscall)
             f="$src/${name}_ios.c" ;;
+        window)
+            # Patched copy: patches/wine/0002 logs why show_window skips the
+            # redraw (the parent desktop window, as win32u sees it).
+            mkdir -p "$out/src"
+            cp "$f" "$out/src/window.c"
+            patch -s "$out/src/window.c" "$root/patches/wine/0002-ios-trace-show-window-parent.patch"
+            f="$out/src/window.c" ;;
         freetype)
             # Madeira's wrapper turns FreeType on for this file only and
             # resolves its dlsym calls against the static library.

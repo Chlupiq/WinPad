@@ -195,7 +195,6 @@ jobs:
       - name: Wine's Minesweeper (winemine.exe) opens a field when tapped on an iPad simulator
         env:
           WINEHOST_CLICK: 50,70
-          WINEHOST_DESKTOP: 1
           WINEHOST_WINEDEBUG: +loaddll,+win
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" 'C:\windows\system32\winemine.exe'
       - name: Window content of Minesweeper

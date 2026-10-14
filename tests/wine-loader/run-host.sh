@@ -36,13 +36,6 @@ if [ $# -eq 0 ]; then
 fi
 name=${1##*\\}
 name=$(echo "${name%.*}" | tr 'A-Z' 'a-z')
-# With WINEHOST_DESKTOP=1 the program runs inside Wine's desktop, as Madeira
-# starts every program: explorer.exe shows the desktop window, without which
-# a top-level window is not redrawn when it shows.
-program_file=${1##*\\}
-if [ "${WINEHOST_DESKTOP:-}" = 1 ]; then
-    set -- 'C:\windows\system32\explorer.exe' /desktop=shell,1024x768 "$@"
-fi
 out="$work/host-$name"
 rm -rf "$out"
 mkdir -p "$out"
@@ -114,13 +107,6 @@ echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 ln -s "$work/madeira/wine/nls" "$out/nls"
 ln -s "$work/madeira/wine/fonts" "$out/fonts"
 ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
-# Explorer starts the program with CreateProcess, which wants the file in
-# C:\windows\system32 (the prefix has no wineboot-made system32); the
-# loader still takes it from its dylib.
-if [ "${WINEHOST_DESKTOP:-}" = 1 ]; then
-    mkdir -p "$out/prefix/drive_c/windows/system32"
-    cp "$work/modules-iphonesimulator/aarch64-windows/$program_file" "$out/prefix/drive_c/windows/system32/"
-fi
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }

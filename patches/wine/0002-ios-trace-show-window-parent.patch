@@ -1,0 +1,22 @@
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 6e48859..d01e445 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -4852,6 +4852,17 @@ static BOOL show_window( HWND hwnd, INT cmd )
+     swp = new_swp;
+ 
+     parent = NtUserGetAncestor( hwnd, GA_PARENT );
++#ifdef WINE_IOS
++    {
++        WND *pwin = parent ? get_win_ptr( parent ) : NULL;
++        ERR( "winpad: show_window %p parent %p desktop %p kind %s style %08x visible %d swp %04x\n",
++             hwnd, parent, get_desktop_window(),
++             !pwin ? "none" : pwin == WND_DESKTOP ? "desktop" : pwin == WND_OTHER_PROCESS ? "other" : "own",
++             parent ? (UINT)get_window_long( parent, GWL_STYLE ) : 0,
++             parent ? is_window_visible( parent ) : -1, swp );
++        if (pwin && pwin != WND_DESKTOP && pwin != WND_OTHER_PROCESS) release_win_ptr( pwin );
++    }
++#endif
+     if (parent && !is_window_visible( parent ) && !(swp & SWP_STATECHANGED))
+     {
+         /* if parent is not visible simply toggle WS_VISIBLE and return */
