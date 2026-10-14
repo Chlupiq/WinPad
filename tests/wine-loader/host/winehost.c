@@ -107,6 +107,7 @@ int main(int argc, char* argv[]) {
   const char* nls = getenv("WINEHOST_NLS");
   if (nls) wineserver_set_nls_dir(nls);
 
+  printf("winehost: pid %d\n", (int)getpid());
   printf("winehost: starting wineserver, prefix %s\n", prefix);
   if (start(server_thread, 0)) return 1;
   for (int i = 0; i < 200 && !__atomic_load_n(&wineserver_ready, __ATOMIC_ACQUIRE); i++)

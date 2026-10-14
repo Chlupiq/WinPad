@@ -77,15 +77,28 @@ udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcod
 echo "iPad simulator $udid"
 xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
-status=0
+seconds=30
 SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
     SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" \
     perl -e 'alarm shift; exec @ARGV' 120 \
-    xcrun simctl spawn "$udid" "$out/winehost" 20 "$@" >"$out/run.log" 2>&1 || status=$?
+    xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
+spawn=$!
+# A simulator process is a Mac process: shortly before the host gives up,
+# sample its threads, so a Wine process that hangs shows where.
+sleep $((seconds - 5))
+pid=$(sed -n 's/^winehost: pid \([0-9]*\)$/\1/p' "$out/run.log")
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    sample "$pid" 2 -file "$out/sample.txt" >/dev/null 2>&1 || true
+fi
+status=0
+wait $spawn || status=$?
 xcrun simctl shutdown "$udid" || true
 echo "winehost exit status: $status"
 cat "$out/run.log"
+if [ -s "$out/sample.txt" ]; then
+    echo "--- threads of winehost $seconds s in (sample) ---"
+    sed -n '/^Call graph:/,/^Total number in stack/p' "$out/sample.txt" | head -150
+fi
 grep -q '^winehost: wineserver ready' "$out/run.log"
-# The Wine process gets through its start-up with the server and ends through
-# exit() (no program to run yet), caught by the host instead of crashing.
-grep -q '^winehost: Wine process exited with code' "$out/run.log"
+# The Wine process loads the program from its dylib (patches/madeira/0001).
+grep -q 'load_main_exe = 0x0' "$out/run.log"
