@@ -85,3 +85,6 @@ xcrun simctl shutdown "$udid" || true
 echo "winehost exit status: $status"
 cat "$out/run.log"
 grep -q '^winehost: wineserver ready' "$out/run.log"
+# The Wine process gets through its start-up with the server and ends through
+# exit() (no program to run yet), caught by the host instead of crashing.
+grep -q '^winehost: Wine process exited with code' "$out/run.log"
