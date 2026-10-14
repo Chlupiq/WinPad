@@ -57,8 +57,11 @@ done
 
 # The test program: i686 PE, entry point of its own, kernel32 import library
 # from this tree.
+implib=$(grep -oE '^dlls/kernel32/[^ :]*libkernel32\.a' "$b/Makefile" | sort -u | head -1)
+[ -n "$implib" ] || { echo "no kernel32 import library target in $b/Makefile" >&2; exit 2; }
+make -C "$b" "$implib" >>"$work/make-i386.log" 2>&1 || { tail -20 "$work/make-i386.log" >&2; exit 1; }
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console \
-    "$here/hello.c" "$b/dlls/kernel32/i386-windows/libkernel32.a" -o "$out/hello.exe" -fuse-ld=lld
+    "$here/hello.c" "$b/$implib" -o "$out/hello.exe" -fuse-ld=lld
 ls -l "$out"
 llvm-objdump -p "$out/hello.exe" | grep -E 'Magic|DLL Name|Machine' || true
