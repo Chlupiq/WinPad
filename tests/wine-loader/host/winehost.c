@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -31,6 +32,9 @@ extern void wineserver_set_nls_dir(const char* path);
 extern int wineserver_ready;
 extern int foreground;
 extern void __wine_main(int argc, char* argv[]);
+// Set before __wine_main for a 32-bit x86 program, so the unix side reserves
+// its WoW64 guest window before the first TEB (virtual_ios.c, loader_ios.c).
+extern int ios_main_image_i386;
 
 // Checked by the server's main loop (fd_ios.c); the app defines it.
 volatile int g_wineserver_should_stop = 0;
@@ -278,6 +282,44 @@ int winios_pProcessEvents(unsigned int mask) {
   return 0;
 }
 
+// The machine field of a PE file's header, or 0 if it is not one.
+static unsigned pe_machine(const char* path) {
+  unsigned char buf[0x200];
+  FILE* f = fopen(path, "rb");
+  if (!f) return 0;
+  size_t n = fread(buf, 1, sizeof(buf), f);
+  fclose(f);
+  if (n < 0x40 || buf[0] != 'M' || buf[1] != 'Z') return 0;
+  unsigned off = buf[0x3c] | buf[0x3d] << 8 | buf[0x3e] << 16 | (unsigned)buf[0x3f] << 24;
+  if (off + 6 > n || memcmp(buf + off, "PE\0\0", 4)) return 0;
+  return buf[off + 4] | buf[off + 5] << 8;
+}
+
+// FEX's WoW64 module cannot call sysctl; the app hands it the CPU features
+// it needs in FEX_MADEIRA_HOSTPROBE (WineProcessBridge.m, the same keys).
+static void publish_host_probe(void) {
+  static const struct { const char *key, *sysctl; } probes[] = {
+      {"AFP", "hw.optional.arm.FEAT_AFP"},       {"FLAGM", "hw.optional.arm.FEAT_FlagM"},
+      {"FLAGM2", "hw.optional.arm.FEAT_FlagM2"}, {"FCMA", "hw.optional.arm.FEAT_FCMA"},
+      {"RCPC", "hw.optional.arm.FEAT_LRCPC"},    {"LRCPC2", "hw.optional.arm.FEAT_LRCPC2"},
+      {"AES", "hw.optional.arm.FEAT_AES"},       {"PMULL", "hw.optional.arm.FEAT_PMULL"},
+      {"SHA", "hw.optional.arm.FEAT_SHA256"},    {"CRC", "hw.optional.armv8_crc32"},
+      {"ATOMICS", "hw.optional.arm.FEAT_LSE"},
+  };
+  char buf[256];
+  size_t len = 0;
+  buf[0] = 0;
+  for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+    int v = 0;
+    size_t sz = sizeof(v);
+    const char* val = sysctlbyname(probes[i].sysctl, &v, &sz, NULL, 0) == 0 ? (v ? "1" : "0") : "?";
+    len += snprintf(buf + len, sizeof(buf) - len, "%s%s=%s", i ? "," : "", probes[i].key, val);
+    if (len >= sizeof(buf)) return;
+  }
+  setenv("FEX_MADEIRA_HOSTPROBE", buf, 1);
+  printf("winehost: FEX host features %s\n", buf);
+}
+
 static void* server_thread(void* arg) {
   (void)arg;
   foreground = 1;
@@ -364,6 +406,11 @@ int main(int argc, char* argv[]) {
   for (int i = 2; i < argc && wine_argc < 63; i++) args[wine_argc++] = argv[i];
   args[wine_argc] = NULL;
   wine_argv = args;
+  if (pe_machine(argv[2]) == 0x14c) {
+    ios_main_image_i386 = 1;
+    publish_host_probe();
+    printf("winehost: 32-bit x86 program, running it through WoW64\n");
+  }
   printf("winehost: starting %s\n", argv[2]);
   if (start(wine_thread, 8 << 20)) return 1;
 

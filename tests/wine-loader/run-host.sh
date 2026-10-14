@@ -115,6 +115,12 @@ ln -s "$work/madeira/wine/fonts" "$out/fonts"
 ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
 # 32-bit x86 modules (tests/wine-i386/build.sh), for WoW64 programs.
 [ -d "$work/i386-windows" ] && ln -s "$work/i386-windows" "$out/i386-windows"
+case "$1" in */i386-windows/*)
+    # A 32-bit process's system32 is C:\windows\syswow64; Madeira's app links
+    # the i386 set there (madeira_link_syswow64 in WineProcessBridge.m).
+    mkdir -p "$out/prefix/drive_c/windows/syswow64"
+    for f in "$work/i386-windows"/*.dll; do ln -s "$f" "$out/prefix/drive_c/windows/syswow64/"; done ;;
+esac
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
