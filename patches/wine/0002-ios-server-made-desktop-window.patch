@@ -1,0 +1,19 @@
+diff --git a/dlls/win32u/window.c b/dlls/win32u/window.c
+index 6e48859..c78f7b8 100644
+--- a/dlls/win32u/window.c
++++ b/dlls/win32u/window.c
+@@ -478,6 +478,14 @@ WND *get_win_ptr( HWND hwnd )
+     {
+         if (is_desktop_window( hwnd )) win = WND_DESKTOP;
+     }
++#ifdef WINE_IOS
++    /* iOS: with no explorer, the wineserver makes the desktop window itself,
++     * on behalf of the first process that asks for it. Its handle entry then
++     * names this process, but the process has no WND for it, so it looked
++     * like no window at all: never visible, and every window shown on it
++     * skipped its first paint. It is the desktop like any other. */
++    else if (!win && is_desktop_window( hwnd )) win = WND_DESKTOP;
++#endif
+     return win;
+ }
+ 

@@ -92,11 +92,11 @@ for f in "$wine"/dlls/win32u/*.c "$wine"/dlls/win32u/dibdrv/*.c; do
         class | winstation | sysparams | defwnd | driver | message | d3dkmt | syscall)
             f="$src/${name}_ios.c" ;;
         window)
-            # Patched copy: patches/wine/0002 logs why show_window skips the
-            # redraw (the parent desktop window, as win32u sees it).
+            # Patched copy: patches/wine/0002 lets a process see the desktop window
+            # the wineserver made on its behalf (so windows shown on it get painted).
             mkdir -p "$out/src"
             cp "$f" "$out/src/window.c"
-            patch -s "$out/src/window.c" "$root/patches/wine/0002-ios-trace-show-window-parent.patch"
+            patch -s "$out/src/window.c" "$root/patches/wine/0002-ios-server-made-desktop-window.patch"
             f="$out/src/window.c" ;;
         freetype)
             # Madeira's wrapper turns FreeType on for this file only and
