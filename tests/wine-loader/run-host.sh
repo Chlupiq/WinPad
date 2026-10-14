@@ -28,7 +28,7 @@ $cc -O1 -g -Wall -c "$here/host/winehost.c" -o "$out/winehost.o"
 link() {
     # shellcheck disable=SC2086
     $cc -o "$out/winehost" "$out/winehost.o" "$@" $libs \
-        -framework Foundation -framework CoreFoundation -lc++ -lz
+        -framework Foundation -framework CoreFoundation -framework AudioToolbox -lc++ -lz
 }
 
 if link 2>"$out/link1.log"; then
@@ -47,7 +47,8 @@ sed 's/^/  /' "$out/missing"
 {
     echo '#include <stdio.h>'
     echo 'static long winehost_stub(const char* name, int* seen) {'
-    echo '  if (!*seen) { *seen = 1; fprintf(stderr, "winehost: stub %s called\n", name); }'
+    # printf: the sh echo on macOS would turn the \n into a newline.
+    printf '%s\n' '  if (!*seen) { *seen = 1; fprintf(stderr, "winehost: stub %s called\n", name); }'
     echo '  return 0;'
     echo '}'
     i=0
