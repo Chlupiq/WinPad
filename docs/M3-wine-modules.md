@@ -20,6 +20,21 @@ Madeira kopíruje každý PE modul do JIT poolu a kód přitom upravuje (`build/
 2. **TSD slot v ručně psaném kódu FEX** (`Module.S`, trojice `mrs`/`and`/`ldr` s pevným offsetem). Týká se `xtajit`, který je zatím mimo převod.
 3. **`RtlPcToFileHeader` v ntdll** (`ios_patch_rtl_pc_to_file_header`). Patch existuje jen proto, že kód běží z kopie na jiné adrese než PE obraz. Když loader převezme obraz přímo z dylibu, kopie zmizí a s ní i důvod pro patch.
 
+## Převzetí obrazu loaderem Wine
+
+Po `dlopen` je obraz v dylibu už ve stavu, do kterého ho jinak dostává loader: každý bajt na svém RVA od `_PREFIX_image`, relokace provedl dyld. `pe2macho` k tomu přidává dvě věci v hlavičce:
+
+- Pole `ImageBase` je také ukazatel, který dyld přepíše na skutečnou adresu obrazu. Wine z něj bere základ modulu (`fill_builtin_image_info`), takže nevidí důvod k relokaci.
+- `SizeOfImage` pokrývá i trampolíny pro x18 a TEB slot, takže patří do view modulu (a unwind přes trampolínu najde modul).
+
+`tools/pe2macho/pe_adopt.h` obraz v dylibu najde a ověří (hlavičky, ARM64, `ImageBase` = adresa obrazu, zarovnání na stránku). CI ho pustí na všech 125 modulů a projde exporty přes PE export directory stejně jako `GetProcAddress` ve Wine. Každý musí vyjít na stejnou adresu, jakou dyld dá symbolu exportu.
+
+Ve Wine na to stačí existující cesta pro builtin `.so` moduly (`dlopen_dll` → `virtual_create_builtin_view` v `loader_ios.c` a `virtual_ios.c`). Na aarch64 je vypnutá (`SO_DLLS_SUPPORTED` jen pro x86), ale `virtual_create_builtin_view` se kompiluje vždy. Plán patche:
+
+1. `open_builtin_pe_file` nejdřív zkusí `NAME.dylib` vedle `NAME`. Když existuje: `dlopen`, `pe_adopt`, zápis TSD slotu do `teb_slot`, `fill_builtin_image_info` a `virtual_create_builtin_view`. Nevolá se `map_image_into_view`, takže nevznikne kopie v JIT poolu ani `ios_jit_add_mapping`.
+2. `mprotect_exec` musí rozsahy převzatých modulů nechat být: kód už je r-x a podepsaný, data rw-. Změna ochrany od Windows kódu (`VirtualProtect` na IAT apod.) se tam má promítnout jen do evidence Wine, ne do kopie.
+3. `ios_patch_rtl_pc_to_file_header` se pro převzaté moduly nevolá, protože kód běží přímo z obrazu.
+
 ## Další krok
 
-Wine loader převezme obraz z dylibu: view modulu bude ležet přímo na adrese `_PREFIX_image`, takže nevznikne kopie ani překlad adres mezi PE obrazem a JIT poolem.
+Patch `loader_ios.c` a `virtual_ios.c` podle bodů výše, sestavený s Madeira ntdll.

@@ -80,6 +80,8 @@ class Pe2MachoTest(unittest.TestCase):
             with open(os.path.join(tmp, "x.ldflags")) as fh:
                 flags = fh.read().split()
         self.assertIn("\t.quad _pe_x_image + 0x4008\n", asm)
+        self.assertIn("\t.quad _pe_x_image + 0x0\n", asm)  # ImageBase
+        self.assertEqual(pe.rebased(), [0xB0, 0x8000])
         self.assertEqual(pe.pointer_target(0x8000), 0x4008)
         self.assertEqual(asm.count(".section"), 3)
         self.assertEqual(flags, ["-Wl,-segprot,__PE0,rw,rw", "-Wl,-segprot,__PE1,rx,rx", "-Wl,-segprot,__PE2,rw,rw"])
@@ -106,7 +108,8 @@ class Pe2MachoTest(unittest.TestCase):
             sys.argv = ["pe2macho.py", "--relocs", path, os.path.join(tmp, "r.txt")]
             self.assertEqual(p2m.main(), 0)
             with open(os.path.join(tmp, "r.txt")) as fh:
-                self.assertEqual(fh.read(), "8000 4000\n8008 8010\n")
+                # The header's ImageBase field (0x80 + 24 + 24) comes first.
+                self.assertEqual(fh.read(), "b0 0\n8000 4000\n8008 8010\n")
 
     def test_relocation_in_code_is_an_error(self):
         pe = p2m.PE(build_pe([(".text", 0x4000, struct.pack("<Q", IMAGE_BASE), TEXT)], relocs=[0x4000]))

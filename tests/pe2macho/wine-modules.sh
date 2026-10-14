@@ -2,7 +2,8 @@
 # Wraps every ARM64 Wine module that Madeira ships (app/Madeira/aarch64-windows)
 # into a dylib with tools/pe2macho, checks each with --check and then loads them
 # all with dlopen (load-modules.c): PE headers in place, dyld rebased every
-# pointer, code sections read+execute.
+# pointer, code sections read+execute, and each image adopted as Wine will
+# (tools/pe2macho/pe_adopt.h) with its exports found through the PE headers.
 #
 # ntdll and win32u first go through fix_syscall_stubs.py (their aarch64 syscall
 # stubs keep a relocated literal in .text; see patches/wine/0001 for the same
@@ -76,5 +77,5 @@ if ! sort "$here/wine-modules-expected.txt" | diff -u - "$work/refused"; then
 fi
 echo "$converted modules wrapped, $(wc -l <"$work/refused" | tr -d ' ') refused as expected"
 
-xcrun clang -target arm64-apple-macos14 -O2 -o "$work/load-modules" "$here/load-modules.c"
+xcrun clang -target arm64-apple-macos14 -O2 -I "$root/tools/pe2macho" -o "$work/load-modules" "$here/load-modules.c"
 "$work/load-modules" "$work/list"
