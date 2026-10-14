@@ -92,12 +92,22 @@ if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
 fi
 status=0
 wait $spawn || status=$?
+# Madeira's ntdll reports some things (exit() it intercepts, for one) only
+# through os_log.
+if [ -n "$pid" ]; then
+    xcrun simctl spawn "$udid" log show --last 5m --style compact \
+        --predicate "processID == $pid" >"$out/oslog.txt" 2>&1 || true
+fi
 xcrun simctl shutdown "$udid" || true
 echo "winehost exit status: $status"
 cat "$out/run.log"
 if [ -s "$out/sample.txt" ]; then
     echo "--- threads of winehost $seconds s in (sample) ---"
     sed -n '/^Call graph:/,/^Total number in stack/p' "$out/sample.txt" | head -150
+fi
+if [ -s "$out/oslog.txt" ]; then
+    echo "--- os_log of winehost (Wine and errors) ---"
+    grep -i 'wine\|error\|fault' "$out/oslog.txt" | tail -80
 fi
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001).
