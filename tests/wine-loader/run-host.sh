@@ -69,8 +69,12 @@ if ! link "$out/stubs.o" 2>"$out/link2.log"; then
 fi
 echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 
-# ntdll looks for the NLS files next to the executable.
+# ntdll looks for the NLS files next to the executable, and for ntdll.dll
+# itself (load_ntdll: no PE subdirectory on iOS, as in Madeira's app bundle).
 ln -s "$work/madeira/wine/nls" "$out/nls"
+for f in "$work/modules-iphonesimulator/aarch64-windows"/*; do
+    ln -s "$f" "$out/$(basename "$f")"
+done
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
