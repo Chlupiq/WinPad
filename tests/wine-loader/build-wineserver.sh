@@ -69,11 +69,14 @@ echo "wineserver for $sdk_name: $ok files built, $failed failed"
 [ "$failed" = 0 ] || exit 1
 
 # Symbols that collide with win32u's and ntdll's unix sides in the one-process
-# link get a ws_ prefix in every object (Madeira's list and reasons).
+# link get a ws_ prefix in every object (Madeira's list and reasons). The last
+# three are defined by ntdll's server.c too; in Wine they live in two processes,
+# so each side keeps its own.
 rename=""
 for s in alloc_user_handle free_user_handle get_virtual_screen_rect \
     destroy_thread_windows get_window_thread is_desktop_class is_message_class \
-    is_window_visible mirror_region send_notify_message shared_session user_shared_data; do
+    is_window_visible mirror_region send_notify_message shared_session user_shared_data \
+    native_machine server_start_time supported_machines_count; do
     rename="$rename --redefine-sym _$s=_ws_$s"
 done
 for o in "$out"/obj/*.o; do
