@@ -82,6 +82,11 @@ static unsigned char* before_click;  // the first window's last frame before the
 static int before_w, before_h;
 static void* windows_before_click[64];
 static int windows_before_count;
+// What the run has to show (WINEHOST_* env) and what it has shown so far;
+// the host exits early once everything has shown up.
+enum { GOAL_FRAME = 1, GOAL_TYPED = 2, GOAL_NEW_WINDOW = 4, GOAL_CHANGED = 8 };
+static int goals_needed, goals_met, wine_exited;
+static void met(int goal) { __atomic_fetch_or(&goals_met, goal, __ATOMIC_RELEASE); }
 static long dark_before_typing;  // most dark pixels a frame had before typing
 
 static int seen_before_click(void* hwnd) {
@@ -101,6 +106,7 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
                            int surf_w, int surf_h, int stride, const void* bits) {
   static int presents, after_input;
   long dark = 0;
+  met(GOAL_FRAME);
   for (int y = 0; y < surf_h; y++) {
     const unsigned char* row = (const unsigned char*)bits + (size_t)y * stride;
     for (int x = 0; x < surf_w; x++)
@@ -135,6 +141,7 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
     if (changed > 100) {
       said_changed = 1;
       fprintf(stderr, "winehost: window content changed after the click, %ld pixels\n", changed);
+      met(GOAL_CHANGED);
     }
   }
   if (hwnd == first_window && state == 5 && !before_click && !said_changed) {
@@ -143,9 +150,11 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
     said_changed = 1;
     fprintf(stderr, "winehost: window content changed after the click, first frame of the window\n");
   }
-  if (state == 3 && hwnd == first_window && dark > dark_before_typing + 50 && !said_text++)
+  if (state == 3 && hwnd == first_window && dark > dark_before_typing + 50 && !said_text++) {
     fprintf(stderr, "winehost: typed text shows up, %ld dark pixels, at most %ld before\n", dark,
             dark_before_typing);
+    met(GOAL_TYPED);
+  }
   if (!frames_dir || surf_w <= 0 || surf_h <= 0) return 1;
   // 32-bit top-down BMP: the surface is a 32bpp top-down BGRX DIB already.
   unsigned char header[54] = {'B', 'M'};
@@ -200,8 +209,10 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
   if (state < 4 && !seen_before_click(hwnd) && windows_before_count < 64)
     windows_before_click[windows_before_count++] = hwnd;
   static int said_new;
-  if (state == 5 && !seen_before_click(hwnd) && !said_new++)
+  if (state == 5 && !seen_before_click(hwnd) && !said_new++) {
     fprintf(stderr, "winehost: new window %p after the click\n", hwnd);
+    met(GOAL_NEW_WINDOW);
+  }
 }
 
 // From driver_ios.c: they hand one key or mouse event to the wineserver as
@@ -289,6 +300,7 @@ static void* wine_thread(void* arg) {
   } else {
     fprintf(stderr, "winehost: Wine process exited with code %d\n", wine_ios_exit_code);
   }
+  __atomic_store_n(&wine_exited, 1, __ATOMIC_RELEASE);
   return NULL;
 }
 
@@ -355,7 +367,26 @@ int main(int argc, char* argv[]) {
   printf("winehost: starting %s\n", argv[2]);
   if (start(wine_thread, 8 << 20)) return 1;
 
-  sleep(seconds);
+  // A program with a window is done once everything the run checks has shown
+  // up (and a little later, for a few more frames); cmd.exe once it exits.
+  const char* env;
+  if ((env = getenv("WINEHOST_WINDOW")) && *env) goals_needed |= GOAL_FRAME;
+  if ((env = getenv("WINEHOST_TYPE")) && *env) goals_needed |= GOAL_TYPED;
+  if ((env = getenv("WINEHOST_CLICK_MENU")) && !strcmp(env, "1")) goals_needed |= GOAL_NEW_WINDOW;
+  if ((env = getenv("WINEHOST_CLICK")) && *env) goals_needed |= GOAL_CHANGED;
+  double begin = now(), done_at = 0;
+  while (now() - begin < seconds) {
+    usleep(100000);
+    int met_all = (__atomic_load_n(&goals_met, __ATOMIC_ACQUIRE) & goals_needed) == goals_needed;
+    if (__atomic_load_n(&wine_exited, __ATOMIC_ACQUIRE) || (goals_needed && met_all)) {
+      if (!done_at) done_at = now();
+      if (now() - done_at >= 2) {
+        printf("winehost: done after %.0f s, exiting\n", now() - begin);
+        fflush(stderr);
+        _exit(0);
+      }
+    }
+  }
   printf("winehost: %d s passed, exiting\n", seconds);
   fflush(stderr);
   _exit(0);
