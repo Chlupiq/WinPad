@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "teb-test.h"
+
 int main(int argc, char** argv) {
   if (argc != 2) {
     fprintf(stderr, "usage: pe2macho-test DYLIB\n");
@@ -37,5 +39,6 @@ int main(int argc, char** argv) {
          (unsigned long)((const uint8_t*)text - image), text);
   const int ok = product == 20 && count == 8 && strcmp(text, "hello from a PE image") == 0;
   printf("%s\n", ok ? "PE code ran from the dylib" : "FAILED");
-  return ok ? 0 : 1;
+  const int teb_failed = pe_teb_test(lib);
+  return ok && !teb_failed ? 0 : 1;
 }

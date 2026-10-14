@@ -4,7 +4,8 @@
 // executable, so it needs no debugger and no JIT entitlement.
 //
 // Then it calls a Windows DLL (tests/pe2macho/testdll.c) that tools/pe2macho
-// wrapped into Frameworks/pe-testdll.dylib: PE code running as signed code.
+// wrapped into Frameworks/pe-testdll.dylib: PE code running as signed code,
+// including its TEB reads through x18 (tests/pe2macho/teb-test.h).
 //
 // Everything FEX and the probe print goes to Documents/probe.log, shown on
 // screen. If FEX stops the process (it aborts on a block missing from the
@@ -15,6 +16,8 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <unistd.h>
+
+#include "teb-test.h"
 
 int WinPadProbeMain(int argc, char** argv);
 
@@ -51,7 +54,8 @@ int RunPeTest(const char* Path) {
   printf("PE test: add_mul(3, 4) = %d, counter = %d, greeting \"%s\"\n", Product, Count, Text);
   const bool Ok = Product == 20 && Count == 8 && strcmp(Text, "hello from a PE image") == 0;
   printf("%s\n", Ok ? "PE code ran from the dylib" : "PE test FAILED");
-  return Ok ? 0 : 1;
+  const int TebFailed = pe_teb_test(Lib);
+  return Ok && !TebFailed ? 0 : 1;
 }
 } // namespace
 
