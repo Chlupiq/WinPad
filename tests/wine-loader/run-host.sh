@@ -141,6 +141,8 @@ if [ -s "$out/oslog.txt" ]; then
 fi
 for f in "$out"/frames/*.bmp; do
     [ -f "$f" ] || continue
+    echo "--- window ${f##*/} ---"
+    python3 -I "$here/bmp-preview.py" "$f" 64
     sips -s format png "$f" --out "${f%.bmp}.png" >/dev/null && rm "$f"
     echo "window content: ${f%.bmp}.png"
 done
