@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds the unix side of Wine's ntdll the way Madeira's build/ntdll-unix/build.sh
 # does (Madeira's *_ios.c files in place of Wine's), with
-# patches/madeira/0001-adopt-pe-dylib.patch, into libntdll_unix.a for SDK.
+# the patches in patches/madeira (0001: adopt PE images from dylibs), into
+# libntdll_unix.a for SDK.
 # Leaves out the unix libraries of other DLLs (GnuTLS, FFmpeg, FreeType):
 # a Wine process can start without them.
 #
@@ -27,7 +28,7 @@ case $sdk_name in
 esac
 sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
 
-git -C "$madeira" apply "$root/patches/madeira/0001-adopt-pe-dylib.patch"
+git -C "$madeira" apply "$root"/patches/madeira/*.patch
 trap 'git -C "$madeira" checkout -q -- build' EXIT
 
 compile() {  # SOURCE NAME
