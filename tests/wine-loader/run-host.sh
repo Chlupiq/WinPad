@@ -19,7 +19,8 @@
 # newest content of each window ends up in WORK_DIR/host-NAME/frames as PNG.
 # With WINEHOST_TYPE set, the host types that text into the first window and
 # it has to show up there; with WINEHOST_CLICK_MENU=1 it clicks the window's
-# first menu, which has to open (a new window).
+# first menu, which has to open (a new window). WINEHOST_WINEDEBUG replaces
+# WINEDEBUG=+loaddll.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -112,7 +113,7 @@ xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
 seconds=30
 SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
-    SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG=+loaddll \
+    SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG="${WINEHOST_WINEDEBUG:-+loaddll}" \
     SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
     SIMCTL_CHILD_WINEHOST_FRAMES="$out/frames" \
     SIMCTL_CHILD_WINEHOST_TYPE="${WINEHOST_TYPE:-}" SIMCTL_CHILD_WINEHOST_CLICK_MENU="${WINEHOST_CLICK_MENU:-}" \
@@ -136,7 +137,13 @@ if [ -n "$pid" ]; then
 fi
 xcrun simctl shutdown "$udid" || true
 echo "winehost exit status: $status"
-cat "$out/run.log"
+# Trace channels (WINEHOST_WINEDEBUG) can print a lot: the first 150 lines of
+# each, then how often each function traced.
+awk '/:trace:/ { split($0, f, ":"); ch = f[3]; split(f[4], g, " "); calls[ch ":" g[1]]++
+        if (++n[ch] > 150) next }
+    { print }
+    END { for (ch in n) if (n[ch] > 150) printf "(%d trace lines of %s in all)\n", n[ch], ch
+          for (c in calls) printf "(trace %s: %d)\n", c, calls[c] }' "$out/run.log"
 if [ -s "$out/sample.txt" ]; then
     echo "--- threads of winehost $seconds s in (sample) ---"
     sed -n '/^Call graph:/,/^Total number in stack/p' "$out/sample.txt" | head -150
@@ -169,5 +176,5 @@ if [ -n "${WINEHOST_TYPE:-}" ]; then
     grep -q '^winehost: typed text shows up' "$out/run.log"
 fi
 if [ "${WINEHOST_CLICK_MENU:-}" = 1 ]; then
-    grep -q '^winehost: new window .* after input$' "$out/run.log"
+    grep -q '^winehost: new window .* after the click$' "$out/run.log"
 fi
