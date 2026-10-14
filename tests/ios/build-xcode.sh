@@ -72,7 +72,7 @@ libs "$sim_build" iphonesimulator
 cmp "$out/iphoneos.flags" "$out/iphonesimulator.flags" ||
     { echo "the device and simulator builds link different libraries" >&2; exit 1; }
 
-cp "$here/app/main.mm" "$proj/"
+cp "$here/app/main.mm" "$root/tests/pe2macho/teb-test.h" "$proj/"
 # Xcode fills in the bundle id and executable name from the build settings.
 sed -e "s/\${WINPAD_IOS_MIN}/$min_ios/" \
     -e 's/<string>com.chlupiq.winpad.probe</<string>$(PRODUCT_BUNDLE_IDENTIFIER)</' \
@@ -132,3 +132,5 @@ grep -q 'Dispatcher: static code from AOT image' "$log" ||
     { echo "FEX did not run the dispatcher from the AOT image on the simulator" >&2; exit 1; }
 grep -q 'PE code ran from the dylib' "$log" ||
     { echo "the Windows DLL did not run from its dylib on the simulator" >&2; exit 1; }
+grep -q 'TEB reads through x18 found the TEB on both threads' "$log" ||
+    { echo "the Windows DLL's TEB reads failed on the simulator" >&2; exit 1; }

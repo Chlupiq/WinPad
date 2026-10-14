@@ -15,6 +15,7 @@ mkdir -p "$work"
 
 python3 -I "$root/tools/pe2macho/test_pe2macho.py"
 python3 -I "$root/tools/pe2macho/test_fix_syscall_stubs.py"
+python3 -I "$root/tools/pe2macho/test_x18.py"
 sh "$here/build-dylib.sh" "$work" macosx arm64-apple-macos14 "$work/pe-testdll.dylib"
 clang -target arm64-apple-macos14 -O2 -o "$work/pe2macho-test" "$here/main.c"
 "$work/pe2macho-test" "$work/pe-testdll.dylib"
