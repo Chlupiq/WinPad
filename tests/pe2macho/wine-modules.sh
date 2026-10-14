@@ -4,6 +4,10 @@
 # all with dlopen (load-modules.c): PE headers in place, dyld rebased every
 # pointer, code sections read+execute.
 #
+# ntdll and win32u first go through fix_syscall_stubs.py (their aarch64 syscall
+# stubs keep a relocated literal in .text; see patches/wine/0001 for the same
+# change in the source).
+#
 # Modules pe2macho has to refuse are listed in wine-modules-expected.txt with
 # the reason; any other refusal, or one of those modules converting cleanly,
 # fails the test (then update the list).
@@ -34,6 +38,12 @@ converted=0
 for pe in "$modules"/*.dll "$modules"/*.exe; do
     name=$(basename "$pe")
     out="$work/out/$name"
+    case $name in
+        ntdll.dll | win32u.dll)
+            python3 -I "$root/tools/pe2macho/fix_syscall_stubs.py" "$pe" "$out"
+            pe=$out
+            ;;
+    esac
     if ! python3 -I "$p2m" "$pe" "$out.s" 2>"$out.err"; then
         case $(cat "$out.err") in
             *"is in executable section"*) why=reloc-in-code ;;
