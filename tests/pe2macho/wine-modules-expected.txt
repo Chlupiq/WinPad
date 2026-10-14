@@ -1,0 +1,12 @@
+child-test.exe unaligned
+cube.exe unaligned
+d3d11.dll unaligned
+dxgi.dll unaligned
+ntdll.dll reloc-in-code
+proc-test.exe unaligned
+texquad.exe unaligned
+triangle.exe unaligned
+win32u.dll reloc-in-code
+winemetal.dll unaligned
+winhttp-test.exe unaligned
+xtajit.dll unaligned

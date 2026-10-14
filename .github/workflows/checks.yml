@@ -127,6 +127,8 @@ jobs:
         run: |
           PATH="$(brew --prefix lld)/bin:$PATH"
           sh tests/pe2macho/run-macos.sh "$RUNNER_TEMP/pe2macho"
+      - name: Every Wine module from Madeira wrapped into a dylib and loaded
+        run: sh tests/pe2macho/wine-modules.sh "$RUNNER_TEMP/wine-modules"
 
   fexcore-ios:
     runs-on: macos-15

@@ -28,6 +28,7 @@ Each export becomes a global symbol _PREFIX_export_NAME at its RVA.
 
 Usage: pe2macho.py [--prefix NAME] DLL OUT.s     (also writes OUT.ldflags)
        pe2macho.py --check [--prefix NAME] DLL DYLIB
+       pe2macho.py --relocs DLL OUT.txt   ("RVA TARGET_RVA" per rebased pointer)
 PREFIX defaults to pe_<DLL name without extension>, with characters outside
 [A-Za-z0-9_] replaced by _.
 """
@@ -135,6 +136,11 @@ class PE:
             pos += block
         return sorted(out)
 
+    def pointer_target(self, rva):
+        """The RVA a 64-bit base-relocated pointer at RVA points to."""
+        (value,) = struct.unpack_from("<Q", self.image, rva)
+        return value - self.image_base
+
     def exports(self):
         """{name: RVA} of the exported functions and data (forwarders skipped)."""
         rva, size = self.dirs[IMAGE_DIRECTORY_ENTRY_EXPORT] if self.dirs else (0, 0)
@@ -206,12 +212,17 @@ def write_asm(pe, prefix, out):
             for label in labels.get(pos, []):
                 lines += [f"\t.globl {label}", f"{label}:"]
             if pos in reloc_set:
-                (value,) = struct.unpack_from("<Q", pe.image, pos)
-                lines.append(f"\t.quad _{prefix}_image + {value - pe.image_base:#x}")
+                lines.append(f"\t.quad _{prefix}_image + {pe.pointer_target(pos):#x}")
                 continue
             chunk = pe.image[pos:min(cut, len(pe.image))]
             for j in range(0, len(chunk), 32):
-                lines.append("\t.byte " + ",".join(str(b) for b in chunk[j:j + 32]))
+                row = chunk[j:j + 32]
+                if not any(row) and lines[-1].startswith("\t.zero "):
+                    lines[-1] = f"\t.zero {int(lines[-1][7:]) + len(row)}"
+                elif not any(row):
+                    lines.append(f"\t.zero {len(row)}")
+                else:
+                    lines.append("\t.byte " + ",".join(str(b) for b in row))
             if cut > max(pos, len(pe.image)):
                 lines.append(f"\t.space {cut - max(pos, len(pe.image))}")
     with open(out, "w") as fh:
@@ -274,11 +285,13 @@ def check(pe, prefix, dylib):
         if initprot != want:
             errors.append(f"segment {name} has protection {initprot}, expected {want}")
         # The file holds the bytes as linked; relocated slots hold dyld's fixup encoding.
-        stored = data[fileoff:fileoff + min(filesize, end - start)]
-        expected = pe.image[start:start + len(stored)]
-        diff = [start + j for j in range(len(stored)) if stored[j] != expected[j]]
-        diff = [d for d in diff if not any(r <= d < r + 8 for r in relocs)]
-        if diff:
+        stored = bytearray(data[fileoff:fileoff + min(filesize, end - start)])
+        expected = bytearray(pe.image[start:start + len(stored)])
+        for r in relocs:
+            if start <= r < start + len(stored):
+                stored[r - start:r - start + 8] = expected[r - start:r - start + 8] = bytes(8)
+        if stored != expected:
+            diff = [start + j for j in range(len(stored)) if stored[j] != expected[j]]
             errors.append(f"segment {name}: {len(diff)} bytes differ from the image, first at RVA {diff[0]:#x}")
     for name, rva in pe.exports().items():
         sym = f"_{prefix}_export_{name}"
@@ -291,8 +304,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--prefix")
     ap.add_argument("--check", action="store_true", help="verify a linked dylib against the DLL")
+    ap.add_argument("--relocs", action="store_true",
+                    help="write the rebased pointers to OUT, one 'RVA TARGET_RVA' line each (hex)")
     ap.add_argument("dll")
-    ap.add_argument("out", help="OUT.s, or the dylib with --check")
+    ap.add_argument("out", help="OUT.s, the dylib with --check, or the list with --relocs")
     args = ap.parse_args()
     prefix = args.prefix or default_prefix(args.dll)
     with open(args.dll, "rb") as fh:
@@ -306,6 +321,11 @@ def main():
                     return 1
                 print(f"{args.out}: {len(pe.groups())} segments at their RVAs, "
                       f"{len(pe.relocations())} rebased pointers, {len(pe.exports())} exports")
+                return 0
+            if args.relocs:
+                with open(args.out, "w") as out:
+                    for rva in pe.relocations():
+                        out.write(f"{rva:x} {pe.pointer_target(rva):x}\n")
                 return 0
             write_asm(pe, prefix, args.out)
         except PEError as e:
