@@ -6,7 +6,9 @@
 # win32u has no fonts, but windows and GDI drawing work.
 #
 # Usage: build-win32u.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
-# WORK_DIR must hold the trees build.sh fetched and configured.
+# WORK_DIR must hold the trees build.sh fetched and configured. win32u needs
+# the COM headers Wine generates from IDL files; they are made here with
+# Wine's own widl (needs bison and flex on PATH) when they are missing.
 set -eu
 
 work=$1
@@ -24,6 +26,14 @@ case $sdk_name in
     *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
 esac
 sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
+
+if [ ! -f "$wine/build-macos/include/objidlbase.h" ]; then
+    make -C "$wine/build-macos" -j"$(sysctl -n hw.ncpu)" include >"$work/make-include.log" 2>&1 || {
+        tail -40 "$work/make-include.log" >&2
+        exit 1
+    }
+    echo "Generated Wine's IDL headers"
+fi
 
 compile() {  # SOURCE NAME
     if xcrun -sdk "$sdk_name" clang -target "$target" -isysroot "$sdk" \
