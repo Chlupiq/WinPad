@@ -44,7 +44,7 @@ $cc -O1 -g -Wall -c "$here/host/winehost.c" -o "$out/winehost.o"
 link() {
     # shellcheck disable=SC2086
     $cc -o "$out/winehost" "$out/winehost.o" "$@" $libs \
-        -framework Foundation -framework CoreFoundation -framework AudioToolbox -lc++ -lz
+        -framework Foundation -framework CoreFoundation -framework CoreText -framework CoreGraphics -framework AudioToolbox -lc++ -lz
 }
 
 if link 2>"$out/link1.log"; then
@@ -97,7 +97,9 @@ echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 # ntdll looks for the NLS files next to the executable, and for ntdll.dll
 # itself in the PE subdirectory there (load_ntdll: dll_dir + get_pe_dir(),
 # <exe dir>/aarch64-windows/ntdll.dll, as in Madeira's app bundle).
+# The fonts too: Wine's data dir is the executable's directory on iOS.
 ln -s "$work/madeira/wine/nls" "$out/nls"
+ln -s "$work/madeira/wine/fonts" "$out/fonts"
 ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
