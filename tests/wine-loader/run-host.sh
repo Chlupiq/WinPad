@@ -6,15 +6,16 @@
 # linker reports missing gets a stub that logs its first call and returns 0.
 # The stub list says what a Wine host has to bring along.
 #
-# Usage: run-host.sh WORK_DIR [PROGRAM]
-# WORK_DIR must hold the outputs of build-ntdll.sh and build-wineserver.sh
-# for iphonesimulator.
+# Usage: run-host.sh WORK_DIR [PROGRAM [ARGS...]]
+# WORK_DIR must hold the outputs of build-ntdll.sh, build-wineserver.sh and
+# wrap-modules.sh for iphonesimulator.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 work=$1
-program=${2:-'C:\windows\system32\hello.exe'}
+shift
+[ $# -gt 0 ] || set -- 'C:\windows\system32\cmd.exe' /c echo Hello from Wine
 out="$work/host"
 rm -rf "$out"
 mkdir -p "$out"
@@ -77,10 +78,10 @@ echo "iPad simulator $udid"
 xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
 status=0
-SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$out/dlls" \
+SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
     SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" \
     perl -e 'alarm shift; exec @ARGV' 120 \
-    xcrun simctl spawn "$udid" "$out/winehost" 20 "$program" >"$out/run.log" 2>&1 || status=$?
+    xcrun simctl spawn "$udid" "$out/winehost" 20 "$@" >"$out/run.log" 2>&1 || status=$?
 xcrun simctl shutdown "$udid" || true
 echo "winehost exit status: $status"
 cat "$out/run.log"
