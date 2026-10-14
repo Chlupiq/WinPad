@@ -22,7 +22,7 @@ mkdir -p "$work"
 # madeira/wine may already be there (restored from a cache), so no git clone.
 if [ ! -d "$work/madeira/.git" ]; then
     git init -q "$work/madeira"
-    git -C "$work/madeira" sparse-checkout set --no-cone /build/
+    git -C "$work/madeira" sparse-checkout set --no-cone /build/ /app/Madeira/Winios/
     git -C "$work/madeira" fetch -q --depth 1 --filter=blob:none "$MADEIRA_REPO" "$MADEIRA_COMMIT"
 fi
 git -C "$work/madeira" checkout -q -f "$MADEIRA_COMMIT"
