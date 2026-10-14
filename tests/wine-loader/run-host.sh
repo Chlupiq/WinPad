@@ -5,8 +5,8 @@
 # on an iPad simulator. What the app around Madeira's Wine would provide
 # (Swift bridges, the gamepad, DXMT, FEX) is not linked: every symbol the
 # linker reports missing gets a stub that logs its first call and returns 0.
-# Except the winios_* hooks of win32u's display driver: those are weak, and
-# one left undefined (NULL) makes the driver fall back to Wine's null driver,
+# Except the weak winios_* hooks of win32u's display driver: those stay
+# undefined (NULL), so the driver falls back to Wine's null driver,
 # where a stub returning 0 would fail the call (pCreateWindow kills every
 # window).
 # The stub list says what a Wine host has to bring along.
@@ -56,8 +56,14 @@ else
         exit 1
     fi
 fi
-grep '^_winios_' "$out/missing" >"$out/weak" || true
-grep -v '^_winios_' "$out/missing" >"$out/stubbed" || true
+# A hook counts as weak only if no object refers to it strongly.
+# shellcheck disable=SC2086
+xcrun nm -m $libs 2>/dev/null >"$out/refs"
+sed -n 's/.*(undefined) external \(_winios_[^ ]*\).*/\1/p' "$out/refs" | sort -u >"$out/strong-refs"
+sed -n 's/.*(undefined) weak external \(_winios_[^ ]*\).*/\1/p' "$out/refs" | sort -u |
+    grep -vFxf "$out/strong-refs" >"$out/weak-refs" || true
+grep -Fxf "$out/weak-refs" "$out/missing" >"$out/weak" || true
+grep -vFxf "$out/weak-refs" "$out/missing" >"$out/stubbed" || true
 weak_flags=$(sed 's/^/-Wl,-U,/' "$out/weak")
 n=$(wc -l <"$out/missing" | tr -d ' ')
 echo "Symbols a Wine host has to provide: $n"
