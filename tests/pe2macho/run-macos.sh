@@ -23,7 +23,7 @@ lld-link /dll /noentry /nodefaultlib /machine:arm64 /align:65536 /out:"$work/tes
 python3 -I "$p2m" "$work/testdll.dll" "$work/testdll.s"
 clang -target arm64-apple-macos14 -c -o "$work/testdll.o" "$work/testdll.s"
 # shellcheck disable=SC2046 # one flag per line
-clang -target arm64-apple-macos14 -dynamiclib -nostdlib -install_name @rpath/testdll.dylib \
+clang -target arm64-apple-macos14 -dynamiclib -install_name @rpath/testdll.dylib \
     -o "$work/testdll.dylib" "$work/testdll.o" $(cat "$work/testdll.ldflags")
 python3 -I "$p2m" --check "$work/testdll.dll" "$work/testdll.dylib"
 
