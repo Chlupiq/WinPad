@@ -28,11 +28,12 @@ esac
 sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
 
 if [ ! -f "$wine/build-macos/include/objidlbase.h" ]; then
-    make -C "$wine/build-macos" -j"$(sysctl -n hw.ncpu)" include >"$work/make-include.log" 2>&1 || {
-        tail -40 "$work/make-include.log" >&2
-        exit 1
-    }
-    echo "Generated Wine's IDL headers"
+    headers=$(cd "$wine" && ls include/*.idl | sed 's/\.idl$/.h/')
+    # shellcheck disable=SC2086 # one target per header
+    # -k: a few IDL files make no header (type libraries only).
+    make -k -C "$wine/build-macos" -j"$(sysctl -n hw.ncpu)" $headers >"$work/make-include.log" 2>&1 || true
+    [ -f "$wine/build-macos/include/objidlbase.h" ] || { tail -20 "$work/make-include.log" >&2; exit 1; }
+    echo "Generated Wine's IDL headers: $(echo "$headers" | wc -w | tr -d ' ')"
 fi
 
 compile() {  # SOURCE NAME
