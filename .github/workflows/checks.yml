@@ -160,11 +160,26 @@ jobs:
           PATH="$(brew --prefix llvm)/bin:$PATH"
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphoneos
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
+      - name: win32u unix side (windows, GDI, display driver) for iOS and the iPad simulator
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          sh tests/wine-loader/build-win32u.sh "$RUNNER_TEMP/wine-loader" iphoneos
+          sh tests/wine-loader/build-win32u.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
       - name: Madeira's Wine modules wrapped into dylibs for the iPad simulator
         run: sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
       - name: Minimal Wine host linked from both and run on an iPad simulator
         timeout-minutes: 20
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader"
+      - name: Wine's clock.exe draws its window with GDI on an iPad simulator
+        timeout-minutes: 20
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" 'C:\windows\system32\clock.exe'
+      - name: Window content of the clock
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-window-clock
+          path: ${{ runner.temp }}/wine-loader/host-clock/frames
+          if-no-files-found: ignore
 
   fexcore-ios:
     runs-on: macos-15

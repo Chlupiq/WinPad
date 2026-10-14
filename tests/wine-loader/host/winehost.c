@@ -6,7 +6,8 @@
 //
 // Usage: winehost SECONDS PROGRAM [ARGS...]
 // Environment: WINEPREFIX (created if missing), WINEDLLPATH, optional
-// WINEHOST_NLS (directory with the .nls files).
+// WINEHOST_NLS (directory with the .nls files) and WINEHOST_FRAMES (directory
+// that gets the newest content of each window as HWND.bmp).
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
 // came up. Whatever Wine does in the meantime goes to stderr.
 #include <errno.h>
@@ -51,6 +52,60 @@ void fatal_error(const char* err, ...) {
   vfprintf(stderr, err, args);
   va_end(args);
   pthread_exit(NULL);
+}
+
+// win32u's winios display driver (driver_ios.c, MADEIRA_DESKTOP=1) hands
+// over the content of a window whenever GDI flushes it; the app uploads it
+// into a layer. Here the newest frame of each window goes to a BMP file.
+static const char* frames_dir;
+
+static void put32(unsigned char* p, unsigned v) {
+  p[0] = v;
+  p[1] = v >> 8;
+  p[2] = v >> 16;
+  p[3] = v >> 24;
+}
+
+int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, int dirty_h,
+                           int surf_w, int surf_h, int stride, const void* bits) {
+  static int presents;
+  if (presents++ < 20)
+    fprintf(stderr, "winehost: frame of window %p, %dx%d, dirty %d,%d %dx%d\n", hwnd, surf_w,
+            surf_h, dirty_x, dirty_y, dirty_w, dirty_h);
+  if (!frames_dir || surf_w <= 0 || surf_h <= 0) return 1;
+  // 32-bit top-down BMP: the surface is a 32bpp top-down BGRX DIB already.
+  unsigned char header[54] = {'B', 'M'};
+  unsigned size = (unsigned)surf_w * surf_h * 4;
+  put32(header + 2, 54 + size);
+  put32(header + 10, 54);
+  put32(header + 14, 40);
+  put32(header + 18, surf_w);
+  put32(header + 22, -surf_h);
+  header[26] = 1;
+  header[28] = 32;
+  put32(header + 34, size);
+  char path[1024], tmp[1040];
+  snprintf(path, sizeof(path), "%s/%p.bmp", frames_dir, hwnd);
+  snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+  FILE* f = fopen(tmp, "wb");
+  if (!f) return 1;
+  fwrite(header, 1, sizeof(header), f);
+  for (int y = 0; y < surf_h; y++) {
+    const unsigned char* row = (const unsigned char*)bits + (size_t)y * stride;
+    for (int x = 0; x < surf_w; x++) {
+      unsigned char px[4] = {row[x * 4], row[x * 4 + 1], row[x * 4 + 2], 0xff};
+      fwrite(px, 1, 4, f);
+    }
+  }
+  fclose(f);
+  rename(tmp, path);
+  return 1;
+}
+
+void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, int cx, int cy,
+                         int cw, int ch) {
+  fprintf(stderr, "winehost: window %p at %d,%d %dx%d, visible %d, client %d,%d %dx%d\n", hwnd, x,
+          y, w, h, visible, cx, cy, cw, ch);
 }
 
 static void* server_thread(void* arg) {
@@ -106,6 +161,8 @@ int main(int argc, char* argv[]) {
   setenv("WINELOADERNOEXEC", "1", 1);
   const char* nls = getenv("WINEHOST_NLS");
   if (nls) wineserver_set_nls_dir(nls);
+  frames_dir = getenv("WINEHOST_FRAMES");
+  if (frames_dir) mkdir(frames_dir, 0700);
 
   printf("winehost: pid %d\n", (int)getpid());
   printf("winehost: starting wineserver, prefix %s\n", prefix);
