@@ -6,15 +6,20 @@
 # linker reports missing gets a stub that logs its first call and returns 0.
 # The stub list says what a Wine host has to bring along.
 #
-# Usage: run-host.sh WORK_DIR [PROGRAM]
-# WORK_DIR must hold the outputs of build-ntdll.sh and build-wineserver.sh
-# for iphonesimulator.
+# Usage: run-host.sh WORK_DIR [PROGRAM [ARGS...]]
+# WORK_DIR must hold the outputs of build-ntdll.sh, build-wineserver.sh and
+# wrap-modules.sh for iphonesimulator.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 work=$1
-program=${2:-'C:\windows\system32\hello.exe'}
+shift
+default_program=
+if [ $# -eq 0 ]; then
+    default_program=1
+    set -- 'C:\windows\system32\cmd.exe' /c echo Hello from Wine
+fi
 out="$work/host"
 rm -rf "$out"
 mkdir -p "$out"
@@ -68,23 +73,53 @@ if ! link "$out/stubs.o" 2>"$out/link2.log"; then
 fi
 echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 
-# ntdll looks for the NLS files next to the executable.
+# ntdll looks for the NLS files next to the executable, and for ntdll.dll
+# itself in the PE subdirectory there (load_ntdll: dll_dir + get_pe_dir(),
+# <exe dir>/aarch64-windows/ntdll.dll, as in Madeira's app bundle).
 ln -s "$work/madeira/wine/nls" "$out/nls"
+ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
 echo "iPad simulator $udid"
 xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
-status=0
-SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$out/dlls" \
-    SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" \
+seconds=30
+SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
+    SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG=+loaddll \
     perl -e 'alarm shift; exec @ARGV' 120 \
-    xcrun simctl spawn "$udid" "$out/winehost" 20 "$program" >"$out/run.log" 2>&1 || status=$?
+    xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
+spawn=$!
+# A simulator process is a Mac process: shortly before the host gives up,
+# sample its threads, so a Wine process that hangs shows where.
+sleep $((seconds - 5))
+pid=$(sed -n 's/^winehost: pid \([0-9]*\)$/\1/p' "$out/run.log")
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    sample "$pid" 2 -file "$out/sample.txt" >/dev/null 2>&1 || true
+fi
+status=0
+wait $spawn || status=$?
+# Madeira's ntdll reports some things (exit() it intercepts, for one) only
+# through os_log.
+if [ -n "$pid" ]; then
+    xcrun simctl spawn "$udid" log show --last 5m --style compact \
+        --predicate "processID == $pid" >"$out/oslog.txt" 2>&1 || true
+fi
 xcrun simctl shutdown "$udid" || true
 echo "winehost exit status: $status"
 cat "$out/run.log"
+if [ -s "$out/sample.txt" ]; then
+    echo "--- threads of winehost $seconds s in (sample) ---"
+    sed -n '/^Call graph:/,/^Total number in stack/p' "$out/sample.txt" | head -150
+fi
+if [ -s "$out/oslog.txt" ]; then
+    echo "--- os_log of winehost (Wine and errors) ---"
+    grep -i 'wine\|error\|fault' "$out/oslog.txt" | tail -80
+fi
 grep -q '^winehost: wineserver ready' "$out/run.log"
-# The Wine process gets through its start-up with the server and ends through
-# exit() (no program to run yet), caught by the host instead of crashing.
-grep -q '^winehost: Wine process exited with code' "$out/run.log"
+# The Wine process loads the program from its dylib (patches/madeira/0001).
+grep -q 'load_main_exe = 0x0' "$out/run.log"
+# Every DLL comes from its dylib too (load_builtin), and the program runs to
+# its end: cmd.exe prints the line and exits with 0.
+grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
+[ -z "$default_program" ] || grep -q '^Hello from Wine' "$out/run.log"

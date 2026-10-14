@@ -4,14 +4,16 @@ Subject: [PATCH] ntdll: Take over PE images from signed dylibs on iOS.
 A module that tools/pe2macho wrapped into a dylib (NAME.dylib next to
 NAME) is loaded with dlopen and its image becomes the module view as it
 is, through virtual_create_builtin_view like a .so builtin: no copy into
-the JIT pool, no address translation, no load-time code patching.
+the JIT pool, no address translation, no load-time code patching. That
+covers the files the unix side opens itself (main exe, ntdll) and, in
+load_builtin, the DLLs the PE loader found and maps as sections.
 Protection changes on such an image go straight to mprotect.
 
 Needs tools/pe2macho/pe_adopt.h on the include path.
 Applies to willfaust/Madeira at 48f9764.
 ---
 diff --git a/build/ntdll-unix/loader_ios.c b/build/ntdll-unix/loader_ios.c
-index b59b458..5fbe4a7 100644
+index b59b458..c545ea8 100644
 --- a/build/ntdll-unix/loader_ios.c
 +++ b/build/ntdll-unix/loader_ios.c
 @@ -97,6 +97,7 @@
@@ -130,6 +132,77 @@ index b59b458..5fbe4a7 100644
      status = open_dll_file( name, attr, &mapping );
      if (!status)
      {
+@@ -1678,6 +1759,59 @@ done:
+ }
+ 
+ 
++#ifdef WINE_IOS
++/***********************************************************************
++ *           find_builtin_pe_dylib
++ *
++ * WinPad: look for the dylib of a module the PE loader found as a file,
++ * NAME.dylib in a DLL directory, and take the module over from there. Only
++ * dylibs: load_builtin keeps the PE file the caller found otherwise.
++ */
++static NTSTATUS find_builtin_pe_dylib( UNICODE_STRING *nt_name, ANSI_STRING *exp_name, void **module,
++                                       SIZE_T *size, SECTION_IMAGE_INFORMATION *info,
++                                       USHORT search_machine, USHORT load_machine )
++{
++    const char *pe_dir = get_pe_dir( search_machine );
++    unsigned int i, len, namepos = 0;
++    char name[256], path[PATH_MAX];
++    OBJECT_ATTRIBUTES attr;
++    NTSTATUS status;
++
++    InitializeObjectAttributes( &attr, nt_name, 0, 0, NULL );
++    if (exp_name && exp_name->Length)
++    {
++        if ((len = exp_name->Length) >= sizeof(name)) return STATUS_DLL_NOT_FOUND;
++        memcpy( name, exp_name->Buffer, len );
++    }
++    else
++    {
++        len = nt_name->Length / sizeof(WCHAR);
++        for (i = 0; i < len; i++)
++            if (nt_name->Buffer[i] == '/' || nt_name->Buffer[i] == '\\') namepos = i + 1;
++        len -= namepos;
++        if (!len || len >= sizeof(name)) return STATUS_DLL_NOT_FOUND;
++        for (i = 0; i < len; i++)
++        {
++            if (nt_name->Buffer[namepos + i] > 127) return STATUS_DLL_NOT_FOUND;
++            name[i] = (char)nt_name->Buffer[namepos + i];
++        }
++    }
++    name[len] = 0;
++    for (i = 0; i < len; i++)
++        if (name[i] >= 'A' && name[i] <= 'Z') name[i] += 'a' - 'A';
++
++    for (i = 0; dll_paths[i]; i++)
++    {
++        if (snprintf( path, sizeof(path), "%s%s/%s", dll_paths[i], pe_dir, name ) >= (int)sizeof(path))
++            continue;
++        status = open_builtin_pe_dylib( path, &attr, module, size, info, load_machine, FALSE );
++        if (status != STATUS_DLL_NOT_FOUND) return status;
++    }
++    return STATUS_DLL_NOT_FOUND;
++}
++#endif
++
++
+ /***********************************************************************
+  *           load_builtin
+  *
+@@ -1702,6 +1836,10 @@ NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *n
+             return STATUS_DLL_NOT_FOUND;
+         }
+     }
++    /* WinPad: a module wrapped into a dylib is taken over from there */
++    if (!offset && !find_builtin_pe_dylib( nt_name, exp_name, module, size, info,
++                                           image_info->machine, machine ))
++        return STATUS_SUCCESS;
+     /* On iOS, all PE DLLs are in the prefix (system32 symlinks to bundle).
+      * Skip the builtin .so search — it causes mmap failures on iOS and
+      * corrupts file descriptors.  Just tell the caller to use the PE file. */
 diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
 index 88eac4d..ee46193 100644
 --- a/build/ntdll-unix/virtual_ios.c
