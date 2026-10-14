@@ -182,5 +182,5 @@ if [ "${WINEHOST_CLICK_MENU:-}" = 1 ]; then
     grep -q '^winehost: new window .* after the click$' "$out/run.log"
 fi
 if [ -n "${WINEHOST_CLICK:-}" ]; then
-    grep -q '^winehost: window content changed after the click' "$out/run.log"
+    grep -q '^winehost: window content changed after the click, [0-9]* pixels$' "$out/run.log"
 fi
