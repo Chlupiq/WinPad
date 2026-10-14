@@ -136,6 +136,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools
         run: brew install bison flex llvm lld
+      - name: Newest Xcode (Madeira's server_ios.c needs the iOS 26 SDK)
+        run: |
+          ls -d /Applications/Xcode_*.app
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcrun --sdk iphoneos --show-sdk-version
       - name: Restore configured Wine tree
         uses: actions/cache@v4
         with:
@@ -145,6 +151,10 @@ jobs:
         run: |
           PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
           sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
+      - name: Whole ntdll unix side for iOS, with the adopt patch
+        run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphoneos
+      - name: The same for the iPad simulator
+        run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
 
   fexcore-ios:
     runs-on: macos-15
