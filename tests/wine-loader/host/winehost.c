@@ -14,6 +14,7 @@
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
 // came up. Whatever Wine does in the meantime goes to stderr.
 #include <errno.h>
+#include <mach/mach.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -320,6 +321,42 @@ static void publish_host_probe(void) {
   printf("winehost: FEX host features %s\n", buf);
 }
 
+// FEX translates x86 code at run time and Madeira's ntdll copies plain PE
+// code (xtajit.dll) into a JIT pool: one memory entry mapped twice, read-write
+// and read-execute (JITAllocator.c in the app, which on a device gets the
+// executable view from a debugger). The simulator lets a process map it
+// itself. WINE_IOS_JIT_RX/RW/SIZE hand it to Wine, as ContentView.swift does.
+static int publish_jit_pool(size_t size) {
+  mach_port_t task = mach_task_self(), entry = MACH_PORT_NULL;
+  memory_object_size_t entry_size = size;
+  kern_return_t kr = mach_make_memory_entry_64(
+      task, &entry_size, 0, MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE,
+      &entry, MACH_PORT_NULL);
+  if (kr != KERN_SUCCESS) {
+    printf("winehost: JIT pool memory entry failed: %s\n", mach_error_string(kr));
+    return 1;
+  }
+  vm_address_t rw = 0, rx = 0;
+  kr = vm_map(task, &rw, size, 0, VM_FLAGS_ANYWHERE, entry, 0, FALSE, VM_PROT_READ | VM_PROT_WRITE,
+              VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
+  if (kr == KERN_SUCCESS)
+    kr = vm_map(task, &rx, size, 0, VM_FLAGS_ANYWHERE, entry, 0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE,
+                VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
+  if (kr != KERN_SUCCESS) {
+    printf("winehost: JIT pool mapping failed: %s\n", mach_error_string(kr));
+    return 1;
+  }
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%lx", (unsigned long)rx);
+  setenv("WINE_IOS_JIT_RX", buf, 1);
+  snprintf(buf, sizeof(buf), "%lx", (unsigned long)rw);
+  setenv("WINE_IOS_JIT_RW", buf, 1);
+  snprintf(buf, sizeof(buf), "%lx", (unsigned long)size);
+  setenv("WINE_IOS_JIT_SIZE", buf, 1);
+  printf("winehost: JIT pool RX %#lx RW %#lx, %zu MB\n", (unsigned long)rx, (unsigned long)rw, size >> 20);
+  return 0;
+}
+
 static void* server_thread(void* arg) {
   (void)arg;
   foreground = 1;
@@ -409,6 +446,7 @@ int main(int argc, char* argv[]) {
   if (pe_machine(argv[2]) == 0x14c) {
     ios_main_image_i386 = 1;
     publish_host_probe();
+    if (publish_jit_pool(512 << 20)) return 1;
     printf("winehost: 32-bit x86 program, running it through WoW64\n");
   }
   printf("winehost: starting %s\n", argv[2]);
