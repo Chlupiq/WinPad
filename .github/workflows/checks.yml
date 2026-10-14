@@ -72,6 +72,28 @@ jobs:
             ${{ runner.temp }}/fex-work/probe
           if-no-files-found: warn
 
+  fex-wow64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q cmake ninja-build python3
+      - name: Restore the FEX WoW64 build
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/fex-wow64
+          key: fex-wow64-${{ hashFiles('tests/fex-wow64/build.sh', 'patches/fex-wow64/*') }}
+          restore-keys: fex-wow64-
+      - name: FEX's WoW64 module (xtajit.dll) builds from Madeira's FEX fork
+        run: sh tests/fex-wow64/build.sh "$RUNNER_TEMP/fex-wow64"
+      - name: Upload xtajit.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: xtajit
+          path: ${{ runner.temp }}/fex-wow64/xtajit.dll
+
   probe-macos:
     needs: fex-cache
     runs-on: macos-15
@@ -132,6 +154,7 @@ jobs:
 
   wine-loader:
     runs-on: macos-15
+    needs: fex-wow64
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -236,6 +259,13 @@ jobs:
           name: wine-window-winemine
           path: ${{ runner.temp }}/wine-loader/host-winemine/frames
           if-no-files-found: ignore
+      - name: FEX's WoW64 module built from source (fex-wow64 job)
+        uses: actions/download-artifact@v4
+        with:
+          name: xtajit
+          path: ${{ runner.temp }}/xtajit
+      - name: Use it in place of Madeira's prebuilt xtajit.dll
+        run: cp "$RUNNER_TEMP/xtajit/xtajit.dll" "$RUNNER_TEMP/wine-loader/modules-iphonesimulator/aarch64-windows/xtajit.dll"
       - name: A 32-bit x86 program runs in Wine through WoW64 and FEX on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
