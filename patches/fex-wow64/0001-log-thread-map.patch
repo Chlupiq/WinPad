@@ -1,0 +1,13 @@
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -1488,6 +1488,10 @@
+   }
+ 
+   auto ThreadTID = GetCurrentThreadId();
++  // WinPad: the emplace below threw from rehash on the simulator, as if the map had never been
++  // constructed. Print the map's state first.
++  LogMan::Msg::EFmt("[winpad-threads] &Threads={} size={} buckets={} max_load_factor={}", static_cast<void*>(&Threads),
++                    Threads.size(), Threads.bucket_count(), Threads.max_load_factor());
+   Threads.emplace(ThreadTID, Thread);
+   if (StatAllocHandler) {
+     Thread->ThreadStats = StatAllocHandler->AllocateSlot(ThreadTID);

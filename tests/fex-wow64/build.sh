@@ -32,6 +32,10 @@ for m in $(git -C "$src" config -f .gitmodules --get-regexp 'submodule\..*\.path
     case "$m" in External/fex-*-bins) continue ;; esac
     git -C "$src" submodule update -q --init --depth 1 "$m"
 done
+# WinPad changes to the WoW64 module, see the header of each patch.
+for p in "$(cd "$(dirname "$0")" && pwd)"/../../patches/fex-wow64/*.patch; do
+    git -C "$src" apply "$p"
+done
 
 b="$work/build-wow64"
 if [ ! -f "$b/CMakeCache.txt" ]; then
