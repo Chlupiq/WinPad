@@ -239,6 +239,7 @@ jobs:
       - name: A 32-bit x86 program runs in Wine through WoW64 and FEX on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
+          WINEHOST_WINEDEBUG: +loaddll,+module
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
 
   fexcore-ios:
