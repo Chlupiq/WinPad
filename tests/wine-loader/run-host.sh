@@ -113,6 +113,13 @@ echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 ln -s "$work/madeira/wine/nls" "$out/nls"
 ln -s "$work/madeira/wine/fonts" "$out/fonts"
 ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
+# Explorer starts the program with CreateProcess, which wants the file in
+# C:\windows\system32 (the prefix has no wineboot-made system32); the
+# loader still takes it from its dylib.
+if [ "${WINEHOST_DESKTOP:-}" = 1 ]; then
+    mkdir -p "$out/prefix/drive_c/windows/system32"
+    cp "$work/modules-iphonesimulator/aarch64-windows/$name.exe" "$out/prefix/drive_c/windows/system32/"
+fi
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
