@@ -155,6 +155,11 @@ jobs:
         run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphoneos
       - name: The same for the iPad simulator
         run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
+      - name: wineserver for iOS and the iPad simulator
+        run: |
+          PATH="$(brew --prefix llvm)/bin:$PATH"
+          sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphoneos
+          sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
 
   fexcore-ios:
     runs-on: macos-15
