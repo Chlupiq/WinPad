@@ -35,6 +35,8 @@ Ve Wine na to stačí existující cesta pro builtin `.so` moduly (`dlopen_dll` 
 2. `mprotect_exec` musí rozsahy převzatých modulů nechat být: kód už je r-x a podepsaný, data rw-. Změna ochrany od Windows kódu (`VirtualProtect` na IAT apod.) se tam má promítnout jen do evidence Wine, ne do kopie.
 3. `ios_patch_rtl_pc_to_file_header` se pro převzaté moduly nevolá, protože kód běží přímo z obrazu.
 
+Patch: `patches/madeira/0001-adopt-pe-dylib.patch` (body 1 a 2; bod 3 plyne z toho, že kód neprojde `mprotect_exec`). CI (`tests/wine-loader/build.sh`) přeloží `loader_ios.c` a `virtual_ios.c` pro iOS s příznaky Madeiry, nejdřív bez patche a pak s ním.
+
 ## Další krok
 
-Patch `loader_ios.c` a `virtual_ios.c` podle bodů výše, sestavený s Madeira ntdll.
+Sestavit celou Madeiru s patchem a spustit Wine proces s moduly z dylibů.
