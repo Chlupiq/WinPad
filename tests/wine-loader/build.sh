@@ -5,7 +5,8 @@
 # The Wine tree is configured on the Mac only to get config.h.
 #
 # Usage: build.sh WORK_DIR
-# Needs: an arm64 Mac with Xcode (iphoneos SDK), git, bison and flex (Homebrew).
+# Needs: an arm64 Mac with Xcode (iphoneos SDK), git, bison, flex, and LLVM
+# clang, llvm-dlltool and lld for the PE side (configure insists on them).
 set -eu
 
 MADEIRA_REPO=https://github.com/willfaust/Madeira.git
@@ -33,7 +34,7 @@ if [ ! -f "$wine/build-macos/include/config.h" ]; then
     git -C "$wine" fetch -q --depth 1 "$WINE_REPO" "$WINE_COMMIT"
     git -C "$wine" checkout -q FETCH_HEAD
     mkdir -p "$wine/build-macos"
-    (cd "$wine/build-macos" && ../configure -q --without-mingw --without-x --without-freetype \
+    (cd "$wine/build-macos" && ../configure -q --without-x --without-freetype \
         --without-gnutls --without-vulkan --without-opencl --without-gstreamer --without-sdl \
         --without-cups --without-sane --without-krb5 --without-netapi --without-pcap \
         --without-usb --without-v4l2 --without-pulse --without-alsa --without-oss \
