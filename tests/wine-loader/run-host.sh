@@ -5,6 +5,10 @@
 # on an iPad simulator. What the app around Madeira's Wine would provide
 # (Swift bridges, the gamepad, DXMT, FEX) is not linked: every symbol the
 # linker reports missing gets a stub that logs its first call and returns 0.
+# Except the winios_* hooks of win32u's display driver: those are weak, and
+# one left undefined (NULL) makes the driver fall back to Wine's null driver,
+# where a stub returning 0 would fail the call (pCreateWindow kills every
+# window).
 # The stub list says what a Wine host has to bring along.
 #
 # Usage: run-host.sh WORK_DIR [PROGRAM [ARGS...]]
@@ -52,6 +56,9 @@ else
         exit 1
     fi
 fi
+grep '^_winios_' "$out/missing" >"$out/weak" || true
+grep -v '^_winios_' "$out/missing" >"$out/stubbed" || true
+weak_flags=$(sed 's/^/-Wl,-U,/' "$out/weak")
 n=$(wc -l <"$out/missing" | tr -d ' ')
 echo "Symbols a Wine host has to provide: $n"
 sed 's/^/  /' "$out/missing"
@@ -70,11 +77,12 @@ sed 's/^/  /' "$out/missing"
         echo "long stub_$i(void) __asm__(\"$sym\");"
         echo "long stub_$i(void) { return winehost_stub(\"$name\", &seen_$i); }"
         i=$((i + 1))
-    done <"$out/missing"
+    done <"$out/stubbed"
 } >"$out/stubs.c"
 # shellcheck disable=SC2086
 $cc -O1 -c "$out/stubs.c" -o "$out/stubs.o"
-if ! link "$out/stubs.o" 2>"$out/link2.log"; then
+# shellcheck disable=SC2086 # one flag per hook
+if ! link "$out/stubs.o" $weak_flags 2>"$out/link2.log"; then
     tail -30 "$out/link2.log" >&2
     exit 1
 fi
