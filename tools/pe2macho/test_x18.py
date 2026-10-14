@@ -82,6 +82,7 @@ class X18Test(unittest.TestCase):
         self.assertEqual(pe.x18_patched, 1)
         self.assertEqual(pe.groups()[-2:], [(0xC000, 0x10000, True), (0x10000, 0x14000, False)])
         self.assertEqual(pe.teb_slot_rva, 0x10000)
+        self.assertEqual(struct.unpack_from("<I", pe.image, pe.opt + 56)[0], 0x14000)  # SizeOfImage
         self.assertEqual(struct.unpack_from("<I", pe.image, 0x4000)[0], x18.branch(0x4000, 0xC000))
         self.assertEqual(struct.unpack_from("<I", pe.image, 0xC000 + 32)[0], x18.branch(0xC020, 0x4004))
 
