@@ -1,0 +1,213 @@
+From: WinPad
+Subject: [PATCH] ntdll: Take over PE images from signed dylibs on iOS.
+
+A module that tools/pe2macho wrapped into a dylib (NAME.dylib next to
+NAME) is loaded with dlopen and its image becomes the module view as it
+is, through virtual_create_builtin_view like a .so builtin: no copy into
+the JIT pool, no address translation, no load-time code patching.
+Protection changes on such an image go straight to mprotect.
+
+Needs tools/pe2macho/pe_adopt.h on the include path.
+Applies to willfaust/Madeira at 48f9764.
+---
+diff --git a/build/ntdll-unix/loader_ios.c b/build/ntdll-unix/loader_ios.c
+index b59b458..5fbe4a7 100644
+--- a/build/ntdll-unix/loader_ios.c
++++ b/build/ntdll-unix/loader_ios.c
+@@ -97,6 +97,7 @@
+ #include <os/log.h>
+ #include <pthread.h>
+ #include <mach-o/dyld.h>
++#include "pe_adopt.h"  /* WinPad tools/pe2macho */
+ #endif
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(module);
+@@ -926,6 +927,9 @@ static void fixup_so_resources( IMAGE_RESOURCE_DIRECTORY *dir, BYTE *root, int d
+     }
+ }
+ 
++#endif /* SO_DLLS_SUPPORTED */
++
++#if defined(SO_DLLS_SUPPORTED) || defined(WINE_IOS)
+ /***********************************************************************
+  *           fill_builtin_image_info
+  */
+@@ -954,6 +958,9 @@ static void fill_builtin_image_info( void *module, struct pe_image_info *info )
+     info->file_size       = nt->OptionalHeader.SizeOfImage;
+     info->checksum        = nt->OptionalHeader.CheckSum;
+ }
++#endif
++
++#ifdef SO_DLLS_SUPPORTED
+ 
+ /*************************************************************************
+  *		map_so_dll
+@@ -1528,6 +1535,73 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
+ }
+ 
+ 
++#ifdef WINE_IOS
++/***********************************************************************
++ *           open_builtin_pe_dylib
++ *
++ * WinPad: take over a PE module that tools/pe2macho wrapped into a signed
++ * dylib, NAME.dylib next to NAME. dyld has mapped the image at its RVAs and
++ * rebased it (ImageBase included), its x18 reads already load the TEB from
++ * the TSD slot; it becomes the module's view as it is, like a .so builtin,
++ * so nothing is copied into the JIT pool and no address needs translating.
++ * Returns STATUS_DLL_NOT_FOUND to fall back to the PE file.
++ */
++static NTSTATUS open_builtin_pe_dylib( const char *name, OBJECT_ATTRIBUTES *attr, void **module,
++                                       SIZE_T *size, SECTION_IMAGE_INFORMATION *image_info,
++                                       WORD machine, BOOL prefer_native )
++{
++    extern int ios_teb_tls_slot_offset;
++    char path[PATH_MAX], prefix[256], err[300];
++    struct pe_image_info info;
++    PeAdopted pe;
++    void *handle;
++
++    if (snprintf( path, sizeof(path), "%s.dylib", name ) >= (int)sizeof(path)) return STATUS_DLL_NOT_FOUND;
++    if (access( path, R_OK )) return STATUS_DLL_NOT_FOUND;
++    if (!(handle = dlopen( path, RTLD_NOW | RTLD_LOCAL )))
++    {
++        ERR( "failed to load %s: %s\n", debugstr_a(path), dlerror() );
++        return STATUS_DLL_NOT_FOUND;
++    }
++    pe_adopt_prefix( name, prefix, sizeof(prefix) );
++    if (pe_adopt( handle, prefix, &pe, err, sizeof(err) ))
++    {
++        ERR( "%s: %s\n", debugstr_a(path), err );
++        dlclose( handle );
++        return STATUS_DLL_NOT_FOUND;
++    }
++    fill_builtin_image_info( pe.base, &info );
++    if (get_builtin_so_handle( pe.base ))  /* already loaded; that took a reference */
++    {
++        dlclose( handle );
++        goto done;
++    }
++    if (machine && machine != info.machine)
++    {
++        dlclose( handle );
++        return STATUS_DLL_NOT_FOUND;
++    }
++    if (prefer_native && (info.dll_charact & IMAGE_DLLCHARACTERISTICS_PREFER_NATIVE))
++    {
++        dlclose( handle );
++        return STATUS_IMAGE_ALREADY_LOADED;
++    }
++    if (pe.teb_slot) *pe.teb_slot = ios_teb_tls_slot_offset;
++    if (virtual_create_builtin_view( pe.base, attr->ObjectName, &info, handle ))
++    {
++        dlclose( handle );
++        return STATUS_NO_MEMORY;
++    }
++    TRACE( "adopted %s at %p-%p\n", debugstr_a(path), pe.base, pe.base + pe.size );
++done:
++    *module = pe.base;
++    if (size) *size = info.map_size;
++    virtual_fill_image_information( &info, image_info );
++    return STATUS_SUCCESS;
++}
++#endif
++
++
+ /***********************************************************************
+  *           open_builtin_pe_file
+  */
+@@ -1540,6 +1614,13 @@ static NTSTATUS open_builtin_pe_file( const char *name, OBJECT_ATTRIBUTES *attr,
+     HANDLE mapping;
+ 
+     *module = NULL;
++#ifdef WINE_IOS
++    if (!offset)
++    {
++        status = open_builtin_pe_dylib( name, attr, module, size, image_info, machine, prefer_native );
++        if (status != STATUS_DLL_NOT_FOUND) return status;
++    }
++#endif
+     status = open_dll_file( name, attr, &mapping );
+     if (!status)
+     {
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index 88eac4d..ee46193 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -8884,6 +8884,46 @@ void ios_wow_window_retire_current(void) { }
+ #endif  /* WINE_IOS */
+ 
+ 
++#ifdef WINE_IOS
++/* WinPad: PE images taken over from signed dylibs (open_builtin_pe_dylib in
++ * loader_ios.c). Their code already runs where it lies, so protection changes
++ * there go straight to mprotect, never into the JIT pool. Changed with
++ * virtual_mutex held. */
++static struct { char *base; size_t size; } ios_adopted[256];
++static unsigned int ios_adopted_count;
++
++static void ios_adopted_add( void *base, size_t size )
++{
++    if (ios_adopted_count == ARRAY_SIZE(ios_adopted))
++    {
++        ERR( "too many adopted images, %p is not recorded\n", base );
++        return;
++    }
++    ios_adopted[ios_adopted_count].base = base;
++    ios_adopted[ios_adopted_count].size = size;
++    ios_adopted_count++;
++}
++
++static void ios_adopted_remove( void *base )
++{
++    unsigned int i;
++
++    for (i = 0; i < ios_adopted_count; i++)
++        if (ios_adopted[i].base == base) ios_adopted[i] = ios_adopted[--ios_adopted_count];
++}
++
++static int ios_adopted_contains( const void *addr, size_t size )
++{
++    const char *p = addr;
++    unsigned int i;
++
++    for (i = 0; i < ios_adopted_count; i++)
++        if (p >= ios_adopted[i].base && p + size <= ios_adopted[i].base + ios_adopted[i].size) return 1;
++    return 0;
++}
++#endif
++
++
+ /***********************************************************************
+  *           add_builtin_module
+  */
+@@ -8925,6 +8965,9 @@ static void release_builtin_module( void *module )
+     if (!builtin) return;
+     if (--builtin->refcount) return;
+     list_remove( &builtin->entry );
++#ifdef WINE_IOS
++    ios_adopted_remove( module );
++#endif
+     if (builtin->handle) dlclose( builtin->handle );
+     if (builtin->unix_handle) dlclose( builtin->unix_handle );
+     free( builtin->unix_path );
+@@ -12095,6 +12138,9 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
+ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+ {
+ #ifdef WINE_IOS
++    /* WinPad: an image adopted from a signed dylib keeps its own pages */
++    if (ios_adopted_contains( base, size )) return mprotect( base, size, unix_prot );
++
+     /* iOS-Madeira ml1030: A 32-BIT IMAGE PAGE IS DATA TO THE HOST — SO STOP
+      * ROUTING ITS WRITE REQUESTS THROUGH THE EXECUTABLE MACHINERY.
+      *
+@@ -18668,6 +18714,9 @@ NTSTATUS virtual_create_builtin_view( void *module, const UNICODE_STRING *nt_nam
+         if (!status)
+         {
+             add_builtin_module( view->base, so_handle );
++#ifdef WINE_IOS
++            ios_adopted_add( view->base, view->size );
++#endif
+             VIRTUAL_DEBUG_DUMP_VIEW( view );
+             if (is_beyond_limit( base, size, working_set_limit )) working_set_limit = address_space_limit;
+         }
