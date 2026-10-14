@@ -1,14 +1,18 @@
 #!/bin/sh
-# Links host/winehost.c with the libntdll_unix.a and libwineserver.a that
-# build-ntdll.sh and build-wineserver.sh built for the simulator, then runs it
+# Links host/winehost.c with the libntdll_unix.a, libwin32u_unix.a and
+# libwineserver.a that build-ntdll.sh, build-win32u.sh and build-wineserver.sh
+# built for the simulator, then runs it
 # on an iPad simulator. What the app around Madeira's Wine would provide
 # (Swift bridges, the gamepad, DXMT, FEX) is not linked: every symbol the
 # linker reports missing gets a stub that logs its first call and returns 0.
 # The stub list says what a Wine host has to bring along.
 #
 # Usage: run-host.sh WORK_DIR [PROGRAM [ARGS...]]
-# WORK_DIR must hold the outputs of build-ntdll.sh, build-wineserver.sh and
-# wrap-modules.sh for iphonesimulator.
+# WORK_DIR must hold the outputs of build-ntdll.sh, build-win32u.sh,
+# build-wineserver.sh and wrap-modules.sh for iphonesimulator.
+# Without PROGRAM it runs cmd.exe /c echo Hello from Wine, which has to print
+# the line and exit with 0; any other program has to show a window. The
+# newest content of each window ends up in WORK_DIR/host-NAME/frames as PNG.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -20,13 +24,16 @@ if [ $# -eq 0 ]; then
     default_program=1
     set -- 'C:\windows\system32\cmd.exe' /c echo Hello from Wine
 fi
-out="$work/host"
+name=${1##*\\}
+name=$(echo "${name%.*}" | tr 'A-Z' 'a-z')
+out="$work/host-$name"
 rm -rf "$out"
 mkdir -p "$out"
 
 sdk=$(xcrun --sdk iphonesimulator --show-sdk-path)
 cc="xcrun -sdk iphonesimulator clang -target arm64-apple-ios17.0-simulator -isysroot $sdk"
-libs="$work/ntdll-iphonesimulator/libntdll_unix.a $work/wineserver-iphonesimulator/libwineserver.a"
+libs="$work/ntdll-iphonesimulator/libntdll_unix.a $work/win32u-iphonesimulator/libwin32u_unix.a
+    $work/wineserver-iphonesimulator/libwineserver.a"
 
 # shellcheck disable=SC2086 # $cc and $libs are lists
 $cc -O1 -g -Wall -c "$here/host/winehost.c" -o "$out/winehost.o"
@@ -87,6 +94,8 @@ xcrun simctl bootstatus "$udid" -b >/dev/null
 seconds=30
 SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
     SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG=+loaddll \
+    SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
+    SIMCTL_CHILD_WINEHOST_FRAMES="$out/frames" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
@@ -116,10 +125,20 @@ if [ -s "$out/oslog.txt" ]; then
     echo "--- os_log of winehost (Wine and errors) ---"
     grep -i 'wine\|error\|fault' "$out/oslog.txt" | tail -80
 fi
+for f in "$out"/frames/*.bmp; do
+    [ -f "$f" ] || continue
+    sips -s format png "$f" --out "${f%.bmp}.png" >/dev/null && rm "$f"
+    echo "window content: ${f%.bmp}.png"
+done
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001).
 grep -q 'load_main_exe = 0x0' "$out/run.log"
-# Every DLL comes from its dylib too (load_builtin), and the program runs to
-# its end: cmd.exe prints the line and exits with 0.
-grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
-[ -z "$default_program" ] || grep -q '^Hello from Wine' "$out/run.log"
+# Every DLL comes from its dylib too (load_builtin). cmd.exe runs to its end:
+# it prints the line and exits with 0. Any other program draws a window
+# through win32u's winios driver.
+if [ -n "$default_program" ]; then
+    grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
+    grep -q '^Hello from Wine' "$out/run.log"
+else
+    grep -q '^winehost: frame of window' "$out/run.log"
+fi
