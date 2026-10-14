@@ -9,7 +9,8 @@
 // WINEHOST_NLS (directory with the .nls files) and WINEHOST_FRAMES (directory
 // that gets the newest content of each window as HWND.bmp). WINEHOST_TYPE
 // types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
-// first window, 2 s after that window first showed (see winios_pProcessEvents).
+// first window, 2 s after that window first showed (see winios_pProcessEvents);
+// WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead.
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
 // came up. Whatever Wine does in the meantime goes to stderr.
 #include <errno.h>
@@ -76,6 +77,9 @@ static int input_state;
 static double state_time;
 static void* first_window;
 static int menu_x, menu_y;  // a point in the first window's menu bar
+static int client_x, client_y, client_w, client_h;  // the first window's client area
+static unsigned char* before_click;  // the first window's last frame before the click
+static int before_w, before_h;
 static void* windows_before_click[64];
 static int windows_before_count;
 static long dark_before_typing;  // most dark pixels a frame had before typing
@@ -113,6 +117,31 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
     __atomic_store_n(&input_state, 1, __ATOMIC_RELEASE);
   }
   static int said_text;
+  if (hwnd == first_window && state < 4) {
+    size_t row = (size_t)surf_w * 4;
+    unsigned char* copy = realloc(before_click, row * surf_h);
+    if (copy) {
+      for (int y = 0; y < surf_h; y++) memcpy(copy + y * row, (const unsigned char*)bits + (size_t)y * stride, row);
+      before_click = copy;
+      before_w = surf_w;
+      before_h = surf_h;
+    }
+  }
+  static int said_changed;
+  if (hwnd == first_window && state == 5 && before_click && surf_w == before_w &&
+      surf_h == before_h && !said_changed) {
+    long changed = 0;
+    for (int y = 0; y < surf_h; y++) {
+      const unsigned char* now_row = (const unsigned char*)bits + (size_t)y * stride;
+      const unsigned char* old_row = before_click + (size_t)y * surf_w * 4;
+      for (int x = 0; x < surf_w; x++)
+        changed += memcmp(now_row + x * 4, old_row + x * 4, 3) != 0;
+    }
+    if (changed > 100) {
+      said_changed = 1;
+      fprintf(stderr, "winehost: window content changed after the click, %ld pixels\n", changed);
+    }
+  }
   if (state == 3 && hwnd == first_window && dark > dark_before_typing + 50 && !said_text++)
     fprintf(stderr, "winehost: typed text shows up, %ld dark pixels, at most %ld before\n", dark,
             dark_before_typing);
@@ -154,6 +183,12 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
   if (visible && !first_window && cy - y > 30 && cw > 0) {
     menu_x = cx + 12;
     menu_y = cy - 9;
+  }
+  if (visible && cw > 0 && (first_window ? hwnd == first_window : cy - y > 30)) {
+    client_x = cx;
+    client_y = cy;
+    client_w = cw;
+    client_h = ch;
   }
   if (!visible || w <= 1 || h <= 1) return;
   int state = __atomic_load_n(&input_state, __ATOMIC_ACQUIRE);
@@ -204,13 +239,22 @@ int winios_pProcessEvents(unsigned int mask) {
     return 1;
   }
   if (state == 3 && advance(3, 4)) {
-    const char* click = getenv("WINEHOST_CLICK_MENU");
-    if (click && *click == '1') {
-      winios_drv_post_mouse(menu_x, menu_y, MOVE | ABSOLUTE, 0, NULL);
-      winios_drv_post_mouse(menu_x, menu_y, MOVE | LEFTDOWN | ABSOLUTE, 0, NULL);
-      winios_drv_post_mouse(menu_x, menu_y, LEFTUP | ABSOLUTE, 0, NULL);
-      fprintf(stderr, "winehost: clicked %d,%d, the menu of window %p\n", menu_x, menu_y,
-              first_window);
+    const char* menu = getenv("WINEHOST_CLICK_MENU");
+    const char* at = getenv("WINEHOST_CLICK");
+    int px, py, x = -1, y = -1;
+    if (menu && *menu == '1') {
+      x = menu_x;
+      y = menu_y;
+    } else if (at && sscanf(at, "%d,%d", &px, &py) == 2) {
+      x = client_x + client_w * px / 100;
+      y = client_y + client_h * py / 100;
+    }
+    if (x >= 0) {
+      winios_drv_post_mouse(x, y, MOVE | ABSOLUTE, 0, NULL);
+      winios_drv_post_mouse(x, y, MOVE | LEFTDOWN | ABSOLUTE, 0, NULL);
+      winios_drv_post_mouse(x, y, LEFTUP | ABSOLUTE, 0, NULL);
+      fprintf(stderr, "winehost: clicked %d,%d in window %p (client %d,%d %dx%d)\n", x, y,
+              first_window, client_x, client_y, client_w, client_h);
     }
     __atomic_store_n(&input_state, 5, __ATOMIC_RELEASE);
     return 1;
