@@ -80,8 +80,33 @@ class Pe2MachoTest(unittest.TestCase):
             with open(os.path.join(tmp, "x.ldflags")) as fh:
                 flags = fh.read().split()
         self.assertIn("\t.quad _pe_x_image + 0x4008\n", asm)
+        self.assertEqual(pe.pointer_target(0x8000), 0x4008)
         self.assertEqual(asm.count(".section"), 3)
         self.assertEqual(flags, ["-Wl,-segprot,__PE0,rw,rw", "-Wl,-segprot,__PE1,rx,rx", "-Wl,-segprot,__PE2,rw,rw"])
+
+    def test_zero_runs_are_compact(self):
+        pe = p2m.PE(build_pe([(".text", 0x4000, b"\xc0\x03\x5f\xd6", TEXT),
+                              (".data", 0x8000, b"\0" * 0x1000 + b"x", DATA)]))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "x.s")
+            p2m.write_asm(pe, "pe_x", out)
+            with open(out) as fh:
+                asm = fh.read()
+        self.assertIn("\t.zero 4096\n\t.byte 120,0,", asm)
+        self.assertLess(len(asm), 4000)
+
+    def test_relocation_list(self):
+        data = struct.pack("<QQ", IMAGE_BASE + 0x4000, IMAGE_BASE + 0x8010)
+        dll = build_pe([(".text", 0x4000, b"\xc0\x03\x5f\xd6", TEXT),
+                        (".data", 0x8000, data, DATA)], relocs=[0x8000, 0x8008])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "x.dll")
+            with open(path, "wb") as fh:
+                fh.write(dll)
+            sys.argv = ["pe2macho.py", "--relocs", path, os.path.join(tmp, "r.txt")]
+            self.assertEqual(p2m.main(), 0)
+            with open(os.path.join(tmp, "r.txt")) as fh:
+                self.assertEqual(fh.read(), "8000 4000\n8008 8010\n")
 
     def test_relocation_in_code_is_an_error(self):
         pe = p2m.PE(build_pe([(".text", 0x4000, struct.pack("<Q", IMAGE_BASE), TEXT)], relocs=[0x4000]))
