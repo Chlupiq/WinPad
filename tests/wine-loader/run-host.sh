@@ -36,6 +36,12 @@ if [ $# -eq 0 ]; then
 fi
 name=${1##*\\}
 name=$(echo "${name%.*}" | tr 'A-Z' 'a-z')
+# With WINEHOST_DESKTOP=1 the program runs inside Wine's desktop, as Madeira
+# starts every program: explorer.exe shows the desktop window, without which
+# a top-level window is not redrawn when it shows.
+if [ "${WINEHOST_DESKTOP:-}" = 1 ]; then
+    set -- 'C:\windows\system32\explorer.exe' /desktop=shell,1024x768 "$@"
+fi
 out="$work/host-$name"
 rm -rf "$out"
 mkdir -p "$out"
