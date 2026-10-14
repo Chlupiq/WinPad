@@ -7,7 +7,8 @@
 # Everything that needs FEX's sources is prebuilt, once for the device
 # (iphoneos) and once for the simulator (iphonesimulator): the probe and
 # FEXCore as static libraries in lib/<platform>/ and the AOT image in
-# Frameworks/<platform>/probe-aot.dylib. Only main.mm is compiled. The device
+# Frameworks/<platform>/probe-aot.dylib, with the test DLL wrapped by
+# tools/pe2macho next to it (pe-testdll.dylib). Only main.mm is compiled. The device
 # parts come from build-app.sh; this script builds the simulator ones.
 # The project is generated with XcodeGen, built for both platforms with
 # xcodebuild, and the simulator build is run on an iPad simulator.
@@ -15,7 +16,7 @@
 # Usage: build-xcode.sh SRC_DIR APP_BUILD_DIR APP_OUT_DIR SIM_BUILD_DIR PROBE_WORK_DIR OUT_DIR
 #   APP_BUILD_DIR, APP_OUT_DIR: build-app.sh's BUILD_DIR and OUT_DIR
 #   PROBE_WORK_DIR: run-macos.sh's work directory (cache file, dispatcher.bin)
-# Needs: Xcode, cmake, ninja, xcodegen, python3. Writes OUT_DIR/WinPadProbe-xcode.
+# Needs: Xcode, cmake, ninja, xcodegen, python3, lld-link. Writes OUT_DIR/WinPadProbe-xcode.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -54,6 +55,9 @@ xcrun --sdk iphonesimulator clang -target arm64-apple-ios$min_ios-simulator -dyn
 python3 -I "$c2m/check_linked.py" "$cache" "$sim/probe-aot.dylib"
 cp "$app_out/probe-aot.dylib" "$proj/Frameworks/iphoneos/"
 cp "$sim/probe-aot.dylib" "$proj/Frameworks/iphonesimulator/"
+cp "$app_out/pe-testdll.dylib" "$proj/Frameworks/iphoneos/"
+sh "$root/tests/pe2macho/build-dylib.sh" "$out/pe" iphonesimulator "arm64-apple-ios$min_ios-simulator" \
+    "$proj/Frameworks/iphonesimulator/pe-testdll.dylib"
 
 # libs BUILD PLATFORM: copies the libraries of CMake's link of the app to
 # lib/PLATFORM and writes the link flags, in link order, to PLATFORM.flags.
@@ -94,8 +98,10 @@ build() {
     xcodebuild -project "$proj/WinPadProbe.xcodeproj" -scheme WinPadProbe -configuration Debug \
         -sdk "$1" -derivedDataPath "$out/xcode-derived" $sign build >&2
     product="$out/xcode-derived/Build/Products/Debug-$1/WinPadProbe.app"
-    test -f "$product/Frameworks/probe-aot.dylib" ||
-        { echo "the $1 build did not embed probe-aot.dylib" >&2; exit 1; }
+    for dylib in probe-aot.dylib pe-testdll.dylib; do
+        test -f "$product/Frameworks/$dylib" ||
+            { echo "the $1 build did not embed $dylib" >&2; exit 1; }
+    done
     # Debug builds keep the app's code in WinPadProbe.debug.dylib (Xcode 16).
     code="$product/WinPadProbe.debug.dylib"
     [ -f "$code" ] || code="$product/WinPadProbe"
@@ -124,3 +130,5 @@ grep -q '== finished, exit 0' "$log" ||
     { echo "the app did not run the guest on the simulator" >&2; exit 1; }
 grep -q 'Dispatcher: static code from AOT image' "$log" ||
     { echo "FEX did not run the dispatcher from the AOT image on the simulator" >&2; exit 1; }
+grep -q 'PE code ran from the dylib' "$log" ||
+    { echo "the Windows DLL did not run from its dylib on the simulator" >&2; exit 1; }

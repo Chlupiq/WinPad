@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds the iPad test app (tests/ios/app) as an unsigned IPA for sideloading
 # (Sideloadly signs it with the user's Apple ID). The app runs the probe's
-# x86-64 guest from an AOT image in Frameworks/probe-aot.dylib with NoJIT.
+# x86-64 guest from an AOT image in Frameworks/probe-aot.dylib with NoJIT,
+# then calls a Windows DLL wrapped by tools/pe2macho (Frameworks/pe-testdll.dylib).
 #
 # The image is made from a cache and dispatcher generated on a Mac by
 # tests/probe/run-macos.sh: macOS and iOS share FEXCore's Darwin code and data
@@ -9,7 +10,7 @@
 #
 # Usage: build-app.sh SRC_DIR BUILD_DIR OUT_DIR PROBE_WORK_DIR
 #   PROBE_WORK_DIR: run-macos.sh's work directory (cache file, dispatcher.bin)
-# Needs: Xcode, cmake, ninja, python3. Writes OUT_DIR/WinPadProbe.ipa.
+# Needs: Xcode, cmake, ninja, python3, lld-link. Writes OUT_DIR/WinPadProbe.ipa.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -41,13 +42,16 @@ xcrun --sdk iphoneos clang -target arm64-apple-ios$min_ios -isysroot "$sdk" -dyn
     -install_name @rpath/probe-aot.dylib -o "$out/probe-aot.dylib" "$out/aot.o" "$out/dispatcher.o"
 python3 -I "$c2m/check_linked.py" "$cache" "$out/probe-aot.dylib"
 
+# The test DLL as an iOS dylib.
+sh "$root/tests/pe2macho/build-dylib.sh" "$out/pe" iphoneos "arm64-apple-ios$min_ios" "$out/pe-testdll.dylib"
+
 # Payload/WinPadProbe.app, zipped: an unsigned IPA.
 app="$out/Payload/WinPadProbe.app"
 rm -rf "${out:?}/Payload"
 mkdir -p "$app/Frameworks"
 # CMake links iOS executables into a bundle of its own; only the binary is used.
 cp "$build/Bin/WinPadProbe.app/WinPadProbe" "$app/WinPadProbe"
-cp "$out/probe-aot.dylib" "$app/Frameworks/"
+cp "$out/probe-aot.dylib" "$out/pe-testdll.dylib" "$app/Frameworks/"
 sed "s/\${WINPAD_IOS_MIN}/$min_ios/" "$here/app/Info.plist.in" >"$app/Info.plist"
 plutil -lint "$app/Info.plist"
 printf 'APPL????' >"$app/PkgInfo"

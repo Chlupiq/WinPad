@@ -3,12 +3,17 @@
 // image in Frameworks/probe-aot.dylib, with NoJIT. No memory is ever made
 // executable, so it needs no debugger and no JIT entitlement.
 //
+// Then it calls a Windows DLL (tests/pe2macho/testdll.c) that tools/pe2macho
+// wrapped into Frameworks/pe-testdll.dylib: PE code running as signed code.
+//
 // Everything FEX and the probe print goes to Documents/probe.log, shown on
 // screen. If FEX stops the process (it aborts on a block missing from the
 // image), the next launch shows the log of the run that did not finish.
 #import <UIKit/UIKit.h>
 
 #include <cstdio>
+#include <cstring>
+#include <dlfcn.h>
 #include <unistd.h>
 
 int WinPadProbeMain(int argc, char** argv);
@@ -23,6 +28,30 @@ NSString* LogPath() {
 
 NSString* ReadLog() {
   return [NSString stringWithContentsOfFile:LogPath() encoding:NSUTF8StringEncoding error:nil] ?: @"";
+}
+
+// Same checks as tests/pe2macho/main.c; 0 when the DLL's code ran.
+int RunPeTest(const char* Path) {
+  void* Lib = dlopen(Path, RTLD_NOW | RTLD_LOCAL);
+  if (!Lib) {
+    printf("PE test: dlopen: %s\n", dlerror());
+    return 1;
+  }
+  auto* Image = static_cast<const char*>(dlsym(Lib, "pe_testdll_image"));
+  auto* AddMul = reinterpret_cast<int (*)(int, int)>(dlsym(Lib, "pe_testdll_export_pe_add_mul"));
+  auto* Greeting = reinterpret_cast<const char* (*)()>(dlsym(Lib, "pe_testdll_export_pe_greeting"));
+  auto* Counter = reinterpret_cast<int (*)()>(dlsym(Lib, "pe_testdll_export_pe_counter"));
+  if (!Image || !AddMul || !Greeting || !Counter || memcmp(Image, "MZ", 2) != 0) {
+    printf("PE test: the dylib lacks the PE image or an export\n");
+    return 1;
+  }
+  const int Product = AddMul(3, 4);
+  const int Count = Counter();
+  const char* Text = Greeting();
+  printf("PE test: add_mul(3, 4) = %d, counter = %d, greeting \"%s\"\n", Product, Count, Text);
+  const bool Ok = Product == 20 && Count == 8 && strcmp(Text, "hello from a PE image") == 0;
+  printf("%s\n", Ok ? "PE code ran from the dylib" : "PE test FAILED");
+  return Ok ? 0 : 1;
 }
 } // namespace
 
@@ -64,10 +93,14 @@ NSString* ReadLog() {
   setvbuf(stderr, nullptr, _IONBF, 0);
 
   char* Args[] = {(char*)"winpad-probe", (char*)"run", (char*)Image.fileSystemRepresentation, nullptr};
-  const int Status = WinPadProbeMain(3, Args);
+  int Status = WinPadProbeMain(3, Args);
+  NSString* PeDylib = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"pe-testdll.dylib"];
+  if (RunPeTest(PeDylib.fileSystemRepresentation) != 0 && Status == 0) {
+    Status = 1;
+  }
   printf("%s, exit %d\n", FinishedMarker, Status);
 
-  NSString* Summary = Status == 0 ? @"OK: the x86 program ran from the AOT image without a JIT.\n\n" :
+  NSString* Summary = Status == 0 ? @"OK: the x86 program ran from the AOT image without a JIT, and the Windows DLL from its dylib.\n\n" :
                                     [NSString stringWithFormat:@"FAILED (exit %d)\n\n", Status];
   NSString* Log = ReadLog();
   NSData* LogData = [[Summary stringByAppendingString:Log] dataUsingEncoding:NSUTF8StringEncoding];
