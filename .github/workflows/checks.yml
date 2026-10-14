@@ -130,6 +130,37 @@ jobs:
       - name: Every Wine module from Madeira wrapped into a dylib and loaded
         run: sh tests/pe2macho/wine-modules.sh "$RUNNER_TEMP/wine-modules"
 
+  wine-i386:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install bison flex llvm lld
+      - name: Newest Xcode
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
+      - name: Restore configured Wine tree
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/madeira/wine
+          key: wine-configured-257f271-${{ hashFiles('tests/wine-loader/build.sh') }}
+      - name: Restore the i386 Wine build tree
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/madeira/wine/build-i386
+          key: wine-i386-257f271-${{ hashFiles('tests/wine-i386/build.sh') }}
+      - name: Madeira and its Wine tree
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
+      - name: Wine's 32-bit x86 ntdll, kernelbase and kernel32, and a 32-bit test program
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          sh tests/wine-i386/build.sh "$RUNNER_TEMP/wine-loader"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wine-i386
+          path: ${{ runner.temp }}/wine-loader/i386-windows
+
   wine-loader:
     runs-on: macos-15
     steps:
