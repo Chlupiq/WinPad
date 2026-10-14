@@ -70,11 +70,10 @@ fi
 echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 
 # ntdll looks for the NLS files next to the executable, and for ntdll.dll
-# itself (load_ntdll: no PE subdirectory on iOS, as in Madeira's app bundle).
+# itself in the PE subdirectory there (load_ntdll: dll_dir + get_pe_dir(),
+# <exe dir>/aarch64-windows/ntdll.dll, as in Madeira's app bundle).
 ln -s "$work/madeira/wine/nls" "$out/nls"
-for f in "$work/modules-iphonesimulator/aarch64-windows"/*; do
-    ln -s "$f" "$out/$(basename "$f")"
-done
+ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
@@ -83,7 +82,7 @@ xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
 seconds=30
 SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
-    SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" \
+    SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG=+loaddll \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
