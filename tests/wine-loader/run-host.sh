@@ -68,6 +68,9 @@ if ! link "$out/stubs.o" 2>"$out/link2.log"; then
 fi
 echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 
+# ntdll looks for the NLS files next to the executable.
+ln -s "$work/madeira/wine/nls" "$out/nls"
+
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
 echo "iPad simulator $udid"
@@ -82,3 +85,6 @@ xcrun simctl shutdown "$udid" || true
 echo "winehost exit status: $status"
 cat "$out/run.log"
 grep -q '^winehost: wineserver ready' "$out/run.log"
+# The Wine process gets through its start-up with the server and ends through
+# exit() (no program to run yet), caught by the host instead of crashing.
+grep -q '^winehost: Wine process exited with code' "$out/run.log"
