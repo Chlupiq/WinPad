@@ -160,6 +160,9 @@ jobs:
           PATH="$(brew --prefix llvm)/bin:$PATH"
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphoneos
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
+      - name: Minimal Wine host linked from both and run on an iPad simulator
+        timeout-minutes: 20
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader"
 
   fexcore-ios:
     runs-on: macos-15
