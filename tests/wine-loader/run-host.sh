@@ -19,7 +19,9 @@
 # newest content of each window ends up in WORK_DIR/host-NAME/frames as PNG.
 # With WINEHOST_TYPE set, the host types that text into the first window and
 # it has to show up there; with WINEHOST_CLICK_MENU=1 it clicks the window's
-# first menu, which has to open (a new window). WINEHOST_WINEDEBUG replaces
+# first menu, which has to open (a new window); with WINEHOST_CLICK=X,Y it
+# taps at X %, Y % of the window's client area, which has to change what the
+# window shows. WINEHOST_WINEDEBUG replaces
 # WINEDEBUG=+loaddll.
 set -eu
 
@@ -117,6 +119,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
     SIMCTL_CHILD_WINEHOST_FRAMES="$out/frames" \
     SIMCTL_CHILD_WINEHOST_TYPE="${WINEHOST_TYPE:-}" SIMCTL_CHILD_WINEHOST_CLICK_MENU="${WINEHOST_CLICK_MENU:-}" \
+    SIMCTL_CHILD_WINEHOST_CLICK="${WINEHOST_CLICK:-}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
@@ -177,4 +180,7 @@ if [ -n "${WINEHOST_TYPE:-}" ]; then
 fi
 if [ "${WINEHOST_CLICK_MENU:-}" = 1 ]; then
     grep -q '^winehost: new window .* after the click$' "$out/run.log"
+fi
+if [ -n "${WINEHOST_CLICK:-}" ]; then
+    grep -q '^winehost: window content changed after the click' "$out/run.log"
 fi
