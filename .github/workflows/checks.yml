@@ -130,37 +130,6 @@ jobs:
       - name: Every Wine module from Madeira wrapped into a dylib and loaded
         run: sh tests/pe2macho/wine-modules.sh "$RUNNER_TEMP/wine-modules"
 
-  wine-i386:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install tools
-        run: brew install bison flex llvm lld
-      - name: Newest Xcode
-        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
-      - name: Restore configured Wine tree
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/wine-loader/madeira/wine
-          key: wine-configured-257f271-${{ hashFiles('tests/wine-loader/build.sh') }}
-      - name: Restore the i386 Wine build tree
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/wine-loader/madeira/wine/build-i386
-          key: wine-i386-257f271-${{ hashFiles('tests/wine-i386/build.sh') }}
-      - name: Madeira and its Wine tree
-        run: |
-          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
-          sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
-      - name: Wine's 32-bit x86 ntdll, kernelbase and kernel32, and a 32-bit test program
-        run: |
-          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
-          sh tests/wine-i386/build.sh "$RUNNER_TEMP/wine-loader"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wine-i386
-          path: ${{ runner.temp }}/wine-loader/i386-windows
-
   wine-loader:
     runs-on: macos-15
     steps:
@@ -188,6 +157,11 @@ jobs:
           sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
       # The Wine libraries only change with their build scripts and patches;
       # a hit skips the builds below.
+      - name: Restore the i386 Wine build tree
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/madeira/wine/build-i386
+          key: wine-i386-257f271-${{ hashFiles('tests/wine-i386/build.sh') }}
       - name: Restore built Wine libraries
         id: wine-built
         uses: actions/cache@v4
@@ -222,6 +196,10 @@ jobs:
       - name: Madeira's Wine modules wrapped into dylibs for the iPad simulator
         if: steps.wine-built.outputs.cache-hit != 'true'
         run: sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
+      - name: Wine's 32-bit x86 ntdll, kernelbase and kernel32, and a 32-bit test program
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          sh tests/wine-i386/build.sh "$RUNNER_TEMP/wine-loader"
       - name: Minimal Wine host linked from both and run on an iPad simulator
         timeout-minutes: 20
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader"
@@ -258,6 +236,10 @@ jobs:
           name: wine-window-winemine
           path: ${{ runner.temp }}/wine-loader/host-winemine/frames
           if-no-files-found: ignore
+      - name: A 32-bit x86 program runs in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          WINEHOST_EXPECT_OUTPUT: Hello from x86
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
 
   fexcore-ios:
     runs-on: macos-15

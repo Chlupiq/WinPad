@@ -31,12 +31,16 @@ work=$1
 shift
 default_program=
 expect_window=1
+# A console program (WINEHOST_EXPECT_OUTPUT set) has to print that line and
+# exit with 0, like the default cmd.exe run; it shows no window.
+[ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] && expect_window=
 if [ $# -eq 0 ]; then
     default_program=1
     expect_window=
     set -- 'C:\windows\system32\cmd.exe' /c echo Hello from Wine
 fi
 name=${1##*\\}
+name=${name##*/}
 name=$(echo "${name%.*}" | tr 'A-Z' 'a-z')
 out="$work/host-$name"
 rm -rf "$out"
@@ -109,6 +113,8 @@ echo "Linked $out/winehost: $(wc -c <"$out/winehost" | tr -d ' ') bytes"
 ln -s "$work/madeira/wine/nls" "$out/nls"
 ln -s "$work/madeira/wine/fonts" "$out/fonts"
 ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
+# 32-bit x86 modules (tests/wine-i386/build.sh), for WoW64 programs.
+[ -d "$work/i386-windows" ] && ln -s "$work/i386-windows" "$out/i386-windows"
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
@@ -170,14 +176,18 @@ for f in "$out"/frames/*.bmp; do
     echo "window content: ${f%.bmp}.png"
 done
 grep -q '^winehost: wineserver ready' "$out/run.log"
-# The Wine process loads the program from its dylib (patches/madeira/0001).
-grep -q 'load_main_exe = 0x0' "$out/run.log"
+# The Wine process loads the program from its dylib (patches/madeira/0001);
+# an x86 program stays a PE file.
+[ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log"
 # Every DLL comes from its dylib too (load_builtin). cmd.exe runs to its end:
 # it prints the line and exits with 0. Any other program draws a window
 # through win32u's winios driver.
 if [ -n "$default_program" ]; then
     grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
     grep -q '^Hello from Wine' "$out/run.log"
+elif [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ]; then
+    grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
+    grep -qF "$WINEHOST_EXPECT_OUTPUT" "$out/run.log"
 else
     grep -q '^winehost: frame of window' "$out/run.log"
 fi
