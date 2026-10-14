@@ -119,7 +119,13 @@ case "$1" in */i386-windows/*)
     # A 32-bit process's system32 is C:\windows\syswow64; Madeira's app links
     # the i386 set there (madeira_link_syswow64 in WineProcessBridge.m).
     mkdir -p "$out/prefix/drive_c/windows/syswow64"
-    for f in "$work/i386-windows"/*.dll; do ln -s "$f" "$out/prefix/drive_c/windows/syswow64/"; done ;;
+    for f in "$work/i386-windows"/*.dll; do ln -s "$f" "$out/prefix/drive_c/windows/syswow64/"; done
+    # The 64-bit half (wow64.dll, xtajit.dll) is loaded by its full
+    # C:\windows\system32 path, so that farm is needed too, as the app makes it.
+    mkdir -p "$out/prefix/drive_c/windows/system32"
+    for f in "$work/modules-iphonesimulator/aarch64-windows"/*; do
+        ln -s "$f" "$out/prefix/drive_c/windows/system32/"
+    done ;;
 esac
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
