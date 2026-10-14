@@ -30,8 +30,10 @@ root=$(cd "$here/../.." && pwd)
 work=$1
 shift
 default_program=
+expect_window=1
 if [ $# -eq 0 ]; then
     default_program=1
+    expect_window=
     set -- 'C:\windows\system32\cmd.exe' /c echo Hello from Wine
 fi
 name=${1##*\\}
@@ -119,13 +121,18 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
     SIMCTL_CHILD_WINEHOST_FRAMES="$out/frames" \
     SIMCTL_CHILD_WINEHOST_TYPE="${WINEHOST_TYPE:-}" SIMCTL_CHILD_WINEHOST_CLICK_MENU="${WINEHOST_CLICK_MENU:-}" \
-    SIMCTL_CHILD_WINEHOST_CLICK="${WINEHOST_CLICK:-}" \
+    SIMCTL_CHILD_WINEHOST_CLICK="${WINEHOST_CLICK:-}" SIMCTL_CHILD_WINEHOST_WINDOW="$expect_window" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
 # A simulator process is a Mac process: shortly before the host gives up,
 # sample its threads, so a Wine process that hangs shows where.
-sleep $((seconds - 5))
+# The host exits early once the run has shown what it checks.
+waited=0
+while [ $waited -lt $((seconds - 5)) ] && kill -0 $spawn 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+done
 pid=$(sed -n 's/^winehost: pid \([0-9]*\)$/\1/p' "$out/run.log")
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     sample "$pid" 2 -file "$out/sample.txt" >/dev/null 2>&1 || true
@@ -138,7 +145,7 @@ if [ -n "$pid" ]; then
     xcrun simctl spawn "$udid" log show --last 5m --style compact \
         --predicate "processID == $pid" >"$out/oslog.txt" 2>&1 || true
 fi
-xcrun simctl shutdown "$udid" || true
+# The simulator stays booted for the next run (booting takes most of a minute).
 echo "winehost exit status: $status"
 # Trace channels (WINEHOST_WINEDEBUG) can print a lot: the first 150 lines of
 # each, then how often each function traced.

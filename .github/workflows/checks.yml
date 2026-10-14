@@ -142,6 +142,10 @@ jobs:
           xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
           sudo xcode-select -s "$xcode"
           xcrun --sdk iphoneos --show-sdk-version
+      - name: Boot an iPad simulator now, while Wine builds
+        run: |
+          udid=$(xcrun simctl list devices available -j | python3 -I tests/ios/xcode/pick-ipad.py 17.0)
+          xcrun simctl boot "$udid" || true
       - name: Restore configured Wine tree
         uses: actions/cache@v4
         with:
@@ -151,21 +155,41 @@ jobs:
         run: |
           PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
           sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
+      # The Wine libraries only change with their build scripts and patches;
+      # a hit skips the builds below.
+      - name: Restore built Wine libraries
+        id: wine-built
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/wine-loader/ntdll-iphoneos
+            ${{ runner.temp }}/wine-loader/ntdll-iphonesimulator
+            ${{ runner.temp }}/wine-loader/wineserver-iphoneos
+            ${{ runner.temp }}/wine-loader/wineserver-iphonesimulator
+            ${{ runner.temp }}/wine-loader/win32u-iphoneos
+            ${{ runner.temp }}/wine-loader/win32u-iphonesimulator
+            ${{ runner.temp }}/wine-loader/modules-iphonesimulator
+          key: wine-built-v1-${{ hashFiles('tests/wine-loader/build*.sh', 'tests/wine-loader/wrap-modules.sh', 'patches/madeira/*', 'patches/wine/*', 'tools/pe2macho/*') }}
       - name: Whole ntdll unix side for iOS, with the adopt patch
+        if: steps.wine-built.outputs.cache-hit != 'true'
         run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphoneos
       - name: The same for the iPad simulator
+        if: steps.wine-built.outputs.cache-hit != 'true'
         run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
       - name: wineserver for iOS and the iPad simulator
+        if: steps.wine-built.outputs.cache-hit != 'true'
         run: |
           PATH="$(brew --prefix llvm)/bin:$PATH"
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphoneos
           sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
       - name: win32u unix side (windows, GDI, fonts, display driver) for iOS and the iPad simulator
+        if: steps.wine-built.outputs.cache-hit != 'true'
         run: |
           PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
           sh tests/wine-loader/build-win32u.sh "$RUNNER_TEMP/wine-loader" iphoneos
           sh tests/wine-loader/build-win32u.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
       - name: Madeira's Wine modules wrapped into dylibs for the iPad simulator
+        if: steps.wine-built.outputs.cache-hit != 'true'
         run: sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
       - name: Minimal Wine host linked from both and run on an iPad simulator
         timeout-minutes: 20
