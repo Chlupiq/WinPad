@@ -1,0 +1,310 @@
+From: WinPad
+Subject: [PATCH] ntdll: Give a pseudo-process child its own copies of adopted dylibs.
+
+A child "process" runs as threads of the same task. Madeira gives it fresh
+JIT-pool copies of its modules (ntdll through ios_jit_copy_module_for_child,
+the rest by mapping them again); a module taken over from a dylib (0001)
+lives outside the pool, so the child got the parent's ntdll ("ntdll copy
+FAILED") and every other DLL shared with it. Now a child loads each dylib
+from its own clone of the file (clonefile, no extra disk space), which dyld
+maps as a separate image, and its ntdll entry points are registered per
+process (ios_set_proc_ntdll), as for Madeira's cross-arch children.
+
+Applies to willfaust/Madeira at 48f9764 after 0001.
+---
+diff --git a/build/ntdll-unix/loader_ios.c b/build/ntdll-unix/loader_ios.c
+index c545ea8..242409b 100644
+--- a/build/ntdll-unix/loader_ios.c
++++ b/build/ntdll-unix/loader_ios.c
+@@ -98,6 +98,7 @@
+ #include <pthread.h>
+ #include <mach-o/dyld.h>
+ #include "pe_adopt.h"  /* WinPad tools/pe2macho */
++#include <sys/clonefile.h>
+ #endif
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(module);
+@@ -1535,6 +1536,119 @@ static NTSTATUS open_dll_file( const char *name, OBJECT_ATTRIBUTES *attr, HANDLE
+ }
+ 
+ 
++#ifdef WINE_IOS
++/***********************************************************************
++ * WinPad: modules of pseudo-process children
++ *
++ * A child "process" is a thread group in the same task, so a module the
++ * parent took over from a dylib is already mapped, and dlopen of the same
++ * file only hands back the parent's image: the child would run on the
++ * parent's .data (module lists, loader lock, heaps, CRT state). Madeira gives
++ * a child fresh JIT-pool copies instead; with signed dylibs there is no pool,
++ * so a child loads every dylib from its own clone of the file (clonefile:
++ * no extra disk space). dyld treats a clone as another image, maps it at a
++ * new address and rebases it, which is all a fresh module needs.
++ */
++extern int winpad_adopted_image( const void *addr );  /* virtual_ios.c */
++
++static struct { void *peb; unsigned int seq; } winpad_children[64];
++static unsigned int winpad_child_count, winpad_child_seq;
++static pthread_mutex_t winpad_child_lock = PTHREAD_MUTEX_INITIALIZER;
++
++/* Called by wine_ios_child_main once the child's PEB is this thread's. */
++static void winpad_child_register( void *child_peb )
++{
++    unsigned int i, slot;
++
++    pthread_mutex_lock( &winpad_child_lock );
++    /* a PEB address can come back for a later child: that one is new */
++    for (slot = 0; slot < winpad_child_count; slot++)
++        if (winpad_children[slot].peb == child_peb) break;
++    if (slot == winpad_child_count)
++    {
++        if (winpad_child_count == ARRAY_SIZE(winpad_children))
++        {
++            for (i = 0; i < winpad_child_count - 1; i++) winpad_children[i] = winpad_children[i + 1];
++            slot = winpad_child_count - 1;
++        }
++        else winpad_child_count++;
++    }
++    winpad_children[slot].peb = child_peb;
++    winpad_children[slot].seq = ++winpad_child_seq;
++    pthread_mutex_unlock( &winpad_child_lock );
++    dprintf( 2, "[winpad-child] peb %p is child %u: it loads its own copies of the dylibs\n",
++             child_peb, winpad_child_seq );
++}
++
++/* The number of the child this thread belongs to, 0 for the first process. */
++static unsigned int winpad_current_child(void)
++{
++    void *cur = ios_jit_current_peb();
++    unsigned int i, seq = 0;
++
++    if (!cur) return 0;
++    pthread_mutex_lock( &winpad_child_lock );
++    for (i = 0; i < winpad_child_count; i++)
++        if (winpad_children[i].peb == cur) seq = winpad_children[i].seq;
++    pthread_mutex_unlock( &winpad_child_lock );
++    return seq;
++}
++
++/* Replaces `path` (a dylib) with the current child's clone of it, made on
++ * first use; leaves it alone in the first process. Returns 0 on success. */
++static int winpad_child_dylib( char *path, size_t size )
++{
++    unsigned int child = winpad_current_child(), hash = 2166136261u;
++    const char *tmp = getenv( "TMPDIR" ), *base = strrchr( path, '/' ), *p;
++    char dir[PATH_MAX], clone[PATH_MAX], part[PATH_MAX + 8];
++
++    if (!child) return 0;
++    if (!tmp || !*tmp) tmp = "/tmp";
++    base = base ? base + 1 : path;
++    for (p = path; *p; p++) hash = (hash ^ (unsigned char)*p) * 16777619u;
++    /* the same file in two directories (aarch64-windows, i386-windows) must
++     * not share a clone: the hash of the whole path keeps them apart */
++    snprintf( dir, sizeof(dir), "%s/winpad-%d-child%u", tmp, (int)getpid(), child );
++    if (snprintf( clone, sizeof(clone), "%s/%08x-%s", dir, hash, base ) >= (int)sizeof(clone) ||
++        strlen( clone ) >= size)
++        return -1;
++    if (access( clone, R_OK ))
++    {
++        mkdir( dir, 0700 );
++        snprintf( part, sizeof(part), "%s.part", clone );
++        unlink( part );
++        if (clonefile( path, part, 0 ))
++        {
++            /* not on APFS: an ordinary copy */
++            char buf[65536];
++            ssize_t n = 0;
++            int in = open( path, O_RDONLY ), out = open( part, O_WRONLY | O_CREAT | O_TRUNC, 0700 );
++
++            while (in != -1 && out != -1 && (n = read( in, buf, sizeof(buf) )) > 0)
++                if (write( out, buf, n ) != n) { n = -1; break; }
++            if (in != -1) close( in );
++            if (out != -1) close( out );
++            if (in == -1 || out == -1 || n < 0)
++            {
++                dprintf( 2, "[winpad-child] cannot copy %s to %s: %s\n", path, part, strerror( errno ));
++                unlink( part );
++                return -1;
++            }
++        }
++        if (rename( part, clone ))
++        {
++            dprintf( 2, "[winpad-child] cannot rename %s: %s\n", part, strerror( errno ));
++            unlink( part );
++            return -1;
++        }
++        dprintf( 2, "[winpad-child] child %u: %s from %s\n", child, clone, path );
++    }
++    strcpy( path, clone );
++    return 0;
++}
++#endif
++
++
+ #ifdef WINE_IOS
+ /***********************************************************************
+  *           open_builtin_pe_dylib
+@@ -1558,6 +1672,7 @@ static NTSTATUS open_builtin_pe_dylib( const char *name, OBJECT_ATTRIBUTES *attr
+ 
+     if (snprintf( path, sizeof(path), "%s.dylib", name ) >= (int)sizeof(path)) return STATUS_DLL_NOT_FOUND;
+     if (access( path, R_OK )) return STATUS_DLL_NOT_FOUND;
++    if (winpad_child_dylib( path, sizeof(path) )) return STATUS_DLL_NOT_FOUND;
+     if (!(handle = dlopen( path, RTLD_NOW | RTLD_LOCAL )))
+     {
+         ERR( "failed to load %s: %s\n", debugstr_a(path), dlerror() );
+@@ -2713,6 +2828,105 @@ static int ios_load_child_ec_ntdll( PEB *child_peb )
+ #endif
+ 
+ 
++#ifdef WINE_IOS
++/***********************************************************************
++ *           winpad_load_child_ntdll
++ *
++ * WinPad: the child's own ntdll when the session's came from a dylib.
++ * ios_jit_copy_module_for_child copies ntdll inside the JIT pool, where an
++ * adopted ntdll never is; instead the child loads ntdll from its own clone of
++ * the dylib (winpad_child_dylib), and its slots get what load_ntdll_functions
++ * writes into the session's. Its entry points are this pseudo-process's
++ * (ios_set_proc_ntdll), as for a cross-arch child's private EC ntdll.
++ */
++static int winpad_load_child_ntdll( PEB *child_peb )
++{
++    static WCHAR path[] = {'\\','?','?','\\','C',':','\\','w','i','n','d','o','w','s','\\',
++                           's','y','s','t','e','m','3','2','\\','n','t','d','l','l','.','d','l','l',0};
++    extern int ios_teb_tls_slot_offset;
++    extern ULONG_PTR ios_fex_arena_base_unix, ios_fex_arena_end_unix;
++    extern void *ios_jit_reverse_translate_addr(const void *addr);
++    extern void *ios_jit_translate_addr(void *addr);
++    const char *pe_dir = get_pe_dir( current_machine );
++    struct ios_ntdll_funcs funcs = { NULL };
++    const IMAGE_EXPORT_DIRECTORY *exports;
++    void **p__wine_syscall_dispatcher, **p__wine_unix_call_dispatcher;
++    unixlib_handle_t *p__wine_unixlib_handle;
++    unsigned int *pios_teb_tsd_offset;
++    ULONG_PTR *parena_base, *parena_end;
++    void **p_xlate, **p_xlate_rev;
++    SECTION_IMAGE_INFORMATION info;
++    OBJECT_ATTRIBUTES attr;
++    UNICODE_STRING str;
++    unsigned int status;
++    SIZE_T size = 0;
++    void *module;
++    char *name = NULL;
++
++    init_unicode_string( &str, path );
++    InitializeObjectAttributes( &attr, &str, 0, 0, NULL );
++    if (build_dir) asprintf( &name, "%s%s/ntdll.dll", ntdll_dir, pe_dir );
++    else asprintf( &name, "%s%s/ntdll.dll", dll_dir, pe_dir );
++    status = open_builtin_pe_file( name, &attr, &module, &size, &info, 0, 0, current_machine, FALSE, 0 );
++    if (status)
++    {
++        dprintf( 2, "[winpad-child] cannot load %s for peb %p: 0x%x\n", name, (void *)child_peb, status );
++        free( name );
++        return -1;
++    }
++    free( name );
++    if ((char *)pLdrInitializeThunk >= (char *)module && (char *)pLdrInitializeThunk < (char *)module + size)
++    {
++        dprintf( 2, "[winpad-child] got the session's ntdll at %p, not a copy\n", module );
++        return -1;
++    }
++    if (!(exports = get_module_data_dir( module, IMAGE_DIRECTORY_ENTRY_EXPORT, NULL ))) return -1;
++
++#define GET(dst, sym) \
++    if (!((dst) = (void *)find_named_export( module, exports, sym ))) \
++        dprintf( 2, "[winpad-child] ntdll export %s not found\n", sym )
++    GET( funcs.LdrInitializeThunk,             "LdrInitializeThunk" );
++    GET( funcs.RtlUserThreadStart,             "RtlUserThreadStart" );
++    GET( funcs.KiUserExceptionDispatcher,      "KiUserExceptionDispatcher" );
++    GET( funcs.KiUserApcDispatcher,            "KiUserApcDispatcher" );
++    GET( funcs.KiUserCallbackDispatcher,       "KiUserCallbackDispatcher" );
++    GET( funcs.KiRaiseUserExceptionDispatcher, "KiRaiseUserExceptionDispatcher" );
++    GET( funcs.DbgUiRemoteBreakin,             "DbgUiRemoteBreakin" );
++    GET( p__wine_syscall_dispatcher,           "__wine_syscall_dispatcher" );
++    GET( p__wine_unix_call_dispatcher,         "__wine_unix_call_dispatcher" );
++    GET( p__wine_unixlib_handle,               "__wine_unixlib_handle" );
++#undef GET
++    if (!funcs.LdrInitializeThunk || !funcs.RtlUserThreadStart || !funcs.KiUserExceptionDispatcher ||
++        !funcs.KiUserApcDispatcher || !funcs.KiUserCallbackDispatcher ||
++        !p__wine_syscall_dispatcher || !p__wine_unix_call_dispatcher || !p__wine_unixlib_handle)
++        return -1;
++
++    /* what load_ntdll_functions writes into the session's ntdll */
++    *p__wine_syscall_dispatcher = __wine_syscall_dispatcher;
++    *p__wine_unix_call_dispatcher = __wine_unix_call_dispatcher;
++    *p__wine_unixlib_handle = (UINT_PTR)unix_call_funcs;
++    if ((pios_teb_tsd_offset = (unsigned int *)find_named_export( module, exports, "ios_teb_tsd_offset" )))
++        *pios_teb_tsd_offset = (unsigned int)ios_teb_tls_slot_offset;
++    parena_base = (ULONG_PTR *)find_named_export( module, exports, "ios_fex_arena_base" );
++    parena_end = (ULONG_PTR *)find_named_export( module, exports, "ios_fex_arena_end" );
++    if (parena_base && parena_end)
++    {
++        *parena_base = ios_fex_arena_base_unix;
++        *parena_end = ios_fex_arena_end_unix;
++    }
++    if ((p_xlate = (void **)find_named_export( module, exports, "p_ios_jit_translate_addr" )))
++        *p_xlate = (void *)ios_jit_translate_addr;
++    if ((p_xlate_rev = (void **)find_named_export( module, exports, "p_ios_jit_reverse_translate_addr" )))
++        *p_xlate_rev = (void *)ios_jit_reverse_translate_addr;
++
++    dprintf( 2, "[winpad-child] peb %p runs its own ntdll at %p (session's LdrInitializeThunk %p, "
++             "child's %p)\n", (void *)child_peb, module, pLdrInitializeThunk, funcs.LdrInitializeThunk );
++    ios_set_proc_ntdll( child_peb, module, &funcs );
++    return 0;
++}
++#endif
++
++
+ /***********************************************************************
+  *           load_ntdll
+  */
+@@ -3857,6 +4071,9 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
+                 raw, teb, raw == teb ? "MATCH" : "MISMATCH");
+     }
+ 
++    /* WinPad: from here on, dylibs this thread loads are the child's own */
++    winpad_child_register( child_peb );
++
+     /* Switch global peb to child's PEB for the duration of child init.
+      * The parent thread is blocked in NtWaitForSingleObject at this point. */
+     {
+@@ -3966,6 +4183,13 @@ DECLSPEC_EXPORT void wine_ios_child_main( int argc, char *argv[], int child_fd_s
+             if (ios_load_child_ec_ntdll( child_peb ) != 0)
+                 CHILD_BOOT_FAIL( "EC ntdll load failed — a cross-arch child cannot start\n" );
+         }
++        else if (winpad_adopted_image( pLdrInitializeThunk ))
++        {
++            /* WinPad: the session's ntdll came from a dylib, outside the pool */
++            CHILD_STAGE( "winpad_load_child_ntdll" );
++            if (winpad_load_child_ntdll( child_peb ) != 0)
++                CHILD_BOOT_FAIL( "no ntdll of its own — the child cannot share the session's\n" );
++        }
+         else
+         /* S1: per-child ntdll copy. The child cannot share the parent's
+          * ntdll .data (module list / loader lock / hash table collide), so
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index ee46193..5235d08 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -8889,7 +8889,7 @@ void ios_wow_window_retire_current(void) { }
+  * loader_ios.c). Their code already runs where it lies, so protection changes
+  * there go straight to mprotect, never into the JIT pool. Changed with
+  * virtual_mutex held. */
+-static struct { char *base; size_t size; } ios_adopted[256];
++static struct { char *base; size_t size; } ios_adopted[1024];  /* children have their own copies */
+ static unsigned int ios_adopted_count;
+ 
+ static void ios_adopted_add( void *base, size_t size )
+@@ -8921,6 +8921,12 @@ static int ios_adopted_contains( const void *addr, size_t size )
+         if (p >= ios_adopted[i].base && p + size <= ios_adopted[i].base + ios_adopted[i].size) return 1;
+     return 0;
+ }
++
++/* WinPad: whether addr lies in an image taken over from a dylib */
++int winpad_adopted_image( const void *addr )
++{
++    return ios_adopted_contains( addr, 1 );
++}
+ #endif
+ 
+ 

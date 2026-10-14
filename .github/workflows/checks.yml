@@ -203,6 +203,19 @@ jobs:
           name: wine-window-winemine
           path: ${{ runner.temp }}/wine-loader/host-winemine/frames
           if-no-files-found: ignore
+      - name: Explorer's desktop starts Minesweeper as a child process, which opens a field when tapped
+        timeout-minutes: 20
+        env:
+          WINEHOST_DESKTOP: 1
+          WINEHOST_CLICK: 50,70
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" 'C:\windows\system32\winemine.exe'
+      - name: Window content of the desktop and Minesweeper
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-window-desktop-winemine
+          path: ${{ runner.temp }}/wine-loader/host-desktop-winemine/frames
+          if-no-files-found: ignore
 
   fexcore-ios:
     runs-on: macos-15
