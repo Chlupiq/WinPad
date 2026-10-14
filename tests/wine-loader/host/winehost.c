@@ -11,6 +11,7 @@
 // came up. Whatever Wine does in the meantime goes to stderr.
 #include <errno.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,17 @@ extern void __wine_main(int argc, char* argv[]);
 
 // Checked by the server's main loop (fd_ios.c); the app defines it.
 volatile int g_wineserver_should_stop = 0;
+
+// Madeira's ntdll turns exit() into a longjmp back to the thread that called
+// __wine_main (shims/wine_ios_exit.h); the app defines these thread-locals.
+// They cannot be stubs: a thread-local reference goes through a descriptor.
+_Thread_local jmp_buf wine_ios_exit_jmpbuf;
+_Thread_local volatile int wine_ios_exit_code = 0;
+_Thread_local pthread_t wine_ios_main_thread;
+_Thread_local int wine_ios_exit_initialized = 0;
+
+// Printed by `wine --version`; the app's build defines it.
+const char wine_build[] = "wine-9.x-winpad";
 
 // The server calls this on errors it cannot go on from. The app's version
 // ends only the server thread; so does this one.
@@ -55,8 +67,14 @@ static char** wine_argv;
 
 static void* wine_thread(void* arg) {
   (void)arg;
-  __wine_main(wine_argc, wine_argv);
-  fprintf(stderr, "winehost: __wine_main returned\n");
+  wine_ios_main_thread = pthread_self();
+  wine_ios_exit_initialized = 1;
+  if (setjmp(wine_ios_exit_jmpbuf) == 0) {
+    __wine_main(wine_argc, wine_argv);
+    fprintf(stderr, "winehost: __wine_main returned\n");
+  } else {
+    fprintf(stderr, "winehost: Wine process exited with code %d\n", wine_ios_exit_code);
+  }
   return NULL;
 }
 
