@@ -1,5 +1,5 @@
 diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
-index 9dfee42..2a51115 100644
+index 9dfee42..78dc4e3 100644
 --- a/FEXCore/Source/Interface/Core/CodeCache.cpp
 +++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
 @@ -28,6 +28,7 @@
@@ -25,19 +25,19 @@ index 9dfee42..2a51115 100644
  
    if (ValidationCTX->LatestOffset <= CodeBufferRangeRef.size()) {
      // Reference compilation produced fewer bytes than our cache, so validation is going to fail.
-@@ -496,6 +504,22 @@ void CodeCache::Validate(const ExecutableFileSectionInfo& Section, fextl::set<ui
-     if (GuestBlockAddr != GuestBlockAddrRef) {
-       GuestBlockInfo += " (MISMATCH)";
-     }
+@@ -461,6 +469,22 @@ void CodeCache::Validate(const ExecutableFileSectionInfo& Section, fextl::set<ui
+     auto Idx = AlignDown(std::distance(CodeBufferRangeRef.begin(), Mismatch), 4);
+ 
+     auto BlockIt = std::prev(HostBlocks.lower_bound(*HostBlocks.begin() + Idx + 1));
 +#ifdef FEX_IOS_HOST
-+    // WinPad: the assert-level message below never reaches the log on iOS, so print the mismatch
-+    // and the surrounding words (block start .. mismatch + 64 bytes) at error level first.
++    // WinPad: the assert-level message at the end never reaches the log on iOS, so print the mismatch
++    // and the surrounding words (block start .. mismatch + 64 bytes) at error level before anything else can fail.
 +    {
 +      size_t BlockStart = BlockIt != HostBlocks.end() ? *BlockIt - *HostBlocks.begin() : 0;
 +      size_t From = std::max<size_t>(BlockStart, Idx >= 256 ? Idx - 256 : 0);
 +      size_t To = std::min<size_t>({Idx + 64, CachedCode.size(), CodeBufferRangeRef.size()});
-+      LogMan::Msg::EFmt("[aot-validate] mismatch at offset {:#x} (block at {:#x}), cache size {:#x}, reference size {:#x}, guest block {}",
-+                        Idx, BlockStart, CachedCode.size(), CodeBufferRangeRef.size(), GuestBlockAddr ? *GuestBlockAddr : ~0ULL);
++      LogMan::Msg::EFmt("[aot-validate] mismatch at offset {:#x} (block at {:#x}), cache size {:#x}, reference size {:#x}",
++                        Idx, BlockStart, CachedCode.size(), CodeBufferRangeRef.size());
 +      for (size_t Off = AlignDown(From, 4); Off + 4 <= To; Off += 4) {
 +        uint32_t C = *reinterpret_cast<const uint32_t*>(&CachedCode[Off]);
 +        uint32_t R = *reinterpret_cast<const uint32_t*>(&CodeBufferRangeRef[Off]);
@@ -45,9 +45,9 @@ index 9dfee42..2a51115 100644
 +      }
 +    }
 +#endif
-     ERROR_AND_DIE_FMT("Cache validation failed at offset {:#x}: {:02x} <-> {:02x} (at {} <-> {}, guest block {})", Idx,
-                       fmt::join(CachedCode.subspan(Idx, 4), ""), fmt::join(CodeBufferRangeRef.subspan(Idx, 4), ""),
-                       fmt::ptr(CachedCode.data()), fmt::ptr(CodeBufferRangeRef.data()), GuestBlockInfo);
+     std::optional<uint64_t> GuestBlockAddr;
+     std::optional<uint64_t> GuestBlockAddrRef;
+     if (BlockIt != HostBlocks.end()) {
 @@ -886,9 +910,15 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
    Allocator::VirtualDontNeed(Code.CodeBufferInFile.data() + StartOffset, Size);
  #else
