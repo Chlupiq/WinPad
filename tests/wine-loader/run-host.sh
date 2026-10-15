@@ -227,5 +227,9 @@ if [ -n "$fex_codemap" ]; then
     echo "--- FEX code map ---"
     find "$out/prefix/drive_c/fexcache" -type f | sed 's/^/  /'
     # shellcheck disable=SC2046 # one argument per code map file
+    for f in $(find "$out/prefix/drive_c/fexcache/codemap" -type f -name '*.bin'); do
+        echo "--- ${f##*/} ($(wc -c <"$f" | tr -d ' ') bytes) ---"
+        od -A x -t x1z -v "$f"
+    done
     python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$out/prefix/drive_c/fexcache/codemap" -type f -name '*.bin')
 fi
