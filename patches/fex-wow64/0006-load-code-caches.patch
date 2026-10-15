@@ -66,7 +66,7 @@ index 9dfee42..78dc4e3 100644
    }
  #endif
 diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
-index b4bf3cb..4f0d75c 100644
+index b4bf3cb..dacbbb3 100644
 --- a/Source/Windows/Common/ImageTracker.cpp
 +++ b/Source/Windows/Common/ImageTracker.cpp
 @@ -16,6 +16,11 @@
@@ -81,7 +81,21 @@ index b4bf3cb..4f0d75c 100644
  
  #include <fcntl.h>
  #include <io.h>
-@@ -180,6 +185,9 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
+@@ -138,7 +143,13 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
+   MappedImageInfo* ImageInfo = nullptr;
+   {
+     auto Relocations = [&]() {
++#ifdef FEX_IOS_HOST
++      // WinPad: cache validation recompiles cached blocks, and the offline compiler turned guest addresses
++      // that the image relocates into relocatable moves; the reference compile needs the same table.
++      if (IsGeneratingCache || FEXCore::Config::Get_ENABLECODECACHEVALIDATION()) {
++#else
+       if (IsGeneratingCache) {
++#endif
+         return LoadImageRelocations(Nt, Address);
+       }
+       return fextl::robin_map<uint32_t, FEXCore::GuestRelocationType> {};
+@@ -180,6 +191,9 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
      if (AOTImage != AOTImages.end()) {
        // TODO: CodeCache::EnableLoadedSection
      }
@@ -91,7 +105,7 @@ index b4bf3cb..4f0d75c 100644
    }
  
    uint64_t EndAddress = Address + Nt->OptionalHeader.SizeOfImage;
-@@ -227,6 +235,74 @@ int ImageTracker::OpenCodeMapFile() {
+@@ -227,6 +241,74 @@ int ImageTracker::OpenCodeMapFile() {
    return _sopen(ActiveCodeMapPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_APPEND | O_BINARY, _SH_DENYRW, 0644);
  }
  
