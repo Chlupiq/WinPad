@@ -1,0 +1,206 @@
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 3e188b9..08b87ee 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -38,6 +38,9 @@
+ #include <sys/mman.h>
+ #else
+ #include <Common/CPUFeatures.h>
++#include <FEXCore/fextl/fmt.h>
++#include <FEXCore/fextl/vector.h>
++#include <algorithm>
+ #include <Common/Handle.h>
+ #include <Common/ImageTracker.h>
+ #include <Common/InvalidationTracker.h>
+@@ -51,6 +54,21 @@ static std::unique_ptr<FEX::Windows::OvercommitTracker> OvercommitTracker;
+ #endif
+ static FEXCore::Core::InternalThreadState* Thread = nullptr;
+ 
++#if defined(_WIN32) && defined(FEX_IOS_HOST)
++// WinPad: on iOS nothing can be mapped below 4 GiB, so a 32-bit guest lives in a 4 GiB window of host
++// memory and guest address G is host address Base + G (GuestWindow in the WoW64 module). The compiler
++// keeps one such window for the images it compiles: FEXCore reads guest code at GUEST32BASE + RIP, and
++// the trackers below speak host addresses, as in the WoW64 module. 0 when there is no window.
++namespace IosGuestWindow {
++uint64_t Base {};
++constexpr uint64_t Size {1ULL << 32};
++
++static bool Contains(uint64_t Host) {
++  return Host >= Base && Host - Base < Size;
++}
++} // namespace IosGuestWindow
++#endif
++
+ #ifdef _WIN32
+ class AOTSyscallHandler : public FEXCore::HLE::SyscallHandler {
+ #else
+@@ -86,6 +104,22 @@ public:
+     --It;
+     LOGMAN_THROW_A_FMT(VAFileStart + It->first + It->second > Address, "Could not find associated file mapping for {:#x}", Address);
+     return FEXCore::ExecutableFileSectionInfo {FileInfo, VAFileStart, VAFileStart + It->first, VAFileStart + It->first + It->second};
++#elif defined(FEX_IOS_HOST)
++    if (!IosGuestWindow::Base) {
++      return ImageTracker.LookupExecutableFileSection(Address);
++    }
++    // Guest in, guest out, as in the WoW64 module's handler.
++    auto Info = ImageTracker.LookupExecutableFileSection(IosGuestWindow::Base + Address);
++    if (Info) {
++      if (!IosGuestWindow::Contains(Info->BeginVA) || !IosGuestWindow::Contains(Info->EndVA - 1) ||
++          !IosGuestWindow::Contains(Info->FileStartVA)) {
++        return std::nullopt;
++      }
++      Info->FileStartVA -= IosGuestWindow::Base;
++      Info->BeginVA -= IosGuestWindow::Base;
++      Info->EndVA -= IosGuestWindow::Base;
++    }
++    return Info;
+ #else
+     return ImageTracker.LookupExecutableFileSection(Address);
+ #endif
+@@ -94,6 +128,18 @@ public:
+   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) override {
+ #ifndef _WIN32
+     return {0, UINT64_MAX, true};
++#elif defined(FEX_IOS_HOST)
++    if (!IosGuestWindow::Base) {
++      return InvalidationTracker.QueryExecutableRange(Address);
++    }
++    auto Info = InvalidationTracker.QueryExecutableRange(IosGuestWindow::Base + Address);
++    if (Info.Size) {
++      if (!IosGuestWindow::Contains(Info.Base)) {
++        return {};
++      }
++      Info.Base -= IosGuestWindow::Base;
++    }
++    return Info;
+ #else
+     return InvalidationTracker.QueryExecutableRange(Address);
+ #endif
+@@ -301,6 +347,62 @@ static void* MapView(HANDLE SectionHandle) {
+ }
+ #endif
+ 
++#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++// WinPad: lays the image out by hand at its preferred base inside the guest window (host Base +
++// ImageBase). A SEC_IMAGE view cannot be used: Madeira's ntdll would place it outside the window and
++// relocate it to that 64-bit host address, which a 32-bit image cannot hold. At its preferred base the
++// image needs no relocation, and ImageTracker still records its relocation table for the cache.
++// Returns the host address of the image.
++static void* LoadImageIntoGuestWindow(HANDLE File, std::string_view Filename) {
++  LARGE_INTEGER FileSize {};
++  if (!GetFileSizeEx(File, &FileSize) || FileSize.QuadPart < static_cast<LONGLONG>(sizeof(IMAGE_DOS_HEADER))) {
++    return nullptr;
++  }
++  fextl::vector<uint8_t> Data(static_cast<size_t>(FileSize.QuadPart));
++  DWORD Read = 0;
++  if (!ReadFile(File, Data.data(), static_cast<DWORD>(Data.size()), &Read, nullptr) || Read != Data.size()) {
++    return nullptr;
++  }
++
++  const auto* Dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(Data.data());
++  if (Dos->e_magic != IMAGE_DOS_SIGNATURE || Dos->e_lfanew < 0 ||
++      static_cast<size_t>(Dos->e_lfanew) + sizeof(FEX::Windows::ArchImageNtHeaders) > Data.size()) {
++    return nullptr;
++  }
++  const auto* Nt = reinterpret_cast<const FEX::Windows::ArchImageNtHeaders*>(Data.data() + Dos->e_lfanew);
++  if (Nt->Signature != IMAGE_NT_SIGNATURE || Nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
++    return nullptr;
++  }
++  const uint64_t ImageBase = Nt->OptionalHeader.ImageBase;
++  const uint64_t SizeOfImage = Nt->OptionalHeader.SizeOfImage;
++  if (!ImageBase || ImageBase + SizeOfImage > IosGuestWindow::Size || Nt->OptionalHeader.SizeOfHeaders > Data.size()) {
++    return nullptr;
++  }
++
++  auto* Image = static_cast<uint8_t*>(
++    VirtualAlloc(reinterpret_cast<void*>(IosGuestWindow::Base + ImageBase), SizeOfImage, MEM_COMMIT, PAGE_READWRITE));
++  if (!Image) {
++    LogMan::Msg::EFmt("Guest range {:#x}+{:#x} for {} is taken", ImageBase, SizeOfImage, Filename);
++    return nullptr;
++  }
++  memcpy(Image, Data.data(), Nt->OptionalHeader.SizeOfHeaders);
++
++  const auto* Section = IMAGE_FIRST_SECTION(Nt);
++  for (WORD i = 0; i < Nt->FileHeader.NumberOfSections; ++i, ++Section) {
++    const uint64_t Raw = Section->SizeOfRawData;
++    const uint64_t Virtual = Section->Misc.VirtualSize ? Section->Misc.VirtualSize : Raw;
++    const uint64_t Copy = std::min(Raw, Virtual);
++    if (Section->VirtualAddress + Virtual > SizeOfImage || Section->PointerToRawData + Copy > Data.size()) {
++      VirtualFree(Image, 0, MEM_DECOMMIT);
++      return nullptr;
++    }
++    memcpy(Image + Section->VirtualAddress, Data.data() + Section->PointerToRawData, Copy);
++  }
++
++  return Image;
++}
++#endif
++
+ // Returns the base address of the mapped image
+ static std::optional<uint64_t> TryMapImage(FEX::Windows::InvalidationTracker& InvalidationTracker, FEX::Windows::ImageTracker& ImageTracker,
+                                            const FEXCore::CodeMapFileId& ID, FEXCore::ExecutableFileInfo& Info) {
+@@ -312,6 +414,24 @@ static std::optional<uint64_t> TryMapImage(FEX::Windows::InvalidationTracker& In
+       return std::nullopt;
+     }
+ 
++#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++    if (IosGuestWindow::Base) {
++      void* Image = LoadImageIntoGuestWindow(*File, Info.Filename);
++      if (!Image) {
++        LogMan::Msg::EFmt("Couldn't load image into the guest window: {}", Info.Filename);
++        return std::nullopt;
++      }
++      const uint64_t HostAddress = reinterpret_cast<uint64_t>(Image);
++      LogMan::Msg::IFmt("Loaded image: {} @ guest {:X} (host {:X})", Info.Filename, HostAddress - IosGuestWindow::Base, HostAddress);
++
++      InvalidationTracker.HandleImageMap(FEX::Windows::BaseName(Info.Filename), HostAddress);
++      ImageTracker.HandleImageMap(Info.Filename, HostAddress, false /* unused during cache generation */);
++
++      // FEXCore's side of the compiler speaks guest addresses.
++      return HostAddress - IosGuestWindow::Base;
++    }
++#endif
++
+     FEX::Windows::ScopedHandle Section {CreateFileMappingA(*File, nullptr, SEC_IMAGE | PAGE_EXECUTE_READ, 0, 0, nullptr)};
+     if (!Section) {
+       LogMan::Msg::EFmt("Couldn't create section for image: {}", Info.Filename);
+@@ -403,6 +523,21 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+ #endif
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, Is64Bit ? "1" : "0");
+ 
++#if defined(_WIN32) && defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++  // WinPad: one guest window for the whole run, set before the context is made: FEXCore reads
++  // GUEST32BASE in its constructor and the JIT allocates registers differently with a window.
++  if (!IosGuestWindow::Base) {
++    void* Window = VirtualAlloc(nullptr, IosGuestWindow::Size, MEM_RESERVE, PAGE_NOACCESS);
++    if (!Window) {
++      LogMan::Msg::EFmt("Couldn't reserve a 4 GiB guest window");
++      return std::nullopt;
++    }
++    IosGuestWindow::Base = reinterpret_cast<uint64_t>(Window);
++    LogMan::Msg::IFmt("Guest window at {:#x}", IosGuestWindow::Base);
++  }
++  FEXCore::Config::Set(FEXCore::Config::CONFIG_GUEST32BASE, fextl::fmt::format("{}", IosGuestWindow::Base));
++#endif
++
+   // Load HostFeatures
+ #ifndef _WIN32
+   auto HostFeatures = FEX::FetchHostFeatures();
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index 8a9325e..b4bf3cb 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -120,7 +120,13 @@ ImageTracker::ImageTracker(FEXCore::Context::Context& CTX, bool IsGeneratingCach
+ ImageTracker::MappedImageInfo::MappedImageInfo(std::string_view Path, uint64_t Address, ArchImageNtHeaders* Nt,
+                                                fextl::robin_map<uint32_t, FEXCore::GuestRelocationType> Relocations)
+   : Info {.FileId = ComputeCodeMapId(BaseName(Path), Nt->FileHeader.TimeDateStamp, Nt->OptionalHeader.SizeOfImage),
++#ifdef FEX_IOS_HOST
++          // WinPad: the offline compiler opens images by this name, and below Wine's Z: drive the
++          // path is a Unix path on a case-sensitive iOS volume. The FileId above stays case-folded.
++          .Filename = fextl::string {Path},
++#else
+           .Filename = ToLower(Path), // Normalize path case as Windows paths are case-insensitive
++#endif
+           .Relocations = std::move(Relocations)}
+   , SectionInfo {.FileInfo = Info, .FileStartVA = Address, .BeginVA = Address, .EndVA = Address + Nt->OptionalHeader.SizeOfImage} {}
+ 
