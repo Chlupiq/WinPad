@@ -269,8 +269,16 @@ jobs:
       - name: A 32-bit x86 program runs in Wine through WoW64 and FEX on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
-          WINEHOST_WINEDEBUG: +loaddll,+debugstr,+seh
+          WINEHOST_WINEDEBUG: +loaddll
+          WINEHOST_FEX_CODEMAP: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+      - name: FEX code map of the x86 run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex-codemap-hello
+          path: ${{ runner.temp }}/wine-loader/host-hello/prefix/drive_c/fexcache
+          if-no-files-found: ignore
 
   fexcore-ios:
     runs-on: macos-15

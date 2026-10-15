@@ -1,0 +1,17 @@
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -1434,7 +1434,13 @@
+   }
+ }
+ 
+-void BTCpuProcessTerm(HANDLE Handle, BOOL After, ULONG Status) {}
++void BTCpuProcessTerm(HANDLE Handle, BOOL After, ULONG Status) {
++  // WinPad: the code map is buffered and only written out when its writer is destroyed, which a
++  // terminating process never does. Write it before Wine terminates the process.
++  if (!After && CTX) {
++    CTX->FlushAndCloseCodeMap();
++  }
++}
+ 
+ void BTCpuThreadInit() {
+   static constexpr size_t DefaultWow64CS {4};
