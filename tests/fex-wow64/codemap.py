@@ -50,6 +50,8 @@ def main():
         for file_id, offsets in sorted(blocks.items(), key=lambda kv: -len(kv[1])):
             tag = " (main executable)" if file_id == main_id else ""
             print(f"  {len(offsets):5} blocks  {names.get(file_id, '?')} [{file_id:016x}]{tag}")
+            if len(offsets) <= 40:
+                print("         at " + " ".join(f"{o:#x}" for o in sorted(offsets)))
             total += len(offsets)
         if unknown:
             print(f"  error: blocks of {len(unknown)} file id(s) the map never named")
