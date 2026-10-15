@@ -286,7 +286,10 @@ jobs:
       - name: The x86 program runs again with the code caches loaded, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
-          WINEHOST_EXPECT_LOG: "[aot-cache] enabled"
+          # The caches are AOT caches: guest addresses come from a data area, not from the code.
+          WINEHOST_EXPECT_LOG: |
+            [aot-cache] enabled
+            AOT data area:
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
           # No x86 block of the program or its DLLs is compiled at run time.

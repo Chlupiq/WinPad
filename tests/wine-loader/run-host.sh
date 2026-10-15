@@ -224,10 +224,14 @@ elif [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ]; then
 else
     grep -q '^winehost: frame of window' "$out/run.log"
 fi
-# WINEHOST_EXPECT_LOG: a line the run has to log (FEX's own messages, say).
+# WINEHOST_EXPECT_LOG: text the run has to log (FEX's own messages, say),
+# one string per line; every one of them has to show up.
 if [ -n "${WINEHOST_EXPECT_LOG:-}" ]; then
-    grep -F "$WINEHOST_EXPECT_LOG" "$out/run.log" | head -20
-    grep -qF "$WINEHOST_EXPECT_LOG" "$out/run.log"
+    printf '%s\n' "$WINEHOST_EXPECT_LOG" | while IFS= read -r expect; do
+        [ -n "$expect" ] || continue
+        grep -F "$expect" "$out/run.log" | head -20
+        grep -qF "$expect" "$out/run.log" || { echo "missing in the log: $expect"; exit 1; }
+    done || exit 1
 fi
 # Keys and taps reach the program through the winios driver.
 if [ -n "${WINEHOST_TYPE:-}" ]; then
