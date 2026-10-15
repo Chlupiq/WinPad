@@ -5,7 +5,9 @@ entry per compiled block, as file id + offset into that image. FEX's offline
 compiler turns it into a code cache. Format: FEXCore/include/FEXCore/Core/CodeCache.h
 (CodeMap::Entry, ExternalLibraryInfo, SetExecutableFileId).
 
-Usage: codemap.py FILE...   Exits with 1 if no file holds a block.
+Usage: codemap.py FILE...   Exits with 1 if no file holds a block, or if a
+file does not parse cleanly (a block of an image the map never named, or
+bytes left over at the end).
 """
 import struct
 import sys
@@ -32,21 +34,29 @@ def parse(data):
         else:
             blocks.setdefault(entry[0], set()).add(entry[1])
             pos += ENTRY.size
-    return names, blocks, main
+    return names, blocks, main, len(data) - pos
 
 
 def main():
     total = 0
+    clean = True
     for path in sys.argv[1:]:
         with open(path, "rb") as f:
-            names, blocks, main_id = parse(f.read())
+            names, blocks, main_id, left = parse(f.read())
+        unknown = [i for i in blocks if i not in names]
+        if unknown or left:
+            clean = False
         print(f"{path}:")
         for file_id, offsets in sorted(blocks.items(), key=lambda kv: -len(kv[1])):
             tag = " (main executable)" if file_id == main_id else ""
             print(f"  {len(offsets):5} blocks  {names.get(file_id, '?')} [{file_id:016x}]{tag}")
             total += len(offsets)
+        if unknown:
+            print(f"  error: blocks of {len(unknown)} file id(s) the map never named")
+        if left:
+            print(f"  error: {left} bytes left over at the end")
     print(f"code map blocks in all: {total}")
-    return 0 if total else 1
+    return 0 if total and clean else 1
 
 
 if __name__ == "__main__":
