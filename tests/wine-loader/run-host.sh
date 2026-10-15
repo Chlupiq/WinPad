@@ -141,6 +141,13 @@ if [ -n "${WINEHOST_FEX_CACHE:-}" ]; then
     fex_cache="Z:$(printf '%s' "$WINEHOST_FEX_CACHE" | tr / '\\')\\"
     [ "${WINEHOST_FEX_CODEMAP:-}" = 1 ] && fex_codemap=1
 fi
+# WINEHOST_FEX_DUMPIR=DIR has FEX write the IR of each block it compiles
+# there; the files named by WINEHOST_FEX_DUMPIR_SHOW (a glob) are printed.
+fex_dumpir=
+if [ -n "${WINEHOST_FEX_DUMPIR:-}" ]; then
+    mkdir -p "$WINEHOST_FEX_DUMPIR"
+    fex_dumpir="Z:$(printf '%s' "$WINEHOST_FEX_DUMPIR" | tr / '\\')"
+fi
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
@@ -157,6 +164,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_FEX_ENABLECODECACHINGWIP="${fex_codemap:-0}" SIMCTL_CHILD_FEX_APP_CACHE_LOCATION="$fex_cache" \
     SIMCTL_CHILD_WINEHOST_JIT="${WINEHOST_JIT:-}" \
     SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
+    SIMCTL_CHILD_FEX_DUMPIR="${fex_dumpir:-no}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
@@ -246,6 +254,12 @@ fi
 if [ -n "$fex_codemap" ]; then
     # shellcheck disable=SC2046 # one argument per code map file
     python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin')
+fi
+if [ -n "$fex_dumpir" ]; then
+    echo "--- FEX IR dumps: $(find "$WINEHOST_FEX_DUMPIR" -type f | wc -l) blocks ---"
+    for f in "$WINEHOST_FEX_DUMPIR"/${WINEHOST_FEX_DUMPIR_SHOW:-none}; do
+        if [ -f "$f" ]; then echo "--- $f ---"; cat "$f"; fi
+    done
 fi
 # With WINEHOST_EXPECT_FEX_CACHE=1 the run has to leave code caches.
 if [ "${WINEHOST_EXPECT_FEX_CACHE:-}" = 1 ]; then

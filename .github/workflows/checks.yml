@@ -282,6 +282,9 @@ jobs:
           WINEHOST_EXPECT_FEX_CACHE: 1
           WINEHOST_SYSWOW64: 1
           WINEHOST_JIT: 1
+          # The IR the compiler makes for the first block of hello.exe, to compare with the runtime IR.
+          WINEHOST_FEX_DUMPIR: ${{ runner.temp }}/fex-ir
+          WINEHOST_FEX_DUMPIR_SHOW: "401000*"
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
       - name: The x86 program runs again with the code caches loaded, in Wine on an iPad simulator
         env:
