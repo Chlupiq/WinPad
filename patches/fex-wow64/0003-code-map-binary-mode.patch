@@ -1,0 +1,13 @@
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -216,7 +216,9 @@
+   if (ActiveCodeMapPath.empty()) {
+     return -1;
+   }
+-  return _sopen(ActiveCodeMapPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_APPEND, _SH_DENYRW, 0644);
++  // WinPad: binary mode. In the CRT's default text mode every 0x0a byte of the map (block offsets,
++  // file ids) gets a 0x0d written before it, and the map can no longer be parsed.
++  return _sopen(ActiveCodeMapPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_APPEND | O_BINARY, _SH_DENYRW, 0644);
+ }
+ 
+ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {

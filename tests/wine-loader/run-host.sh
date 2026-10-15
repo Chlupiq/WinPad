@@ -127,6 +127,15 @@ case "$1" in */i386-windows/*)
         ln -s "$f" "$out/prefix/drive_c/windows/system32/"
     done ;;
 esac
+# With WINEHOST_FEX_CODEMAP=1, FEX records which blocks of the x86 code it
+# compiled (a code map, the input of its offline compiler) under C:\fexcache.
+fex_codemap=
+fex_cache=
+if [ "${WINEHOST_FEX_CODEMAP:-}" = 1 ]; then
+    fex_codemap=1
+    fex_cache='C:\fexcache\'
+    mkdir -p "$out/prefix/drive_c/fexcache/codemap/new"
+fi
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
 [ -n "$udid" ] || { echo "no iPad simulator with iOS 17 or newer" >&2; exit 1; }
@@ -140,6 +149,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_FRAMES="$out/frames" \
     SIMCTL_CHILD_WINEHOST_TYPE="${WINEHOST_TYPE:-}" SIMCTL_CHILD_WINEHOST_CLICK_MENU="${WINEHOST_CLICK_MENU:-}" \
     SIMCTL_CHILD_WINEHOST_CLICK="${WINEHOST_CLICK:-}" SIMCTL_CHILD_WINEHOST_WINDOW="$expect_window" \
+    SIMCTL_CHILD_FEX_ENABLECODECACHINGWIP="${fex_codemap:-0}" SIMCTL_CHILD_FEX_APP_CACHE_LOCATION="$fex_cache" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
@@ -212,4 +222,10 @@ if [ "${WINEHOST_CLICK_MENU:-}" = 1 ]; then
 fi
 if [ -n "${WINEHOST_CLICK:-}" ]; then
     grep -q '^winehost: window content changed after the click, [0-9]* pixels$' "$out/run.log"
+fi
+if [ -n "$fex_codemap" ]; then
+    echo "--- FEX code map ---"
+    find "$out/prefix/drive_c/fexcache" -type f | sed 's/^/  /'
+    # shellcheck disable=SC2046 # one argument per code map file
+    python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$out/prefix/drive_c/fexcache/codemap" -type f -name '*.bin')
 fi
