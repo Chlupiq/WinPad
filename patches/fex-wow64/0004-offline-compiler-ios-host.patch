@@ -1,0 +1,86 @@
+diff --git a/Source/Tools/FEXOfflineCompiler/CMakeLists.txt b/Source/Tools/FEXOfflineCompiler/CMakeLists.txt
+index 33f3370..4b20aa8 100644
+--- a/Source/Tools/FEXOfflineCompiler/CMakeLists.txt
++++ b/Source/Tools/FEXOfflineCompiler/CMakeLists.txt
+@@ -16,6 +16,12 @@ if (MINGW)
+     "${CMAKE_SOURCE_DIR}/Source/Windows/"
+   )
+   target_link_libraries(FEXOfflineCompiler PRIVATE CommonWindows ntdll_ex)
++  # WinPad: the iOS-host FEXCore calls into pieces that only the WoW64 module defines (JIT pool
++  # write offset, Mono bridge, sub-floor windows). IosOfflineStubs.cpp gives the compiler its own.
++  if (FEX_IOS_HOST_BUILD)
++    target_sources(FEXOfflineCompiler PRIVATE IosOfflineStubs.cpp)
++    target_link_libraries(FEXOfflineCompiler PRIVATE mincore)
++  endif()
+ else()
+   target_link_libraries(FEXOfflineCompiler PRIVATE ${PTHREAD_LIB} LinuxEmulation)
+ endif()
+diff --git a/Source/Tools/FEXOfflineCompiler/IosOfflineStubs.cpp b/Source/Tools/FEXOfflineCompiler/IosOfflineStubs.cpp
+new file mode 100644
+index 0000000..a23de35
+--- /dev/null
++++ b/Source/Tools/FEXOfflineCompiler/IosOfflineStubs.cpp
+@@ -0,0 +1,63 @@
++// SPDX-License-Identifier: MIT
++// WinPad: what the iOS-host FEXCore expects from the module it is linked into, for the offline
++// compiler. The WoW64 module (Source/Windows/WOW64) defines the same symbols for the runtime.
++//
++// The compiler only generates code, it never runs it, so the Mono backpatch bridge stays disarmed
++// and there are no sub-floor windows (as in the WoW64 module, where a 32-bit guest has none).
++// Code buffers are executable allocations, which Madeira's ntdll places in the dual-mapped JIT
++// pool, so the RX->RW write offset is taken from the same environment as in BTCpuProcessInit.
++#ifdef FEX_IOS_HOST
++#include <cstdint>
++#include <cstdlib>
++
++namespace FEXCore::DualMap {
++int64_t WriteOffset = 0;
++} // namespace FEXCore::DualMap
++
++extern "C" {
++extern uintptr_t ios_fex_jit_pool_rx;
++extern uintptr_t ios_fex_jit_pool_end;
++
++void ios_fex_mono_arm(uint64_t, uint64_t) {}
++int ios_fex_mono_bridge_armed() {
++  return 0;
++}
++int ios_fex_mono_take_pending(uint64_t*, uint64_t*, uint64_t*) {
++  return 0;
++}
++uint64_t ios_fex_mono_captured_count() {
++  return 0;
++}
++void ios_fex_mono_count_activated() {}
++uint64_t IosMonoResolveRW(uint64_t, uint64_t) {
++  return 0;
++}
++void ios_fex_mono_count_helper(int) {}
++uint64_t IosSubfloorToReal(uint64_t Addr) {
++  return Addr;
++}
++int IosSubfloorWindowForCode(uint64_t, uint64_t*, uint64_t*, uint64_t*) {
++  return 0;
++}
++}
++
++namespace {
++struct JitPoolFromEnvironment {
++  JitPoolFromEnvironment() {
++    const char* RW = getenv("WINE_IOS_JIT_RW");
++    const char* RX = getenv("WINE_IOS_JIT_RX");
++    const char* Size = getenv("WINE_IOS_JIT_SIZE");
++    if (!RW || !RX) {
++      return;
++    }
++    const uint64_t RWBase = strtoull(RW, nullptr, 16);
++    const uint64_t RXBase = strtoull(RX, nullptr, 16);
++    FEXCore::DualMap::WriteOffset = static_cast<int64_t>(RWBase - RXBase);
++    if (Size) {
++      ios_fex_jit_pool_rx = static_cast<uintptr_t>(RXBase);
++      ios_fex_jit_pool_end = static_cast<uintptr_t>(RXBase + strtoull(Size, nullptr, 16));
++    }
++  }
++} JitPool;
++} // namespace
++#endif

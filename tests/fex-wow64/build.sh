@@ -30,6 +30,8 @@ if [ ! -d "$src/.git" ]; then
 fi
 git -C "$src" fetch -q --depth 1 origin "$FEX_COMMIT"
 git -C "$src" checkout -q -f FETCH_HEAD
+# Files a patch added in an earlier (cached) build would make it fail to apply again.
+git -C "$src" clean -q -fd
 # Skip the large test-binary submodules.
 for m in $(git -C "$src" config -f .gitmodules --get-regexp 'submodule\..*\.path' | awk '{print $2}'); do
     case "$m" in External/fex-*-bins) continue ;; esac
