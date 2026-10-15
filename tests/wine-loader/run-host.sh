@@ -243,7 +243,14 @@ if [ -n "$fex_cache" ]; then
     echo "--- FEX cache directory ---"
     find "$WINEHOST_FEX_CACHE" -type f -exec ls -l {} + | sed 's/^/  /'
 fi
-if [ -n "$fex_codemap" ]; then
+if [ -n "$fex_codemap" ] && [ "${WINEHOST_FEX_ALL_CACHED:-}" = 1 ]; then
+    # Everything the program ran came from the code caches: FEX compiled no
+    # block of a tracked image itself, so the new code maps are empty.
+    # shellcheck disable=SC2046 # one argument per code map file
+    blocks=$(python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin') || true)
+    echo "$blocks"
+    echo "$blocks" | grep -qx 'code map blocks in all: 0'
+elif [ -n "$fex_codemap" ]; then
     # shellcheck disable=SC2046 # one argument per code map file
     python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin')
 fi
