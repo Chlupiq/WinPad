@@ -283,6 +283,13 @@ jobs:
           WINEHOST_SYSWOW64: 1
           WINEHOST_JIT: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+      - name: The x86 program runs again with the code caches loaded, in Wine on an iPad simulator
+        env:
+          WINEHOST_EXPECT_OUTPUT: Hello from x86
+          WINEHOST_EXPECT_LOG: "[aot-cache] enabled"
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
+          WINEHOST_FEX_CODEMAP: 1
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
       - name: FEX code map and code caches of the x86 run
         if: always()
         uses: actions/upload-artifact@v4

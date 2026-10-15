@@ -219,6 +219,11 @@ elif [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ]; then
 else
     grep -q '^winehost: frame of window' "$out/run.log"
 fi
+# WINEHOST_EXPECT_LOG: a line the run has to log (FEX's own messages, say).
+if [ -n "${WINEHOST_EXPECT_LOG:-}" ]; then
+    grep -F "$WINEHOST_EXPECT_LOG" "$out/run.log" | head -20
+    grep -qF "$WINEHOST_EXPECT_LOG" "$out/run.log"
+fi
 # Keys and taps reach the program through the winios driver.
 if [ -n "${WINEHOST_TYPE:-}" ]; then
     grep -q '^winehost: typed text shows up' "$out/run.log"
