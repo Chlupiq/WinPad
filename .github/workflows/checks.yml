@@ -86,13 +86,15 @@ jobs:
           path: ${{ runner.temp }}/fex-wow64
           key: fex-wow64-${{ hashFiles('tests/fex-wow64/build.sh', 'patches/fex-wow64/*') }}
           restore-keys: fex-wow64-
-      - name: FEX's WoW64 module (xtajit.dll) builds from Madeira's FEX fork
+      - name: FEX's WoW64 module (xtajit.dll) and offline compiler build from Madeira's FEX fork
         run: sh tests/fex-wow64/build.sh "$RUNNER_TEMP/fex-wow64"
       - name: Upload xtajit.dll
         uses: actions/upload-artifact@v4
         with:
           name: xtajit
-          path: ${{ runner.temp }}/fex-wow64/xtajit.dll
+          path: |
+            ${{ runner.temp }}/fex-wow64/xtajit.dll
+            ${{ runner.temp }}/fex-wow64/FEXOfflineCompiler.exe
 
   probe-macos:
     needs: fex-cache
@@ -270,14 +272,23 @@ jobs:
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
           WINEHOST_WINEDEBUG: +loaddll
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
-      - name: FEX code map of the x86 run
+      - name: FEX's offline compiler turns that code map into code caches, in Wine on an iPad simulator
+        env:
+          WINEHOST_EXPECT_OUTPUT: Successfully populated cache
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
+          WINEHOST_EXPECT_FEX_CACHE: 1
+          WINEHOST_SYSWOW64: 1
+          WINEHOST_JIT: 1
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+      - name: FEX code map and code caches of the x86 run
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fex-codemap-hello
-          path: ${{ runner.temp }}/wine-loader/host-hello/prefix/drive_c/fexcache
+          name: fex-cache-hello
+          path: ${{ runner.temp }}/fexcache
           if-no-files-found: ignore
 
   fexcore-ios:

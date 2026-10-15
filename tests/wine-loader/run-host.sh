@@ -115,7 +115,11 @@ ln -s "$work/madeira/wine/fonts" "$out/fonts"
 ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
 # 32-bit x86 modules (tests/wine-i386/build.sh), for WoW64 programs.
 [ -d "$work/i386-windows" ] && ln -s "$work/i386-windows" "$out/i386-windows"
-case "$1" in */i386-windows/*)
+# WINEHOST_SYSWOW64=1 makes the same prefix for a 64-bit program that reads
+# the 32-bit DLLs by their C:\windows\syswow64 paths (FEX's offline compiler).
+wow64=${WINEHOST_SYSWOW64:-}
+case "$1" in */i386-windows/*) wow64=1 ;; esac
+if [ "$wow64" = 1 ]; then
     # A 32-bit process's system32 is C:\windows\syswow64; Madeira's app links
     # the i386 set there (madeira_link_syswow64 in WineProcessBridge.m).
     mkdir -p "$out/prefix/drive_c/windows/syswow64"
@@ -125,16 +129,17 @@ case "$1" in */i386-windows/*)
     mkdir -p "$out/prefix/drive_c/windows/system32"
     for f in "$work/modules-iphonesimulator/aarch64-windows"/*; do
         ln -s "$f" "$out/prefix/drive_c/windows/system32/"
-    done ;;
-esac
-# With WINEHOST_FEX_CODEMAP=1, FEX records which blocks of the x86 code it
-# compiled (a code map, the input of its offline compiler) under C:\fexcache.
+    done
+fi
+# WINEHOST_FEX_CACHE=DIR is FEX's cache directory (code maps, caches), shared
+# by runs. With WINEHOST_FEX_CODEMAP=1, FEX records there which blocks of the
+# x86 code it compiled (a code map, the input of its offline compiler).
 fex_codemap=
 fex_cache=
-if [ "${WINEHOST_FEX_CODEMAP:-}" = 1 ]; then
-    fex_codemap=1
-    fex_cache='C:\fexcache\'
-    mkdir -p "$out/prefix/drive_c/fexcache/codemap/new"
+if [ -n "${WINEHOST_FEX_CACHE:-}" ]; then
+    mkdir -p "$WINEHOST_FEX_CACHE/codemap/new"
+    fex_cache="Z:$(printf '%s' "$WINEHOST_FEX_CACHE" | tr / '\\')\\"
+    [ "${WINEHOST_FEX_CODEMAP:-}" = 1 ] && fex_codemap=1
 fi
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
@@ -150,6 +155,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_TYPE="${WINEHOST_TYPE:-}" SIMCTL_CHILD_WINEHOST_CLICK_MENU="${WINEHOST_CLICK_MENU:-}" \
     SIMCTL_CHILD_WINEHOST_CLICK="${WINEHOST_CLICK:-}" SIMCTL_CHILD_WINEHOST_WINDOW="$expect_window" \
     SIMCTL_CHILD_FEX_ENABLECODECACHINGWIP="${fex_codemap:-0}" SIMCTL_CHILD_FEX_APP_CACHE_LOCATION="$fex_cache" \
+    SIMCTL_CHILD_WINEHOST_JIT="${WINEHOST_JIT:-}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
@@ -223,9 +229,15 @@ fi
 if [ -n "${WINEHOST_CLICK:-}" ]; then
     grep -q '^winehost: window content changed after the click, [0-9]* pixels$' "$out/run.log"
 fi
+if [ -n "$fex_cache" ]; then
+    echo "--- FEX cache directory ---"
+    find "$WINEHOST_FEX_CACHE" -type f -exec ls -l {} + | sed 's/^/  /'
+fi
 if [ -n "$fex_codemap" ]; then
-    echo "--- FEX code map ---"
-    find "$out/prefix/drive_c/fexcache" -type f | sed 's/^/  /'
     # shellcheck disable=SC2046 # one argument per code map file
-    python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$out/prefix/drive_c/fexcache/codemap" -type f -name '*.bin')
+    python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin')
+fi
+# With WINEHOST_EXPECT_FEX_CACHE=1 the run has to leave code caches.
+if [ "${WINEHOST_EXPECT_FEX_CACHE:-}" = 1 ]; then
+    [ -n "$(find "$WINEHOST_FEX_CACHE/cache" -type f -size +0 2>/dev/null)" ]
 fi

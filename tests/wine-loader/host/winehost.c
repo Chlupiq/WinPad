@@ -449,6 +449,11 @@ int main(int argc, char* argv[]) {
     if (publish_jit_pool(512 << 20)) return 1;
     printf("winehost: 32-bit x86 program, running it through WoW64\n");
   }
+  else if (getenv("WINEHOST_JIT") && !strcmp(getenv("WINEHOST_JIT"), "1")) {
+    /* A 64-bit program that generates code itself (FEX's offline compiler). */
+    publish_host_probe();
+    if (publish_jit_pool(512 << 20)) return 1;
+  }
   printf("winehost: starting %s\n", argv[2]);
   if (start(wine_thread, 8 << 20)) return 1;
 

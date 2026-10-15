@@ -4,8 +4,11 @@
 # Madeira's build/fex-wow64/build.sh, so its code can be changed and its logs
 # read. Uses the llvm-mingw toolchain Madeira names (docs/BUILDING.md there).
 #
+# Also builds FEX's offline compiler from the same tree and options: a code
+# cache only fits the FEX build that made it.
+#
 # Usage: build.sh WORK_DIR
-# Leaves WORK_DIR/xtajit.dll.
+# Leaves WORK_DIR/xtajit.dll and WORK_DIR/FEXOfflineCompiler.exe.
 set -eu
 
 work=$1
@@ -48,6 +51,9 @@ if [ ! -f "$b/CMakeCache.txt" ]; then
         -DBUILD_TESTING=OFF -DBUILD_FEXCONFIG=OFF -DTUNE_ARCH=generic -DTUNE_CPU=none \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 fi
-cmake --build "$b" --target wow64fex
+cmake --build "$b" --target wow64fex FEXOfflineCompiler
 cp "$b/Bin/libwow64fex.dll" "$work/xtajit.dll"
-echo "Built $work/xtajit.dll: $(wc -c <"$work/xtajit.dll" | tr -d ' ') bytes"
+cp "$b/Bin/FEXOfflineCompiler.exe" "$work/FEXOfflineCompiler.exe"
+for f in xtajit.dll FEXOfflineCompiler.exe; do
+    echo "Built $work/$f: $(wc -c <"$work/$f" | tr -d ' ') bytes"
+done
