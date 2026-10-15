@@ -1,0 +1,277 @@
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 9dfee42..11338a2 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -28,6 +28,7 @@
+ #include <xxhash.h>
+ 
+ #include <FEXCore/Utils/AllocatorHooks.h>
++#include <FEXCore/Utils/DualMap.h>
+ 
+ #include <fstream>
+ 
+@@ -447,7 +448,14 @@ void CodeCache::Validate(const ExecutableFileSectionInfo& Section, fextl::set<ui
+   NewRelocations.erase(std::remove_if(NewRelocations.begin(), NewRelocations.end(), [](const CPU::Relocation& Reloc) {
+     return Reloc.Header.Type != CPU::RelocationTypes::RELOC_NAMED_SYMBOL_LITERAL && Reloc.Header.Type != CPU::RelocationTypes::RELOC_NAMED_THUNK_MOVE;
+   }));
++#if defined(FEX_IOS_HOST) && defined(_WIN32)
++  // WinPad: the reference code sits in the RX view of the JIT pool; patch it through the RW alias.
++  (void)ApplyCodeRelocations(Section.FileStartVA,
++                             std::span {CodeBufferRangeRef.data() + FEXCore::DualMap::WriteOffset, CodeBufferRangeRef.size()},
++                             NewRelocations, 0, false);
++#else
+   (void)ApplyCodeRelocations(Section.FileStartVA, CodeBufferRangeRef, NewRelocations, 0, false);
++#endif
+ 
+   if (ValidationCTX->LatestOffset <= CodeBufferRangeRef.size()) {
+     // Reference compilation produced fewer bytes than our cache, so validation is going to fail.
+@@ -461,6 +469,25 @@ void CodeCache::Validate(const ExecutableFileSectionInfo& Section, fextl::set<ui
+     auto Idx = AlignDown(std::distance(CodeBufferRangeRef.begin(), Mismatch), 4);
+ 
+     auto BlockIt = std::prev(HostBlocks.lower_bound(*HostBlocks.begin() + Idx + 1));
++#ifdef FEX_IOS_HOST
++    // WinPad: the assert-level message at the end never reaches the log on iOS, so print the mismatch
++    // and the block it falls in at error level before anything else can fail.
++    {
++      size_t BlockStart = BlockIt != HostBlocks.end() ? *BlockIt - *HostBlocks.begin() : 0;
++      LogMan::Msg::EFmt("[aot-validate] mismatch at offset {:#x} (block at {:#x}), cache size {:#x}, reference size {:#x}",
++                        Idx, BlockStart, CachedCode.size(), CodeBufferRangeRef.size());
++      // Whole block, eight words per line: C = cache, R = reference compile.
++      for (int i : {0, 1}) {
++        std::span<std::byte> Buf = i == 0 ? CachedCode : CodeBufferRangeRef;
++        size_t End = std::min<size_t>(BlockStart + 0x300, Buf.size());
++        for (size_t Off = BlockStart; Off < End; Off += 32) {
++          uint32_t W[8] {};
++          ::memcpy(W, &Buf[Off], std::min<size_t>(32, End - Off));
++          LogMan::Msg::EFmt("[aot-validate] {} {:#07x}: {:08x}", i == 0 ? 'C' : 'R', Off, fmt::join(W, " "));
++        }
++      }
++    }
++#endif
+     std::optional<uint64_t> GuestBlockAddr;
+     std::optional<uint64_t> GuestBlockAddrRef;
+     if (BlockIt != HostBlocks.end()) {
+@@ -886,9 +913,15 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
+   Allocator::VirtualDontNeed(Code.CodeBufferInFile.data() + StartOffset, Size);
+ #else
+   // TODO: Implement lazy mapping on Windows
++#if defined(FEX_IOS_HOST) && defined(_WIN32)
++  // WinPad: the code buffer is the RX view of the dual-mapped JIT pool; write through its RW alias.
++  const auto RelocTarget = std::span {Code.CodeBuffer.data() + FEXCore::DualMap::WriteOffset, Code.CodeBuffer.size()};
++#else
++  const auto RelocTarget = Code.CodeBuffer;
++#endif
+   for (size_t i = StartPage; i < EndPage; ++i) {
+     auto PageRelocations = SpanPageRelocations(Code, i);
+-    (void)ApplyCodeRelocations(Code.GuestBase, Code.CodeBuffer, PageRelocations, 0, false);
++    (void)ApplyCodeRelocations(Code.GuestBase, RelocTarget, PageRelocations, 0, false);
+     Code.LoadedPages[i] = true;
+   }
+ #endif
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 08b87ee..10108f1 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -536,6 +536,9 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+     LogMan::Msg::IFmt("Guest window at {:#x}", IosGuestWindow::Base);
+   }
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_GUEST32BASE, fextl::fmt::format("{}", IosGuestWindow::Base));
++  // WinPad: with code caching off the JIT emits relocatable constants unpadded (two instructions
++  // for a 32-bit value), and applying the relocation later writes four, over the next two.
++  FEXCore::Config::Set(FEXCore::Config::CONFIG_ENABLECODECACHINGWIP, "1");
+ #endif
+ 
+   // Load HostFeatures
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index b4bf3cb..dacbbb3 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -16,6 +16,11 @@
+ #include <FEXCore/fextl/string.h>
+ #include <FEXCore/fextl/vector.h>
+ #include "Common/Config.h"
++#ifdef FEX_IOS_HOST
++#include <FEXCore/Utils/AllocatorHooks.h>
++#include <FEXCore/Utils/DualMap.h>
++#include <FEXCore/Utils/MathUtils.h>
++#endif
+ 
+ #include <fcntl.h>
+ #include <io.h>
+@@ -138,7 +143,13 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
+   MappedImageInfo* ImageInfo = nullptr;
+   {
+     auto Relocations = [&]() {
++#ifdef FEX_IOS_HOST
++      // WinPad: cache validation recompiles cached blocks, and the offline compiler turned guest addresses
++      // that the image relocates into relocatable moves; the reference compile needs the same table.
++      if (IsGeneratingCache || FEXCore::Config::Get_ENABLECODECACHEVALIDATION()) {
++#else
+       if (IsGeneratingCache) {
++#endif
+         return LoadImageRelocations(Nt, Address);
+       }
+       return fextl::robin_map<uint32_t, FEXCore::GuestRelocationType> {};
+@@ -180,6 +191,9 @@ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view
+     if (AOTImage != AOTImages.end()) {
+       // TODO: CodeCache::EnableLoadedSection
+     }
++#ifdef FEX_IOS_HOST
++    LoadImageCache(*ImageInfo, ID, Address, Nt->OptionalHeader.SizeOfImage);
++#endif
+   }
+ 
+   uint64_t EndAddress = Address + Nt->OptionalHeader.SizeOfImage;
+@@ -227,6 +241,74 @@ int ImageTracker::OpenCodeMapFile() {
+   return _sopen(ActiveCodeMapPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_APPEND | O_BINARY, _SH_DENYRW, 0644);
+ }
+ 
++#ifdef FEX_IOS_HOST
++// WinPad: the cache FEX's offline compiler made for this image, `<cache dir>cache\<ID>-<config id>`
++// (the name the Linux frontend loads, config id 0). The whole file goes into executable JIT-pool
++// memory: on Windows FEXCore runs the cached code where the file was loaded and applies its
++// relocations there (through the pool's RW alias, see FinalizeCodePages).
++void ImageTracker::LoadImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size) {
++  const auto AnsiPath = fmt::format("\\??\\{}cache\\{}-{:016x}", FEX::Config::GetCacheDirectory(), ID, 0);
++  ScopedUnicodeString NtPath(AnsiPath.c_str());
++
++  OBJECT_ATTRIBUTES Attr;
++  InitializeObjectAttributes(&Attr, &*NtPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
++  ScopedHandle File;
++  IO_STATUS_BLOCK IOSB;
++  if (!NT_SUCCESS(NtOpenFile(&*File, GENERIC_READ | SYNCHRONIZE, &Attr, &IOSB, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT))) {
++    return;
++  }
++
++  FILE_STANDARD_INFORMATION StandardInfo;
++  if (!NT_SUCCESS(NtQueryInformationFile(*File, &IOSB, &StandardInfo, sizeof(StandardInfo), FileStandardInformation)) ||
++      StandardInfo.EndOfFile.QuadPart <= 0) {
++    LogMan::Msg::EFmt("[aot-cache] {}: unreadable", AnsiPath);
++    return;
++  }
++  const size_t FileSize = static_cast<size_t>(StandardInfo.EndOfFile.QuadPart);
++  const size_t AllocSize = FEXCore::AlignUp(FileSize, FEXCore::Utils::FEX_PAGE_SIZE);
++
++  auto* RX = static_cast<std::byte*>(FEXCore::Allocator::VirtualAlloc(AllocSize, true));
++  if (!RX) {
++    LogMan::Msg::EFmt("[aot-cache] {}: no JIT-pool memory for {} bytes", AnsiPath, AllocSize);
++    return;
++  }
++  auto* RW = RX + FEXCore::DualMap::WriteOffset;
++  LARGE_INTEGER Offset {};
++  if (!NT_SUCCESS(NtReadFile(*File, nullptr, nullptr, nullptr, &IOSB, RW, static_cast<ULONG>(FileSize), &Offset, nullptr)) ||
++      IOSB.Information != FileSize) {
++    LogMan::Msg::EFmt("[aot-cache] {}: short read", AnsiPath);
++    FEXCore::Allocator::VirtualFree(RX, AllocSize);
++    return;
++  }
++
++  const uint64_t GuestBase = Guest32Base();
++  auto Cache = CTX.GetCodeCache().LoadCache(std::span {RX, FileSize}, Image.Info, Address - GuestBase);
++  if (!Cache) {
++    LogMan::Msg::EFmt("[aot-cache] {}: rejected by FEXCore", AnsiPath);
++    FEXCore::Allocator::VirtualFree(RX, AllocSize);
++    return;
++  }
++  CTX.GetCodeCache().RegisterMappedCodeBuffer(*Cache);
++  LogMan::Msg::EFmt("[aot-cache] loaded {} ({} bytes) for guest {:#x}", AnsiPath, FileSize, Address - GuestBase);
++
++  std::scoped_lock Lk {LoadedCachesLock};
++  LoadedCaches.push_back({std::move(Cache), &Image, Address - GuestBase, Address - GuestBase + Size, false});
++}
++
++void ImageTracker::EnableLoadedCaches(FEXCore::Core::InternalThreadState* Thread) {
++  std::scoped_lock Lk {LoadedCachesLock};
++  for (auto& Loaded : LoadedCaches) {
++    if (Loaded.Enabled) {
++      continue;
++    }
++    Loaded.Enabled = true;
++    const FEXCore::ExecutableFileSectionInfo Section {Loaded.Image->Info, Loaded.GuestBegin, Loaded.GuestBegin, Loaded.GuestEnd};
++    CTX.GetCodeCache().EnableLoadedSection(Thread, *Loaded.Cache, Section);
++    LogMan::Msg::EFmt("[aot-cache] enabled {} at guest {:#x}", Loaded.Image->Info.Filename, Loaded.GuestBegin);
++  }
++}
++#endif
++
+ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
+   const auto AnsiPath =
+     fmt::format("\\??\\{}cache\\{}", FEX::Config::GetCacheDirectory(), FEXCore::CodeMap::GetBaseFilename(ImageInfo.Info, false));
+diff --git a/Source/Windows/Common/ImageTracker.h b/Source/Windows/Common/ImageTracker.h
+index dcbc06d..7bdd4c3 100644
+--- a/Source/Windows/Common/ImageTracker.h
++++ b/Source/Windows/Common/ImageTracker.h
+@@ -10,6 +10,8 @@
+ #include <FEXCore/Utils/CompilerDefs.h>
+ #include <FEXCore/Config/Config.h>
+ #include <FEXCore/Core/CodeCache.h>
++#include <FEXCore/fextl/memory.h>
++#include <FEXCore/fextl/vector.h>
+ 
+ #include "Common/VolatileMetadata.h"
+ #include "Module.h"
+@@ -46,6 +48,13 @@ public:
+ 
+   int OpenCodeMapFile() override;
+ 
++#ifdef FEX_IOS_HOST
++  // WinPad: hands the code caches loaded by HandleImageMap to FEXCore. That needs a thread (the
++  // lookup cache is per code buffer, made with the first thread), and HandleImageMap runs for ntdll
++  // and the main image before there is one, so the WoW64 module calls this once a thread exists.
++  void EnableLoadedCaches(FEXCore::Core::InternalThreadState* Thread);
++#endif
++
+ private:
+   struct MappedImageInfo {
+     FEXCore::ExecutableFileInfo Info;
+@@ -61,6 +70,22 @@ private:
+ 
+   void LoadAOTImages(MappedImageInfo& Info);
+ 
++#ifdef FEX_IOS_HOST
++  struct LoadedCache {
++    fextl::unique_ptr<FEXCore::MappedCodeCacheFile> Cache;
++    const MappedImageInfo* Image;
++    // Guest addresses of the image (host - GUEST32BASE).
++    uint64_t GuestBegin;
++    uint64_t GuestEnd;
++    bool Enabled;
++  };
++  void LoadImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size);
++
++  std::mutex LoadedCachesLock;
++  fextl::vector<LoadedCache> LoadedCaches;
++  FEX_CONFIG_OPT(Guest32Base, GUEST32BASE);
++#endif
++
+   FEXCore::Context::Context& CTX;
+ 
+   FEX_CONFIG_OPT(ExtendedVolatileMetadataConfig, EXTENDEDVOLATILEMETADATA);
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 995fed3..72a509e 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -1498,6 +1498,10 @@ void BTCpuThreadInit() {
+   if (StatAllocHandler) {
+     Thread->ThreadStats = StatAllocHandler->AllocateSlot(ThreadTID);
+   }
++#ifdef FEX_IOS_HOST
++  // WinPad: caches loaded for ntdll and the main image before the first thread existed.
++  ImageTracker->EnableLoadedCaches(Thread);
++#endif
+ }
+ 
+ void BTCpuThreadTerm(HANDLE Thread, LONG ExitCode) {
+@@ -2024,6 +2028,12 @@ void BTCpuNotifyMemoryFree(void* Address, SIZE_T Size, ULONG FreeType, BOOL Afte
+ NTSTATUS BTCpuNotifyMapViewOfSection(void* Unk1, void* Address, void* Unk2, SIZE_T Size, ULONG AllocType, ULONG Prot) {
+   std::scoped_lock Lock(ThreadCreationMutex);
+   HandleImageMap(reinterpret_cast<uint64_t>(Address));
++#ifdef FEX_IOS_HOST
++  // WinPad: the image's code cache, if one was loaded, once this thread has FEX state.
++  if (auto* Thread = GetTLS().ThreadStateIfInitialised()) {
++    ImageTracker->EnableLoadedCaches(Thread);
++  }
++#endif
+   return STATUS_SUCCESS;
+ }
+ 

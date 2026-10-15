@@ -156,6 +156,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_CLICK="${WINEHOST_CLICK:-}" SIMCTL_CHILD_WINEHOST_WINDOW="$expect_window" \
     SIMCTL_CHILD_FEX_ENABLECODECACHINGWIP="${fex_codemap:-0}" SIMCTL_CHILD_FEX_APP_CACHE_LOCATION="$fex_cache" \
     SIMCTL_CHILD_WINEHOST_JIT="${WINEHOST_JIT:-}" \
+    SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
@@ -182,12 +183,16 @@ fi
 # The simulator stays booted for the next run (booting takes most of a minute).
 echo "winehost exit status: $status"
 # Trace channels (WINEHOST_WINEDEBUG) can print a lot: the first 150 lines of
-# each, then how often each function traced.
+# each, then how often each function traced. A fault storm repeats the same
+# line thousands of times and pushes the start of the run out of the job log:
+# the first 40 lines of each kind (first 30 characters, numbers aside), then a count.
 awk '/:trace:/ { split($0, f, ":"); ch = f[3]; split(f[4], g, " "); calls[ch ":" g[1]]++
         if (++n[ch] > 150) next }
+    { k = $0; gsub(/[0-9]+/, "#", k); k = substr(k, 1, 30); if (++same[k] > 40) next }
     { print }
     END { for (ch in n) if (n[ch] > 150) printf "(%d trace lines of %s in all)\n", n[ch], ch
-          for (c in calls) printf "(trace %s: %d)\n", c, calls[c] }' "$out/run.log"
+          for (c in calls) printf "(trace %s: %d)\n", c, calls[c]
+          for (k in same) if (same[k] > 40) printf "(%d lines starting \"%s\" in all)\n", same[k], k }' "$out/run.log"
 if [ -s "$out/sample.txt" ]; then
     echo "--- threads of winehost $seconds s in (sample) ---"
     sed -n '/^Call graph:/,/^Total number in stack/p' "$out/sample.txt" | head -150
@@ -219,6 +224,11 @@ elif [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ]; then
 else
     grep -q '^winehost: frame of window' "$out/run.log"
 fi
+# WINEHOST_EXPECT_LOG: a line the run has to log (FEX's own messages, say).
+if [ -n "${WINEHOST_EXPECT_LOG:-}" ]; then
+    grep -F "$WINEHOST_EXPECT_LOG" "$out/run.log" | head -20
+    grep -qF "$WINEHOST_EXPECT_LOG" "$out/run.log"
+fi
 # Keys and taps reach the program through the winios driver.
 if [ -n "${WINEHOST_TYPE:-}" ]; then
     grep -q '^winehost: typed text shows up' "$out/run.log"
@@ -233,7 +243,14 @@ if [ -n "$fex_cache" ]; then
     echo "--- FEX cache directory ---"
     find "$WINEHOST_FEX_CACHE" -type f -exec ls -l {} + | sed 's/^/  /'
 fi
-if [ -n "$fex_codemap" ]; then
+if [ -n "$fex_codemap" ] && [ "${WINEHOST_FEX_ALL_CACHED:-}" = 1 ]; then
+    # Everything the program ran came from the code caches: FEX compiled no
+    # block of a tracked image itself, so the new code maps are empty.
+    # shellcheck disable=SC2046 # one argument per code map file
+    blocks=$(python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin') || true)
+    echo "$blocks"
+    echo "$blocks" | grep -qx 'code map blocks in all: 0'
+elif [ -n "$fex_codemap" ]; then
     # shellcheck disable=SC2046 # one argument per code map file
     python3 -I "$root/tests/fex-wow64/codemap.py" $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin')
 fi
