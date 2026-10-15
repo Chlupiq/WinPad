@@ -182,12 +182,16 @@ fi
 # The simulator stays booted for the next run (booting takes most of a minute).
 echo "winehost exit status: $status"
 # Trace channels (WINEHOST_WINEDEBUG) can print a lot: the first 150 lines of
-# each, then how often each function traced.
+# each, then how often each function traced. A fault storm repeats the same
+# line thousands of times and pushes the start of the run out of the job log:
+# the first 40 lines of each kind (first 30 characters, numbers aside), then a count.
 awk '/:trace:/ { split($0, f, ":"); ch = f[3]; split(f[4], g, " "); calls[ch ":" g[1]]++
         if (++n[ch] > 150) next }
+    { k = $0; gsub(/[0-9]+/, "#", k); k = substr(k, 1, 30); if (++same[k] > 40) next }
     { print }
     END { for (ch in n) if (n[ch] > 150) printf "(%d trace lines of %s in all)\n", n[ch], ch
-          for (c in calls) printf "(trace %s: %d)\n", c, calls[c] }' "$out/run.log"
+          for (c in calls) printf "(trace %s: %d)\n", c, calls[c]
+          for (k in same) if (same[k] > 40) printf "(%d lines starting \"%s\" in all)\n", same[k], k }' "$out/run.log"
 if [ -s "$out/sample.txt" ]; then
     echo "--- threads of winehost $seconds s in (sample) ---"
     sed -n '/^Call graph:/,/^Total number in stack/p' "$out/sample.txt" | head -150
