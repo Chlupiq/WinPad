@@ -1,5 +1,5 @@
 diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
-index 9dfee42..6263907 100644
+index 9dfee42..26a5525 100644
 --- a/FEXCore/Source/Interface/Core/CodeCache.cpp
 +++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
 @@ -28,6 +28,7 @@
@@ -10,7 +10,22 @@ index 9dfee42..6263907 100644
  
  #include <fstream>
  
-@@ -886,9 +887,15 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
+@@ -447,7 +448,14 @@ void CodeCache::Validate(const ExecutableFileSectionInfo& Section, fextl::set<ui
+   NewRelocations.erase(std::remove_if(NewRelocations.begin(), NewRelocations.end(), [](const CPU::Relocation& Reloc) {
+     return Reloc.Header.Type != CPU::RelocationTypes::RELOC_NAMED_SYMBOL_LITERAL && Reloc.Header.Type != CPU::RelocationTypes::RELOC_NAMED_THUNK_MOVE;
+   }));
++#if defined(FEX_IOS_HOST) && defined(_WIN32)
++  // WinPad: the reference code sits in the RX view of the JIT pool; patch it through the RW alias.
++  (void)ApplyCodeRelocations(Section.FileStartVA,
++                             std::span {CodeBufferRangeRef.data() + FEXCore::DualMap::WriteOffset, CodeBufferRangeRef.size()},
++                             NewRelocations, 0, false);
++#else
+   (void)ApplyCodeRelocations(Section.FileStartVA, CodeBufferRangeRef, NewRelocations, 0, false);
++#endif
+ 
+   if (ValidationCTX->LatestOffset <= CodeBufferRangeRef.size()) {
+     // Reference compilation produced fewer bytes than our cache, so validation is going to fail.
+@@ -886,9 +894,15 @@ void CodeCache::FinalizeCodePages(MappedCodeCacheFile& Code, std::span<std::byte
    Allocator::VirtualDontNeed(Code.CodeBufferInFile.data() + StartOffset, Size);
  #else
    // TODO: Implement lazy mapping on Windows
