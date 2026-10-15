@@ -68,6 +68,20 @@ index 9dfee42..11338a2 100644
      Code.LoadedPages[i] = true;
    }
  #endif
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 08b87ee..10108f1 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -536,6 +536,9 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+     LogMan::Msg::IFmt("Guest window at {:#x}", IosGuestWindow::Base);
+   }
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_GUEST32BASE, fextl::fmt::format("{}", IosGuestWindow::Base));
++  // WinPad: with code caching off the JIT emits relocatable constants unpadded (two instructions
++  // for a 32-bit value), and applying the relocation later writes four, over the next two.
++  FEXCore::Config::Set(FEXCore::Config::CONFIG_ENABLECODECACHINGWIP, "1");
+ #endif
+ 
+   // Load HostFeatures
 diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
 index b4bf3cb..dacbbb3 100644
 --- a/Source/Windows/Common/ImageTracker.cpp
