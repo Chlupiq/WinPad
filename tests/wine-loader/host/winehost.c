@@ -469,7 +469,13 @@ int main(int argc, char* argv[]) {
   if (pe_machine(argv[2]) == 0x14c) {
     ios_main_image_i386 = 1;
     publish_host_probe();
-    if (publish_jit_pool(512 << 20)) return 1;
+    // With NoJIT nothing runs from the pool: FEX runs only the AOT image and xtajit.dll runs from
+    // its dylib. A device without a debugger cannot map the pool's executable view at all.
+    const char* nojit = getenv("FEX_NOJIT");
+    if (nojit && !strcmp(nojit, "1"))
+      printf("winehost: NoJIT, so no JIT pool\n");
+    else if (publish_jit_pool(512 << 20))
+      return 1;
     const char* aot = getenv("WINEHOST_AOT_IMAGE");
     if (aot && *aot && publish_aot_image(aot)) return 1;
     printf("winehost: 32-bit x86 program, running it through WoW64\n");
