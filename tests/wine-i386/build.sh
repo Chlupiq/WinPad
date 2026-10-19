@@ -36,6 +36,11 @@ if [ ! -f "$b/config.status" ]; then
     }
 fi
 
+# WinPad's change to the i386 ntdll, see the patch header. The tree may come
+# from a cache with the patch already applied.
+p="$here/../../patches/wine/0003-i386-ntdll-wow64-bop.patch"
+git -C "$wine" apply -R --check "$p" 2>/dev/null || git -C "$wine" apply "$p"
+
 targets=
 for m in "$@"; do
     t=$(grep -oE "^dlls/$m/i386-windows/[^/ :]+\.dll" "$b/Makefile" | sort -u | head -1)

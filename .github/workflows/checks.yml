@@ -186,7 +186,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/wine-loader/madeira/wine/build-i386
-          key: wine-i386-257f271-${{ hashFiles('tests/wine-i386/build.sh') }}
+          key: wine-i386-257f271-${{ hashFiles('tests/wine-i386/build.sh', 'patches/wine/0003-*') }}
       - name: Restore built Wine libraries
         id: wine-built
         uses: actions/cache@v4
@@ -326,6 +326,7 @@ jobs:
             [aot-image] loaded linked cache for
             [aot-dispatcher] static code from the AOT image
             [nojit] no code is generated to run
+            [wow-bop] system calls go through ntdll's __wine_wow64_bop
             [aot-cache] enabled
             [aot-link] first block link through the data area
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-image

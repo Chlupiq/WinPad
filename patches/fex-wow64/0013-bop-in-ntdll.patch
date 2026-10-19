@@ -1,0 +1,73 @@
+WoW64 system calls through the 32-bit ntdll's code, not a page of their own (FEX 3bec2ac, on top of 0012)
+
+The 32-bit side makes system calls and unix calls by jumping to two
+`int $0x2e` instructions that FEX's WoW64 module wrote into a page it
+allocated. No AOT code cache can hold code in such a page, so with NoJIT
+the first system call stopped FEX ("guest block ... is not in the AOT
+image").
+
+When the 32-bit ntdll exports __wine_wow64_bop (WinPad's
+patches/wine/0003), BTCpuProcessInit uses those instructions in ntdll's
+.text instead and logs "[wow-bop] system calls go through ntdll's
+__wine_wow64_bop". Without the export it allocates the page as before.
+
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 72a509e..d628de4 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -347,6 +347,29 @@ namespace BridgeInstrs {
+   void* UnixCall {};
+ } // namespace BridgeInstrs
+ 
++// WinPad: RVA of an export of a 32-bit PE image mapped at Image (a host address), or 0.
++uint32_t FindX86ExportRva(uint64_t Image, const char* Name) {
++  const auto* Dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(Image);
++  const auto* Nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(Image + Dos->e_lfanew);
++  if (Nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
++    return 0;
++  }
++  const auto& Dir = Nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
++  if (!Dir.VirtualAddress || !Dir.Size) {
++    return 0;
++  }
++  const auto* Exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(Image + Dir.VirtualAddress);
++  const auto* Names = reinterpret_cast<const DWORD*>(Image + Exports->AddressOfNames);
++  const auto* Ordinals = reinterpret_cast<const WORD*>(Image + Exports->AddressOfNameOrdinals);
++  const auto* Functions = reinterpret_cast<const DWORD*>(Image + Exports->AddressOfFunctions);
++  for (DWORD i = 0; i < Exports->NumberOfNames; i++) {
++    if (!strcmp(reinterpret_cast<const char*>(Image + Names[i]), Name)) {
++      return Functions[Ordinals[i]];
++    }
++  }
++  return 0;
++}
++
+ fextl::unique_ptr<FEXCore::Context::Context> CTX;
+ fextl::unique_ptr<FEX::DummyHandlers::DummySignalDelegator> SignalDelegator;
+ fextl::unique_ptr<WowSyscallHandler> SyscallHandler;
+@@ -1331,6 +1354,15 @@ void BTCpuProcessInit() {
+   //
+   // The page is then written and tracked through its HOST address, but PUBLISHED to wow64.dll and
+   // compared against State.rip as a GUEST address, because that is what the 32-bit code jumps to.
++  //
++  // WinPad: a 32-bit ntdll with __wine_wow64_bop (patches/wine/0003) holds the two instructions
++  // in its .text. Taken from there, they are file-backed x86 code that an AOT code cache holds,
++  // so with NoJIT a system call needs no block compiled at run time.
++  uint64_t BridgeGuest = 0;
++  if (const uint32_t BopRva = NtDllX86Guest ? FindX86ExportRva(NtDllX86, "__wine_wow64_bop") : 0) {
++    BridgeGuest = NtDllX86Guest + BopRva;
++    LogMan::Msg::EFmt("[wow-bop] system calls go through ntdll's __wine_wow64_bop at guest {:#x}", BridgeGuest);
++  } else {
+   SIZE_T Size = 4;
+   void* Addr = nullptr;
+ #ifdef FEX_IOS_HOST
+@@ -1406,7 +1438,8 @@ void BTCpuProcessInit() {
+                       GuestWindow::Base + GuestWindow::Size);
+ #endif
+   }
+-  const uint64_t BridgeGuest = GuestWindow::ToGuest(BridgeHost);
++  BridgeGuest = GuestWindow::ToGuest(BridgeHost);
++  }
+   BridgeInstrs::Syscall = reinterpret_cast<void*>(BridgeGuest);
+   BridgeInstrs::UnixCall = reinterpret_cast<void*>(BridgeGuest + 2);
+ 
