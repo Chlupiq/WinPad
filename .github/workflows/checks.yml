@@ -281,6 +281,7 @@ jobs:
           WINEHOST_WINEDEBUG: +loaddll,+module
           WINEHOST_EXPECT_LOG: |
             xtajit.dll.dylib" at
+            [wow-exit] the code map is written at NtTerminateProcess
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
