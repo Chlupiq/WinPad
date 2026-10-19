@@ -1,0 +1,27 @@
+The offline compiler compiles system calls for the generic ABI (FEX 3bec2ac, on top of 0014)
+
+On Windows the offline compiler gave its syscall handler a Linux ABI
+(OS_LINUX32 for 32-bit images). The WoW64 module's handler uses
+OS_GENERIC: the handler reads and writes the guest registers itself.
+With a Linux ABI the compiled `int 0x2e` writes the handler's return
+value into EAX after the call. Once the system call blocks came from
+the caches (0013), that clobbered EAX after every system call and
+32-bit ntdll soon stored through a bad pointer.
+
+The compiler now uses OS_GENERIC, like the WoW64 and ARM64EC modules.
+
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 71495be..d3de310 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -559,7 +559,9 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+ #ifdef _WIN32
+   OvercommitTracker = std::make_unique<FEX::Windows::OvercommitTracker>(IsWine);
+ 
+-  auto SyscallOSABI = Is64Bit ? FEXCore::HLE::SyscallOSABI::OS_LINUX64 : FEXCore::HLE::SyscallOSABI::OS_LINUX32;
++  // WinPad: the WoW64 and ARM64EC modules' syscall handlers use the generic ABI, so a cached
++  // `int 0x2e` must not write the handler's return value into EAX as the Linux ABIs do.
++  auto SyscallOSABI = FEXCore::HLE::SyscallOSABI::OS_GENERIC;
+   auto SyscallHandler = std::make_unique<AOTSyscallHandler>(*CTX, SyscallOSABI);
+ 
+   SyscallHandler->VAFileStart =
