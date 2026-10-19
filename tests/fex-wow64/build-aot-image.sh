@@ -3,7 +3,8 @@
 # the iPad simulator: tools/cache2macho turns each cache into an object (code
 # in __TEXT, data area in __DATA, every reference between them resolved by
 # the linker), tools/cache2macho/aotindex.py adds the index FEX's WoW64 module
-# finds them by (patches/fex-wow64/0010). On a device the same objects would
+# finds them by (patches/fex-wow64/0010), and FEX's dispatcher if a run
+# dumped it (patches/fex-wow64/0011). On a device the same objects would
 # be linked into the signed app.
 #
 # Usage: build-aot-image.sh CACHE_DIR OUT.dylib
@@ -23,9 +24,16 @@ caches=$(find "$cache_dir/cache" -type f -size +0 | grep -E -- '-[0-9a-f]{16}-[0
 for c in $caches; do
     python3 -I "$tools/cache2macho.py" --wow64 --ios-simulator 17.4 "$c" "$objs/$(basename "$c").o"
 done
+# The dispatcher, if a run dumped it there (WINEHOST_FEX_DUMP_DISPATCHER=1)
+dispatcher=
+if [ -s "$cache_dir/dispatcher.bin" ]; then
+    python3 -I "$tools/cache2macho.py" --dispatcher "$cache_dir/dispatcher.bin" "$objs/dispatcher.s"
+    xcrun -sdk iphonesimulator clang -target $target -c "$objs/dispatcher.s" -o "$objs/dispatcher.o"
+    dispatcher=--dispatcher
+fi
 # shellcheck disable=SC2086 # one argument per cache
-python3 -I "$tools/aotindex.py" "$objs/index.s" $caches
+python3 -I "$tools/aotindex.py" $dispatcher "$objs/index.s" $caches
 xcrun -sdk iphonesimulator clang -target $target -c "$objs/index.s" -o "$objs/index.o"
 xcrun -sdk iphonesimulator clang -target $target -dynamiclib -install_name @rpath/fexaot.dylib \
     -o "$out" "$objs"/*.o
-echo "Linked $out: $(wc -c <"$out" | tr -d ' ') bytes, $(echo "$caches" | wc -l | tr -d ' ') caches"
+echo "Linked $out: $(wc -c <"$out" | tr -d ' ') bytes, $(echo "$caches" | wc -l | tr -d ' ') caches${dispatcher:+ and the dispatcher}"

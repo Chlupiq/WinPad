@@ -138,10 +138,14 @@ fi
 # (tests/fex-wow64/build-aot-image.sh); the host loads it.
 fex_codemap=
 fex_cache=
+fex_dump_dispatcher=
 if [ -n "${WINEHOST_FEX_CACHE:-}" ]; then
     mkdir -p "$WINEHOST_FEX_CACHE/codemap/new"
     fex_cache="Z:$(printf '%s' "$WINEHOST_FEX_CACHE" | tr / '\\')\\"
     [ "${WINEHOST_FEX_CODEMAP:-}" = 1 ] && fex_codemap=1
+    # With WINEHOST_FEX_DUMP_DISPATCHER=1, FEX writes its dispatcher code there
+    # too (dispatcher.bin, for build-aot-image.sh).
+    [ "${WINEHOST_FEX_DUMP_DISPATCHER:-}" = 1 ] && fex_dump_dispatcher="${fex_cache}dispatcher.bin"
 fi
 
 udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcode/pick-ipad.py" 17.0)
@@ -159,6 +163,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_FEX_ENABLECODECACHINGWIP="${fex_codemap:-0}" SIMCTL_CHILD_FEX_APP_CACHE_LOCATION="$fex_cache" \
     SIMCTL_CHILD_WINEHOST_JIT="${WINEHOST_JIT:-}" \
     SIMCTL_CHILD_WINEHOST_AOT_IMAGE="${WINEHOST_AOT_IMAGE:-}" \
+    SIMCTL_CHILD_FEX_DUMPDISPATCHER="$fex_dump_dispatcher" \
     SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &

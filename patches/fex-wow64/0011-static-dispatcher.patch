@@ -1,0 +1,495 @@
+WoW64 dispatcher that is the same in every process, run from the AOT image (FEX 3bec2ac, on top of 0010)
+
+Port of patches/fex/0006 to Madeira's FEX fork. iOS without JIT can only
+run code signed into the app, so FEX's dispatcher, generated at startup, has
+to be built in advance like the AOT caches.
+
+- The dispatcher's absolute addresses move out of its code: the context and
+  the addresses of SleepThread, CompileBlock and CompileSingleStep (four
+  literals), Madeira's IosCbEntryLog capture buffer (now loaded from the
+  frame given in x0; an entry with a null frame is not captured) and the
+  pause handler's jump back to the FillSRA loop top (now a PC-relative
+  branch). The values live in the thread's JITPointers (Dispatcher*),
+  filled by InitThreadPointers.
+- The DumpDispatcher option writes the generated code to a file; WinPad's
+  tools/cache2macho --dispatcher turns it into the symbols
+  fexaot_dispatcher_text and fexaot_dispatcher_meta, and
+  tools/cache2macho/aotindex.py --dispatcher gives it an index entry (file
+  id 0, config id ~0).
+- With such an entry in the AOT index, the dispatcher is emitted into
+  memory that is not executable (and has no RW alias). If the image's copy
+  is byte for byte the same, every entry point moves to it ("[aot-dispatcher]
+  static code from the AOT image"); otherwise the log says where they
+  differ and FEX emits it again into the JIT pool and uses that.
+- The AOT index parsing moves from ImageTracker into FEXCore/Core/AOTIndex.h,
+  shared by both.
+
+diff --git a/FEXCore/Source/Interface/Config/Config.json.in b/FEXCore/Source/Interface/Config/Config.json.in
+index f53f5fc..d9e1c04 100644
+--- a/FEXCore/Source/Interface/Config/Config.json.in
++++ b/FEXCore/Source/Interface/Config/Config.json.in
+@@ -38,6 +38,14 @@
+           "loaded: values filled in at load time go to a data area next to the code"
+         ]
+       },
++      "DumpDispatcher": {
++        "Type": "str",
++        "Default": "",
++        "AffectsCodeGen": "false",
++        "Desc": [
++          "Write the generated dispatcher code to this file (for WinPad tools/cache2macho --dispatcher)"
++        ]
++      },
+       "EnableCodeCacheValidation": {
+         "Type": "bool",
+         "Default": "false",
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index 032a62b..5dbec8c 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -18,6 +18,7 @@
+ #include "Utils/MemberFunctionToPointer.h"
+ 
+ #include <FEXCore/Config/Config.h>
++#include <FEXCore/Core/AOTIndex.h>
+ #include <FEXCore/Utils/DualMap.h>
+ #include <FEXCore/Core/CoreState.h>
+ #include <FEXCore/Core/SignalDelegator.h>
+@@ -37,6 +38,7 @@
+ 
+ #include <array>
+ #include <bit>
++#include <cstdio>
+ #include <cstring>
+ 
+ namespace FEXCore::CPU {
+@@ -47,8 +49,18 @@ static void SleepThread(FEXCore::Context::ContextImpl* CTX, FEXCore::Core::CpuSt
+ 
+ constexpr size_t MAX_DISPATCHER_CODE_SIZE = FEXCore::Utils::FEX_PAGE_SIZE * 4;
+ 
++// WinPad: with a dispatcher in the AOT image (FEXCore/Core/AOTIndex.h), the dispatcher is
++// emitted into memory that is not executable: only the image's copy runs (see UseStaticCode).
++static bool WantsStaticCode() {
++#if defined(FEX_IOS_HOST) && defined(_WIN32) && !defined(ARCHITECTURE_arm64ec)
++  return FEXCore::AOTIndex::Find(FEXCore::AOTIndex::DispatcherFileId, FEXCore::AOTIndex::DispatcherConfigId) != nullptr;
++#else
++  return false;
++#endif
++}
++
+ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
+-  : Arm64Emitter(ctx, FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, true), MAX_DISPATCHER_CODE_SIZE)
++  : Arm64Emitter(ctx, FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, !WantsStaticCode()), MAX_DISPATCHER_CODE_SIZE)
+   , CTX {ctx} {
+ #if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
+   // The dispatcher is the first thing emitted in a process, and FEXCore::Allocator::VirtualAlloc
+@@ -61,8 +73,23 @@ Dispatcher::Dispatcher(FEXCore::Context::ContextImpl* ctx)
+                       MAX_DISPATCHER_CODE_SIZE, FEXCore::DualMap::WriteOffset);
+   }
+ #endif
+-  SetWriteOffset(FEXCore::DualMap::WriteOffset);
++  const bool StaticCode = WantsStaticCode();
++  // Memory outside the JIT pool has no RW alias
++  SetWriteOffset(StaticCode ? 0 : FEXCore::DualMap::WriteOffset);
+   EmitDispatcher();
++  DumpCode();
++
++  if (StaticCode && !UseStaticCode()) {
++    // Run generated code after all: emit it again into executable JIT-pool memory
++    FEXCore::Allocator::VirtualFree(GetBufferBase(), MAX_DISPATCHER_CODE_SIZE);
++    auto* Code = static_cast<uint8_t*>(FEXCore::Allocator::VirtualAlloc(MAX_DISPATCHER_CODE_SIZE, true));
++    if (!Code) {
++      ERROR_AND_DIE_FMT("[jit-pool] dispatcher code buffer allocation failed ({} bytes)", MAX_DISPATCHER_CODE_SIZE);
++    }
++    SetBuffer(Code, MAX_DISPATCHER_CODE_SIZE);
++    SetWriteOffset(FEXCore::DualMap::WriteOffset);
++    EmitDispatcher();
++  }
+ 
+   FEXCore::Allocator::VirtualName("FEXMem_Misc", reinterpret_cast<void*>(GetBufferBase()), MAX_DISPATCHER_CODE_SIZE);
+ }
+@@ -102,10 +129,8 @@ void Dispatcher::EmitDispatcher() {
+   //    Ptr();
+   // }
+ 
+-  ARMEmitter::ForwardLabel l_CTX;
+-  ARMEmitter::ForwardLabel l_Sleep;
+-  ARMEmitter::ForwardLabel l_CompileBlock;
+-  ARMEmitter::ForwardLabel l_CompileSingleStep;
++  // WinPad: no absolute address in the code, so it is the same in every process (see UseStaticCode)
++  ARMEmitter::BackwardLabel l_LoopTopFillSRA;
+ 
+   // Push all the register we need to save
+   PushCalleeSavedRegisters();
+@@ -139,6 +164,7 @@ void Dispatcher::EmitDispatcher() {
+ 
+   ARMEmitter::ForwardLabel CompileSingleStep;
+   AbsoluteLoopTopAddressFillSRA = GetCursorAddress<uint64_t>();
++  (void)Bind(&l_LoopTopFillSRA);
+ 
+   FillStaticRegs();
+   ldr(RipReg, STATE_PTR(CpuStateFrame, State.rip));
+@@ -445,11 +471,11 @@ void Dispatcher::EmitDispatcher() {
+         mov(ARMEmitter::XReg::x2, RipReg);
+       }
+ 
+-      ldr(ARMEmitter::XReg::x0, &l_CTX);
++      ldr(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, Pointers.DispatcherCTX));
+       mov(ARMEmitter::XReg::x1, STATE);
+       // x2 contains guest RIP
+       mov(ARMEmitter::XReg::x3, 0);
+-      ldr(ARMEmitter::XReg::x4, &l_CompileBlock);
++      ldr(ARMEmitter::XReg::x4, STATE_PTR(CpuStateFrame, Pointers.DispatcherCompileBlock));
+ 
+       if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+         GenerateIndirectRuntimeCall<uintptr_t, void*, void*, uint64_t, uint64_t>(ARMEmitter::Reg::r4);
+@@ -479,10 +505,10 @@ void Dispatcher::EmitDispatcher() {
+         mov(ARMEmitter::XReg::x2, RipReg);
+       }
+ 
+-      ldr(ARMEmitter::XReg::x0, &l_CTX);
++      ldr(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, Pointers.DispatcherCTX));
+       mov(ARMEmitter::XReg::x1, STATE);
+       // x2 contains guest RIP
+-      ldr(ARMEmitter::XReg::x4, &l_CompileSingleStep);
++      ldr(ARMEmitter::XReg::x4, STATE_PTR(CpuStateFrame, Pointers.DispatcherCompileSingleStep));
+ 
+       if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+         GenerateIndirectRuntimeCall<uintptr_t, void*, void*, uint64_t, uint64_t>(ARMEmitter::Reg::r4);
+@@ -569,9 +595,9 @@ void Dispatcher::EmitDispatcher() {
+     // We will have faulted and jumped to this location at this point
+ 
+     // Call our sleep handler
+-    ldr(ARMEmitter::XReg::x0, &l_CTX);
++    ldr(ARMEmitter::XReg::x0, STATE_PTR(CpuStateFrame, Pointers.DispatcherCTX));
+     mov(ARMEmitter::XReg::x1, STATE);
+-    ldr(ARMEmitter::XReg::x2, &l_Sleep);
++    ldr(ARMEmitter::XReg::x2, STATE_PTR(CpuStateFrame, Pointers.DispatcherSleepThread));
+     if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+       GenerateIndirectRuntimeCall<void, void*, void*>(ARMEmitter::Reg::r2);
+     } else {
+@@ -605,8 +631,7 @@ void Dispatcher::EmitDispatcher() {
+      * above, so re-enter through the FillSRA loop top: it refills them and dispatches
+      * to State.rip -- exactly "start running again", with no fault round trip.
+      * PauseReturnInstruction is still published so a future handler can match it. */
+-    LoadConstant(ARMEmitter::Size::i64Bit, TMP1, AbsoluteLoopTopAddressFillSRA);
+-    br(TMP1);
++    (void)b(&l_LoopTopFillSRA);
+ #else
+     // Fault to start running again
+     hlt(0);
+@@ -650,7 +675,11 @@ void Dispatcher::EmitDispatcher() {
+      * and the mov(STATE, x0) below re-establishes the only register contract that matters.
+      * x16/x17 are included because a `br` reaching here most plausibly came through one of the
+      * IP registers; whichever still holds an address near CallbackPtr names the branch. */
+-    LoadConstant(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r19, reinterpret_cast<uint64_t>(&IosCbEntryLog[0]));
++    /* WinPad: the buffer's address comes from the frame's JITPointers, not from the code, so the
++     * dispatcher is the same in every process; an entry with a null frame is not captured. */
++    ARMEmitter::ForwardLabel l_NoCbEntryLog;
++    (void)cbz(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, &l_NoCbEntryLog);
++    ldr(ARMEmitter::XReg::x19, ARMEmitter::Reg::r0, offsetof(FEXCore::Core::CpuStateFrame, Pointers.DispatcherCbEntryLog));
+     stp<ARMEmitter::IndexType::OFFSET>(ARMEmitter::XReg::x0, ARMEmitter::XReg::x1, ARMEmitter::Reg::r19, 0);
+     stp<ARMEmitter::IndexType::OFFSET>(ARMEmitter::XReg::x16, ARMEmitter::XReg::x17, ARMEmitter::Reg::r19, 16);
+     add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r20, ARMEmitter::Reg::rsp, 0);
+@@ -666,6 +695,7 @@ void Dispatcher::EmitDispatcher() {
+      * x23 is the SRA RSP on this target; guarded read so a bad RSP cannot fault the probe. */
+     add(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r20, ARMEmitter::XReg::x23, 0);
+     str(ARMEmitter::XReg::x20, ARMEmitter::Reg::r19, 56);       // [7] = guest RSP (x23)
++    (void)Bind(&l_NoCbEntryLog);
+ #endif
+ 
+     // First thing we need to move the thread state pointer back in to our register
+@@ -807,18 +837,6 @@ void Dispatcher::EmitDispatcher() {
+     }
+   }
+ 
+-  (void)Bind(&l_CTX);
+-  dc64(reinterpret_cast<uintptr_t>(CTX));
+-  (void)Bind(&l_Sleep);
+-  dc64(reinterpret_cast<uint64_t>(SleepThread));
+-  (void)Bind(&l_CompileBlock);
+-  FEXCore::Utils::MemberFunctionToPointerCast PMFCompileBlock(&FEXCore::Context::ContextImpl::CompileBlock);
+-  dc64(PMFCompileBlock.GetConvertedPointer());
+-  (void)Bind(&l_CompileSingleStep);
+-
+-  FEXCore::Utils::MemberFunctionToPointerCast PMFCompileSingleStep(&FEXCore::Context::ContextImpl::CompileSingleStep);
+-  dc64(PMFCompileSingleStep.GetConvertedPointer());
+-
+   Start = reinterpret_cast<uint64_t>(DispatchPtr);
+   End = GetCursorAddress<uint64_t>();
+ 
+@@ -2909,6 +2927,15 @@ void Dispatcher::InitThreadPointers(FEXCore::Core::InternalThreadState* Thread)
+     Ptrs.F64FYL2XP1Handler = F64FYL2XP1HandlerAddress;
+     Ptrs.F64FPREMHandler = F64FPREMHandlerAddress;
+     Ptrs.F64FPREM1Handler = F64FPREM1HandlerAddress;
++    Ptrs.DispatcherCTX = reinterpret_cast<uint64_t>(CTX);
++    Ptrs.DispatcherSleepThread = reinterpret_cast<uint64_t>(SleepThread);
++    FEXCore::Utils::MemberFunctionToPointerCast PMFCompileBlock(&FEXCore::Context::ContextImpl::CompileBlock);
++    Ptrs.DispatcherCompileBlock = PMFCompileBlock.GetConvertedPointer();
++    FEXCore::Utils::MemberFunctionToPointerCast PMFCompileSingleStep(&FEXCore::Context::ContextImpl::CompileSingleStep);
++    Ptrs.DispatcherCompileSingleStep = PMFCompileSingleStep.GetConvertedPointer();
++#ifdef FEX_IOS_HOST
++    Ptrs.DispatcherCbEntryLog = reinterpret_cast<uint64_t>(&IosCbEntryLog[0]);
++#endif
+ 
+     // Fill in the fallback handlers
+     InterpreterOps::FillFallbackIndexPointers(Ptrs.FallbackHandlerPointers, &ABIPointers[0]);
+@@ -2962,6 +2989,79 @@ SignalDelegatorConfig Dispatcher::MakeSignalDelegatorConfig() const {
+   };
+ }
+ 
++void Dispatcher::DumpCode() {
++  // WinPad: input of tools/cache2macho --dispatcher, which puts the code into the AOT image
++  FEX_CONFIG_OPT(DumpDispatcher, DUMPDISPATCHER);
++  if (DumpDispatcher().empty()) {
++    return;
++  }
++  const auto Size = End - reinterpret_cast<uint64_t>(GetBufferBase());
++  auto* File = fopen(DumpDispatcher().c_str(), "wb");
++  if (!File || fwrite(GetBufferBase(), 1, Size, File) != Size) {
++    LogMan::Msg::EFmt("[aot-dispatcher] failed to write dispatcher code to {}", DumpDispatcher());
++  } else {
++    LogMan::Msg::EFmt("[aot-dispatcher] wrote {} bytes of dispatcher code to {}", Size, DumpDispatcher());
++  }
++  if (File) {
++    fclose(File);
++  }
++}
++
++bool Dispatcher::UseStaticCode() {
++  // The image holds the dispatcher as dumped with DumpDispatcher. Its code has no absolute
++  // addresses, so it is only used if it is byte for byte what this FEX build and configuration
++  // just generated; then every entry point moves to the image's copy.
++  const auto* Entry = FEXCore::AOTIndex::Find(FEXCore::AOTIndex::DispatcherFileId, FEXCore::AOTIndex::DispatcherConfigId);
++  if (!Entry) {
++    return false;
++  }
++  struct {
++    char Magic[4];
++    uint32_t Version;
++    uint64_t Size;
++  } Header {};
++  memcpy(&Header, Entry->Meta, sizeof(Header));
++  const auto Base = reinterpret_cast<uint64_t>(GetBufferBase());
++  const auto Size = End - Base;
++  if (memcmp(Header.Magic, "FXAD", 4) != 0 || Header.Version != 1) {
++    LogMan::Msg::EFmt("[aot-dispatcher] invalid dispatcher header in the AOT image; generating it");
++    return false;
++  }
++  if (Header.Size != Size || memcmp(Entry->Text, GetBufferBase(), Size) != 0) {
++    size_t FirstDiff = 0;
++    while (FirstDiff < std::min<uint64_t>(Size, Header.Size) && Entry->Text[FirstDiff] == reinterpret_cast<const std::byte*>(GetBufferBase())[FirstDiff]) {
++      ++FirstDiff;
++    }
++    LogMan::Msg::EFmt("[aot-dispatcher] image's dispatcher ({} bytes) differs from this build and configuration ({} bytes) at {:#x}; "
++                      "generating it",
++                      Header.Size, Size, FirstDiff);
++    return false;
++  }
++
++  const auto Delta = reinterpret_cast<uint64_t>(Entry->Text) - Base;
++  auto Move = [Delta](uint64_t& Address) {
++    if (Address) {
++      Address += Delta;
++    }
++  };
++  DispatchPtr = reinterpret_cast<AsmDispatch>(reinterpret_cast<uint64_t>(DispatchPtr) + Delta);
++  CallbackPtr = reinterpret_cast<JITCallback>(reinterpret_cast<uint64_t>(CallbackPtr) + Delta);
++  for (auto* Address :
++       {&ThreadStopHandlerAddress, &ThreadStopHandlerAddressSpillSRA, &AbsoluteLoopTopAddress, &AbsoluteLoopTopAddressFillSRA,
++        &AbsoluteLoopTopAddressEnterEC, &AbsoluteLoopTopAddressEnterECFillSRA, &ThreadPauseHandlerAddress, &ThreadPauseHandlerAddressSpillSRA,
++        &ExitFunctionLinkerAddress, &SignalHandlerReturnAddress, &SignalHandlerReturnAddressRT, &GuestSignal_SIGILL, &GuestSignal_SIGTRAP,
++        &GuestSignal_SIGSEGV, &PauseReturnInstruction, &Start, &End, &LUDIVHandlerAddress, &LDIVHandlerAddress, &F64SinHandlerAddress,
++        &F64CosHandlerAddress, &F64TanHandlerAddress, &F64F2XM1HandlerAddress, &F64ScaleHandlerAddress, &F64AtanHandlerAddress,
++        &F64FYL2XHandlerAddress, &F64FYL2XP1HandlerAddress, &F64FPREMHandlerAddress, &F64FPREM1HandlerAddress}) {
++    Move(*Address);
++  }
++  for (auto& Address : ABIPointers) {
++    Move(Address);
++  }
++  LogMan::Msg::EFmt("[aot-dispatcher] static code from the AOT image, {} bytes at {}", Size, static_cast<const void*>(Entry->Text));
++  return true;
++}
++
+ fextl::unique_ptr<Dispatcher> Dispatcher::Create(FEXCore::Context::ContextImpl* CTX) {
+   return fextl::make_unique<Dispatcher>(CTX);
+ }
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
+index b0f3d7a..9d8ab23 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.h
+@@ -112,6 +112,8 @@ private:
+   uint64_t F64FPREM1HandlerAddress {};
+ 
+   void EmitDispatcher();
++  void DumpCode();
++  bool UseStaticCode();
+   uint64_t GenerateABICall(FallbackABI ABI);
+ 
+   // Inline softfloat conversion emitters - avoid FPCR save/restore overhead
+diff --git a/FEXCore/include/FEXCore/Core/AOTIndex.h b/FEXCore/include/FEXCore/Core/AOTIndex.h
+new file mode 100644
+index 0000000..b454298
+--- /dev/null
++++ b/FEXCore/include/FEXCore/Core/AOTIndex.h
+@@ -0,0 +1,66 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++// WinPad: index of an AOT image, code built ahead of time and linked into the app
++// (tools/cache2macho, index from tools/cache2macho/aotindex.py). The host publishes its
++// address in WINE_IOS_AOT_INDEX; the code is in the app's signed text and runs in place.
++#include <FEXCore/Utils/LogManager.h>
++
++#include <cstdint>
++#include <cstdlib>
++#include <cstring>
++
++namespace FEXCore::AOTIndex {
++struct Entry {
++  uint64_t FileId;
++  uint64_t ConfigId;
++  const std::byte* Meta;
++  std::byte* Text;
++  std::byte* Data;
++};
++
++struct Index {
++  char Magic[4];
++  uint32_t Version;
++  uint64_t NumEntries;
++  // Followed by NumEntries Entry
++
++  const Entry* Entries() const {
++    return reinterpret_cast<const Entry*>(this + 1);
++  }
++};
++static_assert(sizeof(Index) == 16 && sizeof(Entry) == 40);
++
++// The dispatcher's entry: file id 0, this config id; Meta is its "FXAD" header, Data is unused.
++constexpr uint64_t DispatcherFileId = 0;
++constexpr uint64_t DispatcherConfigId = ~0ULL;
++
++inline const Index* Get() {
++  static const Index* Result = []() -> const Index* {
++    const char* Env = getenv("WINE_IOS_AOT_INDEX");
++    if (!Env || !*Env) {
++      return nullptr;
++    }
++    auto* Index = reinterpret_cast<const AOTIndex::Index*>(strtoull(Env, nullptr, 16));
++    if (!Index || memcmp(Index->Magic, "FXAI", 4) != 0 || Index->Version != 1) {
++      LogMan::Msg::EFmt("[aot-image] WINE_IOS_AOT_INDEX={} is not an AOT image index", Env);
++      return nullptr;
++    }
++    LogMan::Msg::EFmt("[aot-image] index at {}: {} entries", static_cast<const void*>(Index), Index->NumEntries);
++    return Index;
++  }();
++  return Result;
++}
++
++inline const Entry* Find(uint64_t FileId, uint64_t ConfigId) {
++  const auto* Index = Get();
++  if (!Index) {
++    return nullptr;
++  }
++  for (uint64_t i = 0; i < Index->NumEntries; ++i) {
++    if (Index->Entries()[i].FileId == FileId && Index->Entries()[i].ConfigId == ConfigId) {
++      return &Index->Entries()[i];
++    }
++  }
++  return nullptr;
++}
++} // namespace FEXCore::AOTIndex
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index a00f4f0..f62717a 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -392,6 +392,13 @@ struct JITPointers {
+   uint64_t F64FYL2XP1Handler {};
+   uint64_t F64FPREMHandler {};
+   uint64_t F64FPREM1Handler {};
++  // WinPad: values the dispatcher uses; kept here instead of in its code so that
++  // the dispatcher's code is the same in every process (see Dispatcher::UseStaticCode)
++  uint64_t DispatcherCTX {};
++  uint64_t DispatcherSleepThread {};
++  uint64_t DispatcherCompileBlock {};
++  uint64_t DispatcherCompileSingleStep {};
++  uint64_t DispatcherCbEntryLog {}; // iOS: IosCbEntryLog
+   /**  @} */
+ 
+   // Copy of process-wide named vector constants data.
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index 5205cdc..eb25e23 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -9,6 +9,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ 
++#include <FEXCore/Core/AOTIndex.h>
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
+ #include <FEXCore/HLE/SourcecodeResolver.h>
+@@ -248,60 +249,12 @@ int ImageTracker::OpenCodeMapFile() {
+ // (the name the Linux frontend loads, config id 0). The whole file goes into executable JIT-pool
+ // memory: on Windows FEXCore runs the cached code where the file was loaded and applies its
+ // relocations there (through the pool's RW alias, see FinalizeCodePages).
+-// WinPad: caches linked into the app (tools/cache2macho, index from tools/cache2macho/aotindex.py).
+-// The host publishes the address of the image's index in WINE_IOS_AOT_INDEX; its code is in the
+-// app's signed text and is run in place, never copied or written.
+-namespace {
+-struct AOTIndexEntry {
+-  uint64_t FileId;
+-  uint64_t ConfigId;
+-  const std::byte* Meta;
+-  std::byte* Text;
+-  std::byte* Data;
+-};
+-
+-struct AOTIndex {
+-  char Magic[4];
+-  uint32_t Version;
+-  uint64_t NumEntries;
+-  // Followed by NumEntries AOTIndexEntry
+-
+-  const AOTIndexEntry* Entries() const {
+-    return reinterpret_cast<const AOTIndexEntry*>(this + 1);
+-  }
+-};
+-static_assert(sizeof(AOTIndex) == 16 && sizeof(AOTIndexEntry) == 40);
+-
+-const AOTIndex* GetAOTIndex() {
+-  static const AOTIndex* Index = []() -> const AOTIndex* {
+-    const char* Env = getenv("WINE_IOS_AOT_INDEX");
+-    if (!Env || !*Env) {
+-      return nullptr;
+-    }
+-    auto* Index = reinterpret_cast<const AOTIndex*>(strtoull(Env, nullptr, 16));
+-    if (!Index || memcmp(Index->Magic, "FXAI", 4) != 0 || Index->Version != 1) {
+-      LogMan::Msg::EFmt("[aot-image] WINE_IOS_AOT_INDEX={} is not an AOT image index", Env);
+-      return nullptr;
+-    }
+-    LogMan::Msg::EFmt("[aot-image] index at {}: {} caches", fmt::ptr(Index), Index->NumEntries);
+-    return Index;
+-  }();
+-  return Index;
+-}
+-} // namespace
+-
++// WinPad: caches linked into the app (FEXCore/Core/AOTIndex.h).
+ bool ImageTracker::LoadLinkedImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size) {
+-  const auto* Index = GetAOTIndex();
+-  if (!Index) {
++  if (!FEXCore::AOTIndex::Get()) {
+     return false;
+   }
+-  const AOTIndexEntry* Entry = nullptr;
+-  for (uint64_t i = 0; i < Index->NumEntries; ++i) {
+-    if (Index->Entries()[i].FileId == Image.Info.FileId && Index->Entries()[i].ConfigId == 0) {
+-      Entry = &Index->Entries()[i];
+-      break;
+-    }
+-  }
++  const auto* Entry = FEXCore::AOTIndex::Find(Image.Info.FileId, 0);
+   if (!Entry) {
+     LogMan::Msg::EFmt("[aot-image] no linked cache for {}", ID);
+     return false;
