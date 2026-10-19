@@ -15,6 +15,9 @@
 // (tools/cache2macho); its index goes to FEX as WINE_IOS_AOT_INDEX.
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
 // came up. Whatever Wine does in the meantime goes to stderr.
+// Built with -DWINEHOST_LIBRARY it has no main: an app calls winehost_main
+// (tests/wine-app), and with WINEHOST_RETURN=1 that returns at the end
+// instead of ending the process.
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
@@ -417,7 +420,16 @@ static int start(void* (*fn)(void*), size_t stack) {
   return ret;
 }
 
-int main(int argc, char* argv[]) {
+// The end of a run: the command-line host ends the process (Wine's threads
+// would keep it alive), an app keeps running.
+static int finish(void) {
+  fflush(stderr);
+  const char* ret = getenv("WINEHOST_RETURN");
+  if (ret && !strcmp(ret, "1")) return 0;
+  _exit(0);
+}
+
+int winehost_main(int argc, char* argv[]) {
   setvbuf(stdout, NULL, _IONBF, 0);
   if (argc < 3) {
     fprintf(stderr, "usage: winehost SECONDS PROGRAM [ARGS...]\n");
@@ -503,12 +515,14 @@ int main(int argc, char* argv[]) {
       if (!done_at) done_at = now();
       if (now() - done_at >= 2) {
         printf("winehost: done after %.0f s, exiting\n", now() - begin);
-        fflush(stderr);
-        _exit(0);
+        return finish();
       }
     }
   }
   printf("winehost: %d s passed, exiting\n", seconds);
-  fflush(stderr);
-  _exit(0);
+  return finish();
 }
+
+#ifndef WINEHOST_LIBRARY
+int main(int argc, char* argv[]) { return winehost_main(argc, argv); }
+#endif

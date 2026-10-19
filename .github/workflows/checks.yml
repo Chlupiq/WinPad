@@ -160,7 +160,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: brew install bison flex llvm lld
+        run: brew install bison flex llvm lld xcodegen
       - name: Newest Xcode (Madeira's server_ios.c needs the iOS 26 SDK)
         run: |
           ls -d /Applications/Xcode_*.app
@@ -338,6 +338,21 @@ jobs:
           WINEHOST_FEX_CODEMAP: 1
           WINEHOST_FEX_ALL_CACHED: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+      - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
+        run: |
+          sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos
+          cp "$RUNNER_TEMP/xtajit/xtajit.dll" "$RUNNER_TEMP/wine-loader/modules-iphoneos/aarch64-windows/xtajit.dll"
+          sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos \
+            "$RUNNER_TEMP/wine-loader/modules-iphoneos/aarch64-windows/xtajit.dll"
+      - name: The x86 program in Wine in an iPad app (Xcode project), run on an iPad simulator
+        run: |
+          sh tests/wine-app/build-xcode.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/fexaot/fexaot.dylib" \
+            "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" "$RUNNER_TEMP/wine-app"
+      - name: Upload the Xcode project of the Wine app
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinPadWine-xcode
+          path: ${{ runner.temp }}/wine-app/WinPadWine-xcode
       - name: FEX code map and code caches of the x86 run
         if: always()
         uses: actions/upload-artifact@v4
