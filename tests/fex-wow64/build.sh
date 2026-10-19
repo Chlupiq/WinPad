@@ -43,16 +43,18 @@ for p in "$(cd "$(dirname "$0")" && pwd)"/../../patches/fex-wow64/*.patch; do
 done
 
 b="$work/build-wow64"
-if [ ! -f "$b/CMakeCache.txt" ]; then
-    cmake -S "$src" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_TOOLCHAIN_FILE="$src/Data/CMake/toolchain_mingw.cmake" \
-        -DMINGW_TRIPLE=aarch64-w64-mingw32 \
-        -DFEX_IOS_HOST_BUILD=ON -DCMAKE_C_FLAGS=-DFEX_IOS_HOST \
-        -DCMAKE_CXX_FLAGS=-DFEX_IOS_HOST -DCMAKE_ASM_FLAGS=-DFEX_IOS_HOST \
-        -DENABLE_LTO=OFF -DENABLE_ASSERTIONS=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF \
-        -DBUILD_TESTING=OFF -DBUILD_FEXCONFIG=OFF -DTUNE_ARCH=generic -DTUNE_CPU=none \
-        -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-fi
+# Configured every time, so that a build restored from an older cache gets
+# today's options. 16 KiB sections let tools/pe2macho wrap xtajit.dll into a
+# dylib (iOS pages are 16 KiB).
+cmake -S "$src" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_TOOLCHAIN_FILE="$src/Data/CMake/toolchain_mingw.cmake" \
+    -DMINGW_TRIPLE=aarch64-w64-mingw32 \
+    -DFEX_IOS_HOST_BUILD=ON -DCMAKE_C_FLAGS=-DFEX_IOS_HOST \
+    -DCMAKE_CXX_FLAGS=-DFEX_IOS_HOST -DCMAKE_ASM_FLAGS=-DFEX_IOS_HOST \
+    -DENABLE_LTO=OFF -DENABLE_ASSERTIONS=OFF -DENABLE_JEMALLOC_GLIBC_ALLOC=OFF \
+    -DBUILD_TESTING=OFF -DBUILD_FEXCONFIG=OFF -DTUNE_ARCH=generic -DTUNE_CPU=none \
+    -DCMAKE_SHARED_LINKER_FLAGS=-Wl,--section-alignment,16384 \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build "$b" --target wow64fex FEXOfflineCompiler
 cp "$b/Bin/libwow64fex.dll" "$work/xtajit.dll"
 cp "$b/Bin/FEXOfflineCompiler.exe" "$work/FEXOfflineCompiler.exe"

@@ -268,10 +268,19 @@ jobs:
           path: ${{ runner.temp }}/xtajit
       - name: Use it in place of Madeira's prebuilt xtajit.dll
         run: cp "$RUNNER_TEMP/xtajit/xtajit.dll" "$RUNNER_TEMP/wine-loader/modules-iphonesimulator/aarch64-windows/xtajit.dll"
+      - name: That xtajit.dll is wrapped into a dylib like the other modules, so Wine runs it from there and not from the JIT pool
+        run: |
+          sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphonesimulator \
+            "$RUNNER_TEMP/wine-loader/modules-iphonesimulator/aarch64-windows/xtajit.dll"
+          test -f "$RUNNER_TEMP/wine-loader/modules-iphonesimulator/aarch64-windows/xtajit.dll.dylib"
       - name: A 32-bit x86 program runs in Wine through WoW64 and FEX on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
-          WINEHOST_WINEDEBUG: +loaddll
+          # +module shows Wine taking xtajit.dll over from its dylib. It is left out
+          # of the cached runs below: its traces run guest code of its own.
+          WINEHOST_WINEDEBUG: +loaddll,+module
+          WINEHOST_EXPECT_LOG: |
+            xtajit.dll.dylib" at
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
