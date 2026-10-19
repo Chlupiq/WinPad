@@ -276,7 +276,11 @@ jobs:
       - name: A 32-bit x86 program runs in Wine through WoW64 and FEX on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
-          WINEHOST_WINEDEBUG: +loaddll
+          # +module shows Wine taking xtajit.dll over from its dylib. It is left out
+          # of the cached runs below: its traces run guest code of its own.
+          WINEHOST_WINEDEBUG: +loaddll,+module
+          WINEHOST_EXPECT_LOG: |
+            xtajit.dll.dylib" at
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
@@ -314,10 +318,7 @@ jobs:
           # mapped it; there are no cache files in this cache directory. The dispatcher
           # it generates matches the image's copy, so that copy runs instead.
           WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot/fexaot.dylib
-          # +module shows Wine taking xtajit.dll over from its dylib.
-          WINEHOST_WINEDEBUG: +loaddll,+module
           WINEHOST_EXPECT_LOG: |
-            xtajit.dll.dylib" at
             [aot-image] index at
             [aot-image] linked: code
             [aot-image] loaded linked cache for
