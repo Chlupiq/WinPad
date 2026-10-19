@@ -127,6 +127,11 @@ class WoW64Test(unittest.TestCase):
         for sym in ("meta", "text", "data"):
             self.assertIn(f"\t.quad _fexaot_{fid}_{cid}_{sym}\n", asm)
 
+    def test_index_with_dispatcher(self):
+        asm = aotindex.index_asm([("0123456789abcdef", "0" * 16)], dispatcher=True)
+        self.assertIn("\t.quad 2\n", asm)
+        self.assertIn("\t.quad 0xffffffffffffffff\n\t.quad _fexaot_dispatcher_meta\n\t.quad _fexaot_dispatcher_text\n", asm)
+
 
 if __name__ == "__main__":
     unittest.main()

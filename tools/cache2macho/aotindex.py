@@ -13,7 +13,11 @@ Layout (little-endian, 8-byte aligned):
   u64 file id, u64 config id, meta pointer, text pointer, data pointer.
 The pointers are absolute; dyld fixes them up when the image is loaded.
 
-Usage: aotindex.py OUT.s CACHE_FILE...
+With --dispatcher the image also holds FEX's dispatcher (cache2macho
+--dispatcher): its entry has file id 0 and config id ~0, meta pointing at its
+"FXAD" header, text at its code and data 0.
+
+Usage: aotindex.py [--dispatcher] OUT.s CACHE_FILE...
 Each cache file name ends in -<file id>-<config id>, as cache2macho expects.
 """
 import os
@@ -28,9 +32,15 @@ def entry(path):
     return m.group(1), m.group(2)
 
 
-def index_asm(entries):
+DISPATCHER_CONFIG_ID = "f" * 16
+
+
+def index_asm(entries, dispatcher=False):
     out = ["\t.section __DATA,__fexaot_index", "\t.globl _fexaot_index", "\t.p2align 3", "_fexaot_index:",
-           '\t.ascii "FXAI"', "\t.long 1", f"\t.quad {len(entries)}"]
+           '\t.ascii "FXAI"', "\t.long 1", f"\t.quad {len(entries) + dispatcher}"]
+    if dispatcher:
+        out += ["\t.quad 0", f"\t.quad 0x{DISPATCHER_CONFIG_ID}",
+                "\t.quad _fexaot_dispatcher_meta", "\t.quad _fexaot_dispatcher_text", "\t.quad 0"]
     for file_id, config_id in entries:
         prefix = f"_fexaot_{file_id}_{config_id}"
         out += [f"\t.quad 0x{file_id}", f"\t.quad 0x{config_id}",
@@ -39,14 +49,18 @@ def index_asm(entries):
 
 
 def main():
-    if len(sys.argv) < 3:
+    args = sys.argv[1:]
+    dispatcher = bool(args) and args[0] == "--dispatcher"
+    if dispatcher:
+        args = args[1:]
+    if len(args) < 2:
         raise SystemExit(__doc__.strip().splitlines()[-2])
-    entries = [entry(p) for p in sys.argv[2:]]
+    entries = [entry(p) for p in args[1:]]
     if len(set(entries)) != len(entries):
         raise SystemExit("two caches with the same file id and config id")
-    with open(sys.argv[1], "w") as f:
-        f.write(index_asm(entries))
-    print(f"{sys.argv[1]}: index of {len(entries)} caches")
+    with open(args[0], "w") as f:
+        f.write(index_asm(entries, dispatcher))
+    print(f"{args[0]}: index of {len(entries)} caches" + (" and the dispatcher" if dispatcher else ""))
 
 
 if __name__ == "__main__":
