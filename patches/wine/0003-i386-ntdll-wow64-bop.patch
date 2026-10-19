@@ -1,0 +1,44 @@
+WinPad: an exported i386 ntdll function holding the WoW64 BOP instructions.
+
+FEX's WoW64 module takes the 32-bit side's system calls and unix calls through
+two `int $0x2e` instructions. It wrote them into a page it allocated, which no
+AOT code cache can hold, so with NoJIT the first system call stopped FEX.
+__wine_wow64_bop puts them in ntdll's .text; patches/fex-wow64/0013 uses it.
+
+Applies to willfaust/wine at 257f271 (Madeira's wine submodule).
+---
+diff --git a/dlls/ntdll/ntdll.spec b/dlls/ntdll/ntdll.spec
+index 2b3fa54..9314e9c 100644
+--- a/dlls/ntdll/ntdll.spec
++++ b/dlls/ntdll/ntdll.spec
+@@ -1753,6 +1753,7 @@
+ @ extern -private __wine_syscall_dispatcher
+ @ extern -private __wine_unix_call_dispatcher
+ @ extern -private -arch=arm64ec __wine_unix_call_dispatcher_arm64ec
++@ cdecl -private -arch=i386 __wine_wow64_bop()
+ @ extern -private -arch=arm64ec p_ios_jit_translate_addr
+ @ extern -private -arch=arm64,arm64ec p_ios_jit_reverse_translate_addr
+ @ extern -private ios_teb_tsd_offset
+diff --git a/dlls/ntdll/signal_i386.c b/dlls/ntdll/signal_i386.c
+index 8a9a775..a19e1b9 100644
+--- a/dlls/ntdll/signal_i386.c
++++ b/dlls/ntdll/signal_i386.c
+@@ -196,6 +196,18 @@ __ASM_STDCALL_FUNC( KiUserApcDispatcher, 20,
+                     "int3" )
+ 
+ 
++/*******************************************************************
++ *		__wine_wow64_bop (NTDLL.@)
++ *
++ * WinPad: the x86 code a WoW64 CPU module takes system calls (offset 0) and
++ * unix calls (offset 2) through, so that it lies in a file-backed image whose
++ * code an ahead-of-time compiled cache can hold.
++ */
++__ASM_GLOBAL_FUNC( __wine_wow64_bop,
++                   "int $0x2e\n\t"
++                   "int $0x2e" )
++
++
+ /*******************************************************************
+  *		KiUserCallbackDispatcher (NTDLL.@)
+  */

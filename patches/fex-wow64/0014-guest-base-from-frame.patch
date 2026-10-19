@@ -1,0 +1,62 @@
+Load the guest window's base from the thread, not from the code (FEX 3bec2ac, on top of 0013)
+
+FillStaticRegs reloads REG_GUEST_BASE (x19) on every JIT entry and after
+every call out of a block, and it did so with a constant: the base of
+the guest window of the process that compiled the code. Code from an
+AOT code cache or the static dispatcher was compiled by the offline
+compiler, whose window sits at a different host address than the one
+in the process that runs it. Once system call blocks came from the
+caches (0013), the first block after a system call put the compiler's
+base in x19 and the next guest memory access faulted.
+
+The base now lives in the thread's JITPointers (Pointers.GuestBase,
+set in InitThreadPointers) and LoadGuestBaseReg loads it with one ldr
+from the state frame, so cached code runs with any process's window.
+
+diff --git a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+index 58bdcfa..2ffb7e2 100644
+--- a/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
++++ b/FEXCore/Source/Interface/Core/ArchHelpers/Arm64Emitter.cpp
+@@ -456,14 +456,15 @@ Arm64Emitter::Arm64Emitter(FEXCore::Context::ContextImpl* ctx, void* EmissionPtr
+ #ifdef FEX_GUEST_WINDOW
+ // Materialise REG_GUEST_BASE. Called from FillStaticRegs, which every JIT entry and re-entry path
+ // goes through, including the ones that resume from a CONTEXT that may predate the register being
+-// set up. x19 is callee-saved, so this is redundant after an ordinary host call; a 4GiB-aligned
+-// window encodes as a single movz.
++// set up. x19 is callee-saved, so this is redundant after an ordinary host call.
++// WinPad: loaded from the thread's JITPointers rather than encoded in the code, so that code
++// compiled ahead of time (AOT caches, the static dispatcher) runs with any process's window.
+ void Arm64Emitter::LoadGuestBaseReg() {
+   if (!GuestBase) {
+     return;
+   }
+ 
+-  LoadConstant(ARMEmitter::Size::i64Bit, REG_GUEST_BASE.R(), GuestBase);
++  ldr(REG_GUEST_BASE, STATE.R(), offsetof(FEXCore::Core::CpuStateFrame, Pointers.GuestBase));
+ }
+ #endif
+ 
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index c81cc60..e8cc73a 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -2952,6 +2952,7 @@ void Dispatcher::InitThreadPointers(FEXCore::Core::InternalThreadState* Thread)
+ #ifdef FEX_IOS_HOST
+     Ptrs.DispatcherCbEntryLog = reinterpret_cast<uint64_t>(&IosCbEntryLog[0]);
+ #endif
++    Ptrs.GuestBase = CTX->Config.GuestBase;
+ 
+     // Fill in the fallback handlers
+     InterpreterOps::FillFallbackIndexPointers(Ptrs.FallbackHandlerPointers, &ABIPointers[0]);
+diff --git a/FEXCore/include/FEXCore/Core/CoreState.h b/FEXCore/include/FEXCore/Core/CoreState.h
+index f62717a..2aaac6c 100644
+--- a/FEXCore/include/FEXCore/Core/CoreState.h
++++ b/FEXCore/include/FEXCore/Core/CoreState.h
+@@ -399,6 +399,7 @@ struct JITPointers {
+   uint64_t DispatcherCompileBlock {};
+   uint64_t DispatcherCompileSingleStep {};
+   uint64_t DispatcherCbEntryLog {}; // iOS: IosCbEntryLog
++  uint64_t GuestBase {};            // the guest window's base (REG_GUEST_BASE), see LoadGuestBaseReg
+   /**  @} */
+ 
+   // Copy of process-wide named vector constants data.

@@ -135,7 +135,8 @@ fi
 # by runs. With WINEHOST_FEX_CODEMAP=1, FEX records there which blocks of the
 # x86 code it compiled (a code map, the input of its offline compiler).
 # WINEHOST_AOT_IMAGE=DYLIB gives FEX code caches linked into a dylib instead
-# (tests/fex-wow64/build-aot-image.sh); the host loads it.
+# (tests/fex-wow64/build-aot-image.sh); the host loads it. With
+# WINEHOST_FEX_NOJIT=1 FEX runs only that image and makes no memory executable.
 fex_codemap=
 fex_cache=
 fex_dump_dispatcher=
@@ -163,7 +164,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_FEX_ENABLECODECACHINGWIP="${fex_codemap:-0}" SIMCTL_CHILD_FEX_APP_CACHE_LOCATION="$fex_cache" \
     SIMCTL_CHILD_WINEHOST_JIT="${WINEHOST_JIT:-}" \
     SIMCTL_CHILD_WINEHOST_AOT_IMAGE="${WINEHOST_AOT_IMAGE:-}" \
-    SIMCTL_CHILD_FEX_DUMPDISPATCHER="$fex_dump_dispatcher" \
+    SIMCTL_CHILD_FEX_DUMPDISPATCHER="$fex_dump_dispatcher" SIMCTL_CHILD_FEX_NOJIT="${WINEHOST_FEX_NOJIT:-0}" \
     SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &

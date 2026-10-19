@@ -1,0 +1,78 @@
+Write the code map when the process itself ends (FEX 3bec2ac, on top of 0015)
+
+ExitProcess first calls NtTerminateProcess with a null handle, which
+only ends the other threads, and then runs exit code in 32-bit ntdll
+(LdrShutdownProcess) before NtTerminateProcess(NtCurrentProcess()).
+wow64.dll calls BTCpuProcessTerm only for the null handle, so the code
+map was written and closed before that exit code ran. Its blocks were
+never recorded or cached, and with NoJIT the run stopped on them after
+the program had finished ("NoJIT: guest block 0xffdcb590 is not in the
+AOT image").
+
+BTCpuProcessInit reads the system call number from the 32-bit
+NtTerminateProcess stub (`movl $id, %eax`) and logs "[wow-exit] the
+code map is written at NtTerminateProcess". The system call handler
+then writes the map when that call ends the current process.
+BTCpuProcessTerm still writes it when the number is unknown.
+
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index d628de4..df15c94 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -347,6 +347,10 @@ namespace BridgeInstrs {
+   void* UnixCall {};
+ } // namespace BridgeInstrs
+ 
++// WinPad: the system call number of the 32-bit NtTerminateProcess, or ~0U when unknown. See
++// BTCpuProcessTerm for why the code map waits for it.
++uint32_t NtTerminateProcessId {~0U};
++
+ // WinPad: RVA of an export of a 32-bit PE image mapped at Image (a host address), or 0.
+ uint32_t FindX86ExportRva(uint64_t Image, const char* Name) {
+   const auto* Dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(Image);
+@@ -912,6 +916,13 @@ public:
+     } else if (Frame->State.rip == (uint64_t)BridgeInstrs::Syscall) {
+       const uint64_t EntryRAX = Frame->State.gregs[FEXCore::X86State::REG_RAX];
+ 
++      // WinPad: NtTerminateProcess(NtCurrentProcess()) ends the process: the last chance to write
++      // the code map, now that ntdll's exit code has run.
++      if (static_cast<uint32_t>(EntryRAX) == NtTerminateProcessId &&
++          *reinterpret_cast<uint32_t*>(GuestWindow::ToHost(ReturnRSP + 4)) == 0xffffffffU && CTX) {
++        CTX->FlushAndCloseCodeMap();
++      }
++
+       const auto TLS = GetTLS();
+ #ifdef FEX_IOS_HOST
+       Context::FlushCpuAreaForExit(TLS); // MADEIRA: see ConsumeCpuAreaReset
+@@ -1441,6 +1452,19 @@ void BTCpuProcessInit() {
+   BridgeGuest = GuestWindow::ToGuest(BridgeHost);
+   }
+   BridgeInstrs::Syscall = reinterpret_cast<void*>(BridgeGuest);
++
++  // WinPad: the 32-bit syscall stubs start with `movl $id, %eax` (b8 imm32), after a
++  // `call 1f; popl %eax; movl disp(%eax), %edx` prologue (11 bytes) when ntdll is PIC.
++  if (const uint32_t Rva = NtDllX86Guest ? FindX86ExportRva(NtDllX86, "NtTerminateProcess") : 0) {
++    const auto* Stub = reinterpret_cast<const uint8_t*>(NtDllX86 + Rva);
++    for (const size_t At : {size_t {0}, size_t {11}}) {
++      if (Stub[At] == 0xb8) {
++        memcpy(&NtTerminateProcessId, Stub + At + 1, sizeof(NtTerminateProcessId));
++        LogMan::Msg::EFmt("[wow-exit] the code map is written at NtTerminateProcess (system call {:#x})", NtTerminateProcessId);
++        break;
++      }
++    }
++  }
+   BridgeInstrs::UnixCall = reinterpret_cast<void*>(BridgeGuest + 2);
+ 
+   const auto Sym = GetProcAddress(NtDll, "__wine_unix_call_dispatcher");
+@@ -1470,7 +1494,10 @@ void BTCpuProcessInit() {
+ void BTCpuProcessTerm(HANDLE Handle, BOOL After, ULONG Status) {
+   // WinPad: the code map is buffered and only written out when its writer is destroyed, which a
+   // terminating process never does. Write it before Wine terminates the process.
+-  if (!After && CTX) {
++  // A null handle only ends the other threads, and ntdll then runs exit code (LdrShutdownProcess)
++  // whose blocks the map must hold too, so when the NtTerminateProcess number is known the map
++  // waits for the call that ends the process itself (see HandleSyscallImpl).
++  if (!After && CTX && NtTerminateProcessId == ~0U) {
+     CTX->FlushAndCloseCodeMap();
+   }
+ }
