@@ -13,7 +13,7 @@ Needs tools/pe2macho/pe_adopt.h on the include path.
 Applies to willfaust/Madeira at 48f9764.
 ---
 diff --git a/build/ntdll-unix/loader_ios.c b/build/ntdll-unix/loader_ios.c
-index b59b458..c545ea8 100644
+index b59b458..15f0ed9 100644
 --- a/build/ntdll-unix/loader_ios.c
 +++ b/build/ntdll-unix/loader_ios.c
 @@ -97,6 +97,7 @@
@@ -24,6 +24,15 @@ index b59b458..c545ea8 100644
  #endif
  
  WINE_DEFAULT_DEBUG_CHANNEL(module);
+@@ -622,7 +623,7 @@ static void set_dll_path(void)
+ static void set_system_dll_path(void)
+ {
+     const char *p, *path = SYSTEMDLLPATH;
+-    int count = 0;
++    unsigned int count = 0;
+ 
+     if (path && *path) for (p = path, count = 1; *p; p++) if (*p == ':') count++;
+ 
 @@ -926,6 +927,9 @@ static void fixup_so_resources( IMAGE_RESOURCE_DIRECTORY *dir, BYTE *root, int d
      }
  }
@@ -132,7 +141,7 @@ index b59b458..c545ea8 100644
      status = open_dll_file( name, attr, &mapping );
      if (!status)
      {
-@@ -1678,6 +1759,59 @@ done:
+@@ -1678,6 +1759,70 @@ done:
  }
  
  
@@ -141,48 +150,59 @@ index b59b458..c545ea8 100644
 + *           find_builtin_pe_dylib
 + *
 + * WinPad: look for the dylib of a module the PE loader found as a file,
-+ * NAME.dylib in a DLL directory, and take the module over from there. Only
-+ * dylibs: load_builtin keeps the PE file the caller found otherwise.
++ * NAME.dylib in a DLL directory, and take the module over from there. NAME
++ * is the module's export name, then its file name when that differs (FEX's
++ * libwow64fex.dll ships as xtajit.dll). Only dylibs: load_builtin keeps the
++ * PE file the caller found otherwise.
 + */
 +static NTSTATUS find_builtin_pe_dylib( UNICODE_STRING *nt_name, ANSI_STRING *exp_name, void **module,
 +                                       SIZE_T *size, SECTION_IMAGE_INFORMATION *info,
 +                                       USHORT search_machine, USHORT load_machine )
 +{
 +    const char *pe_dir = get_pe_dir( search_machine );
-+    unsigned int i, len, namepos = 0;
-+    char name[256], path[PATH_MAX];
++    unsigned int i, j, len, namepos = 0;
++    char names[2][256], path[PATH_MAX];
 +    OBJECT_ATTRIBUTES attr;
 +    NTSTATUS status;
++    unsigned int count = 0;
 +
 +    InitializeObjectAttributes( &attr, nt_name, 0, 0, NULL );
-+    if (exp_name && exp_name->Length)
++    if (exp_name && exp_name->Length && exp_name->Length < sizeof(names[0]))
 +    {
-+        if ((len = exp_name->Length) >= sizeof(name)) return STATUS_DLL_NOT_FOUND;
-+        memcpy( name, exp_name->Buffer, len );
++        memcpy( names[count], exp_name->Buffer, exp_name->Length );
++        names[count++][exp_name->Length] = 0;
 +    }
-+    else
++    len = nt_name->Length / sizeof(WCHAR);
++    for (i = 0; i < len; i++)
++        if (nt_name->Buffer[i] == '/' || nt_name->Buffer[i] == '\\') namepos = i + 1;
++    len -= namepos;
++    if (len && len < sizeof(names[0]))
 +    {
-+        len = nt_name->Length / sizeof(WCHAR);
-+        for (i = 0; i < len; i++)
-+            if (nt_name->Buffer[i] == '/' || nt_name->Buffer[i] == '\\') namepos = i + 1;
-+        len -= namepos;
-+        if (!len || len >= sizeof(name)) return STATUS_DLL_NOT_FOUND;
 +        for (i = 0; i < len; i++)
 +        {
-+            if (nt_name->Buffer[namepos + i] > 127) return STATUS_DLL_NOT_FOUND;
-+            name[i] = (char)nt_name->Buffer[namepos + i];
++            if (nt_name->Buffer[namepos + i] > 127) break;
++            names[count][i] = (char)nt_name->Buffer[namepos + i];
++        }
++        if (i == len)
++        {
++            names[count][len] = 0;
++            count++;
 +        }
 +    }
-+    name[len] = 0;
-+    for (i = 0; i < len; i++)
-+        if (name[i] >= 'A' && name[i] <= 'Z') name[i] += 'a' - 'A';
++    for (j = 0; j < count; j++)
++        for (i = 0; names[j][i]; i++)
++            if (names[j][i] >= 'A' && names[j][i] <= 'Z') names[j][i] += 'a' - 'A';
++    if (count == 2 && !strcmp( names[0], names[1] )) count = 1;
 +
-+    for (i = 0; dll_paths[i]; i++)
++    for (j = 0; j < count; j++)
 +    {
-+        if (snprintf( path, sizeof(path), "%s%s/%s", dll_paths[i], pe_dir, name ) >= (int)sizeof(path))
-+            continue;
-+        status = open_builtin_pe_dylib( path, &attr, module, size, info, load_machine, FALSE );
-+        if (status != STATUS_DLL_NOT_FOUND) return status;
++        for (i = 0; dll_paths[i]; i++)
++        {
++            if (snprintf( path, sizeof(path), "%s%s/%s", dll_paths[i], pe_dir, names[j] ) >= (int)sizeof(path))
++                continue;
++            status = open_builtin_pe_dylib( path, &attr, module, size, info, load_machine, FALSE );
++            if (status != STATUS_DLL_NOT_FOUND) return status;
++        }
 +    }
 +    return STATUS_DLL_NOT_FOUND;
 +}
@@ -192,7 +212,7 @@ index b59b458..c545ea8 100644
  /***********************************************************************
   *           load_builtin
   *
-@@ -1702,6 +1836,10 @@ NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *n
+@@ -1702,6 +1847,10 @@ NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *n
              return STATUS_DLL_NOT_FOUND;
          }
      }
