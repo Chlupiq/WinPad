@@ -224,7 +224,7 @@ index b59b458..15f0ed9 100644
       * Skip the builtin .so search — it causes mmap failures on iOS and
       * corrupts file descriptors.  Just tell the caller to use the PE file. */
 diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
-index 88eac4d..ee46193 100644
+index 88eac4d..de21e57 100644
 --- a/build/ntdll-unix/virtual_ios.c
 +++ b/build/ntdll-unix/virtual_ios.c
 @@ -8884,6 +8884,46 @@ void ios_wow_window_retire_current(void) { }
@@ -284,22 +284,38 @@ index 88eac4d..ee46193 100644
      if (builtin->handle) dlclose( builtin->handle );
      if (builtin->unix_handle) dlclose( builtin->unix_handle );
      free( builtin->unix_path );
-@@ -12095,6 +12138,9 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
+@@ -12095,6 +12138,11 @@ static int ios_guest_anon_rwx_is_host_data( const void *base, size_t size )
  static inline int mprotect_exec( void *base, size_t size, int unix_prot )
  {
  #ifdef WINE_IOS
-+    /* WinPad: an image adopted from a signed dylib keeps its own pages */
-+    if (ios_adopted_contains( base, size )) return mprotect( base, size, unix_prot );
++    /* WinPad: an image adopted from a signed dylib keeps its own pages
++     * (executable ones below, once the JIT pool is set up) */
++    if (!(unix_prot & PROT_EXEC) && ios_adopted_contains( base, size ))
++        return mprotect( base, size, unix_prot );
 +
      /* iOS-Madeira ml1030: A 32-BIT IMAGE PAGE IS DATA TO THE HOST — SO STOP
       * ROUTING ITS WRITE REQUESTS THROUGH THE EXECUTABLE MACHINERY.
       *
-@@ -18668,6 +18714,9 @@ NTSTATUS virtual_create_builtin_view( void *module, const UNICODE_STRING *nt_nam
+@@ -12367,6 +12415,10 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+             jit_pool_init_done = 1;
+         }
+ 
++        /* WinPad: the first executable mapping sets the JIT pool up, and
++         * FEX allocates its code there even when no image is copied in */
++        if (ios_adopted_contains( base, size )) return mprotect( base, size, unix_prot );
++
+         /* iOS-Madeira ml640: AN OWNED ANON-JIT RANGE IS SETTLED — DECIDE IT FIRST.
+          *
+          * ROOT CAUSE, proven by the ml639 three-view hash:
+@@ -18668,6 +18720,12 @@ NTSTATUS virtual_create_builtin_view( void *module, const UNICODE_STRING *nt_nam
          if (!status)
          {
              add_builtin_module( view->base, so_handle );
 +#ifdef WINE_IOS
 +            ios_adopted_add( view->base, view->size );
++            /* nothing of an adopted image goes through the JIT pool, so set
++             * the pool up here as the first copied image would have */
++            mprotect_exec( view->base, 0, PROT_READ | PROT_EXEC );
 +#endif
              VIRTUAL_DEBUG_DUMP_VIEW( view );
              if (is_beyond_limit( base, size, working_set_limit )) working_set_limit = address_space_limit;
