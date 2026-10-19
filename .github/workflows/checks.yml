@@ -311,18 +311,21 @@ jobs:
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
       - name: The code caches and FEX's dispatcher are linked into a dylib, as they would be into the app
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot/fexaot.dylib"
-      - name: The x86 program runs from the code linked into that dylib, in Wine on an iPad simulator
+      - name: The x86 program runs from the code linked into that dylib with NoJIT, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
           # FEX finds every cache in the image's index and runs its code where dyld
           # mapped it; there are no cache files in this cache directory. The dispatcher
-          # it generates matches the image's copy, so that copy runs instead.
+          # it generates matches the image's copy, so that copy runs instead. With NoJIT
+          # FEX makes no memory executable and would stop on a block missing from the image.
           WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
           WINEHOST_EXPECT_LOG: |
             [aot-image] index at
             [aot-image] linked: code
             [aot-image] loaded linked cache for
             [aot-dispatcher] static code from the AOT image
+            [nojit] no code is generated to run
             [aot-cache] enabled
             [aot-link] first block link through the data area
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-image
