@@ -1,0 +1,64 @@
+With NoJIT, FEX's WoW64 module starts without a JIT pool (FEX 3bec2ac, on top of 0016)
+
+BTCpuProcessInit stopped the process when the host had not published
+the JIT pool (WINE_IOS_JIT_RW/RX). With NoJIT nothing is written to
+executable memory: code buffers are read+write only and the code runs
+from the AOT image. A device without a debugger cannot map the pool's
+executable view at all.
+
+With NoJIT and no pool it now logs "[nojit] no JIT pool: nothing is
+written to executable memory" and leaves the write offset at 0.
+
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index df15c94..243196b 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -1297,25 +1297,33 @@ void BTCpuProcessInit() {
+     const uint64_t rw = rw_env ? strtoull(rw_env, nullptr, 16) : 0;
+     const uint64_t rx = rx_env ? strtoull(rx_env, nullptr, 16) : 0;
+     const uint64_t pool_size = size_env ? strtoull(size_env, nullptr, 16) : 0;
+-    if (!rw || !rx) {
++    // WinPad: with NoJIT nothing is written to executable memory (code buffers are read+write
++    // only, the code runs from the AOT image), so there is no pool and no alias to write through.
++    // A device without a debugger cannot map one anyway.
++    FEX_CONFIG_OPT(NoJIT, NOJIT);
++    if (NoJIT() && !rw && !rx) {
++      LogMan::Msg::EFmt("[nojit] no JIT pool: nothing is written to executable memory");
++    } else if (!rw || !rx) {
+       IOS_WOW64_REPORT_AND_DIE("[FEX-iOS][wow64] WINE_IOS_JIT_RW/RX missing (RW={} RX={}) - JIT pool writes would corrupt memory",
+                                rw_env ? rw_env : "(null)", rx_env ? rx_env : "(null)");
+     }
+-    FEXCore::DualMap::WriteOffset = static_cast<int64_t>(rw - rx);
+-    /* MADEIRA: publish the pool's RX range for FEXCore::Allocator::VirtualAlloc, which refuses an
+-     * executable allocation outside it. The write offset alone is not enough to detect the SIXTH
+-     * DEVICE RUN failure - it is applied unconditionally, to whatever buffer it is handed, so a
+-     * buffer allocated outside the pool produces an unmapped write target instead of an error.
+-     * A missing size disables the check rather than failing the launch: the offset, which is
+-     * mandatory, is validated above. */
+-    if (pool_size) {
+-      ios_fex_jit_pool_rx = static_cast<uintptr_t>(rx);
+-      ios_fex_jit_pool_end = static_cast<uintptr_t>(rx + pool_size);
++    if (rw && rx) {
++      FEXCore::DualMap::WriteOffset = static_cast<int64_t>(rw - rx);
++      /* MADEIRA: publish the pool's RX range for FEXCore::Allocator::VirtualAlloc, which refuses an
++       * executable allocation outside it. The write offset alone is not enough to detect the SIXTH
++       * DEVICE RUN failure - it is applied unconditionally, to whatever buffer it is handed, so a
++       * buffer allocated outside the pool produces an unmapped write target instead of an error.
++       * A missing size disables the check rather than failing the launch: the offset, which is
++       * mandatory, is validated above. */
++      if (pool_size) {
++        ios_fex_jit_pool_rx = static_cast<uintptr_t>(rx);
++        ios_fex_jit_pool_end = static_cast<uintptr_t>(rx + pool_size);
++      }
++      LogMan::Msg::EFmt("[FEX-iOS][wow64] fast-write enabled (WriteOffset={:#x} RW={:#x} RX={:#x} pool=[{:#x}, {:#x})) guest_window={:#x}",
++                        FEXCore::DualMap::WriteOffset, rw, rx, ios_fex_jit_pool_rx, ios_fex_jit_pool_end, GuestWindow::Base);
++      IosRawReport("E [jit-pool] wow64 exec allocations restricted to RX [{:#x}, {:#x}) (WriteOffset={:#x}, SIZE={})",
++                   ios_fex_jit_pool_rx, ios_fex_jit_pool_end, FEXCore::DualMap::WriteOffset, size_env ? size_env : "(null)");
+     }
+-    LogMan::Msg::EFmt("[FEX-iOS][wow64] fast-write enabled (WriteOffset={:#x} RW={:#x} RX={:#x} pool=[{:#x}, {:#x})) guest_window={:#x}",
+-                      FEXCore::DualMap::WriteOffset, rw, rx, ios_fex_jit_pool_rx, ios_fex_jit_pool_end, GuestWindow::Base);
+-    IosRawReport("E [jit-pool] wow64 exec allocations restricted to RX [{:#x}, {:#x}) (WriteOffset={:#x}, SIZE={})",
+-                 ios_fex_jit_pool_rx, ios_fex_jit_pool_end, FEXCore::DualMap::WriteOffset, size_env ? size_env : "(null)");
+   }
+ #endif
+ 
