@@ -276,9 +276,8 @@ jobs:
       - name: A 32-bit x86 program runs in Wine through WoW64 and FEX on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
-          # +module shows Wine taking xtajit.dll over from its dylib. It is left out
-          # of the cached runs below: its traces run guest code of its own.
-          WINEHOST_WINEDEBUG: +loaddll,+module
+          # Wine logs taking xtajit.dll over from its dylib. WINEDEBUG stays the same
+          # in all three runs: trace channels change which guest code ntdll runs.
           WINEHOST_EXPECT_LOG: |
             xtajit.dll.dylib" at
             [wow-exit] the code map is written at NtTerminateProcess

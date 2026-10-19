@@ -114,7 +114,7 @@ index b59b458..15f0ed9 100644
 +        dlclose( handle );
 +        return STATUS_NO_MEMORY;
 +    }
-+    TRACE( "adopted %s at %p-%p\n", debugstr_a(path), pe.base, pe.base + pe.size );
++    MESSAGE( "adopted %s at %p-%p\n", debugstr_a(path), pe.base, pe.base + pe.size );
 +done:
 +    *module = pe.base;
 +    if (size) *size = info.map_size;
