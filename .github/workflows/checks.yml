@@ -325,6 +325,7 @@ jobs:
           WINEHOST_FEX_NOJIT: 1
           WINEHOST_EXPECT_LOG: |
             winehost: NoJIT, so no JIT pool
+            [nojit] no JIT pool: nothing is written to executable memory
             [aot-image] index at
             [aot-image] linked: code
             [aot-image] loaded linked cache for
