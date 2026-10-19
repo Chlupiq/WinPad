@@ -7,6 +7,7 @@ import unittest
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, here)
 sys.path.insert(0, os.path.join(here, "..", "fxcc-inspect"))
+import aotindex  # noqa: E402
 import cache2macho as c2m  # noqa: E402
 from test_fxcc_inspect import build_cache  # noqa: E402
 
@@ -108,6 +109,23 @@ class ConvertTest(unittest.TestCase):
         data = build_cache(blocks=[(0x1000, 0, [])], relocs=[(0x10, GUEST_RIP_MOVE, b"")], code=aot_code())
         with self.assertRaises(c2m.ConvertError):
             c2m.convert(data, "t", "15.0")
+
+
+class WoW64Test(unittest.TestCase):
+    def test_wow64_reloc_types(self):
+        # FEX 3bec2ac: GUEST_RIP_MOVE = 3, then the AOT types of patches/fex-wow64/0007-0009
+        self.assertEqual(c2m.fi.RELOC_TYPES_WOW64[3:], ["GUEST_RIP_MOVE", "GUEST_RIP_DATA_SLOT",
+                                                         "GUEST_RIP_LINK_RECORD", "AOT_BLOCK_TAIL"])
+
+    def test_index(self):
+        fid, cid = "0123456789abcdef", "0" * 16
+        entry = aotindex.entry(f"/c/cache/hello.exe-{fid}-{cid}")
+        self.assertEqual(entry, (fid, cid))
+        asm = aotindex.index_asm([entry])
+        self.assertIn("_fexaot_index:", asm)
+        self.assertIn("\t.quad 1\n", asm)
+        for sym in ("meta", "text", "data"):
+            self.assertIn(f"\t.quad _fexaot_{fid}_{cid}_{sym}\n", asm)
 
 
 if __name__ == "__main__":

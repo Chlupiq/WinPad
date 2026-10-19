@@ -298,6 +298,24 @@ jobs:
           # No x86 block of the program or its DLLs is compiled at run time.
           WINEHOST_FEX_ALL_CACHED: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+      - name: The code caches are linked into a dylib, as they would be into the app
+        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot/fexaot.dylib"
+      - name: The x86 program runs from the code linked into that dylib, in Wine on an iPad simulator
+        env:
+          WINEHOST_EXPECT_OUTPUT: Hello from x86
+          # FEX finds every cache in the image's index and runs its code where dyld
+          # mapped it; there are no cache files in this cache directory.
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot/fexaot.dylib
+          WINEHOST_EXPECT_LOG: |
+            [aot-image] index at
+            [aot-image] linked: code
+            [aot-image] loaded linked cache for
+            [aot-cache] enabled
+            [aot-link] first block link through the data area
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-image
+          WINEHOST_FEX_CODEMAP: 1
+          WINEHOST_FEX_ALL_CACHED: 1
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
       - name: FEX code map and code caches of the x86 run
         if: always()
         uses: actions/upload-artifact@v4

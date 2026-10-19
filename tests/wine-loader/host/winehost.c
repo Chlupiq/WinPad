@@ -11,8 +11,11 @@
 // types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
 // first window, 2 s after that window first showed (see winios_pProcessEvents);
 // WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead.
+// WINEHOST_AOT_IMAGE names a dylib with FEX AOT code caches linked in
+// (tools/cache2macho); its index goes to FEX as WINE_IOS_AOT_INDEX.
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
 // came up. Whatever Wine does in the meantime goes to stderr.
+#include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
 #include <pthread.h>
@@ -366,6 +369,26 @@ static void* server_thread(void* arg) {
   return NULL;
 }
 
+// FEX's WoW64 module is a Windows DLL and cannot look symbols up itself, so
+// the host loads the image and passes the address of its index on.
+static int publish_aot_image(const char* path) {
+  void* image = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (!image) {
+    printf("winehost: AOT image %s: %s\n", path, dlerror());
+    return 1;
+  }
+  const struct { char magic[4]; unsigned version; unsigned long long count; }* index = dlsym(image, "fexaot_index");
+  if (!index || memcmp(index->magic, "FXAI", 4) || index->version != 1) {
+    printf("winehost: AOT image %s has no index\n", path);
+    return 1;
+  }
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%lx", (unsigned long)index);
+  setenv("WINE_IOS_AOT_INDEX", buf, 1);
+  printf("winehost: AOT image %s, %llu caches, index at %p\n", path, index->count, (void*)index);
+  return 0;
+}
+
 static int wine_argc;
 static char** wine_argv;
 
@@ -447,6 +470,8 @@ int main(int argc, char* argv[]) {
     ios_main_image_i386 = 1;
     publish_host_probe();
     if (publish_jit_pool(512 << 20)) return 1;
+    const char* aot = getenv("WINEHOST_AOT_IMAGE");
+    if (aot && *aot && publish_aot_image(aot)) return 1;
     printf("winehost: 32-bit x86 program, running it through WoW64\n");
   }
   else if (getenv("WINEHOST_JIT") && !strcmp(getenv("WINEHOST_JIT"), "1")) {

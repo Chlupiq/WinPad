@@ -35,6 +35,10 @@ RELOC_TYPES = [
     "GUEST_RIP_LINK_RECORD",  # patches/fex/0003: fills a block link record in data
     "AOT_BLOCK_TAIL",  # patches/fex/0004: block tail copied to data
 ]
+# The same types in Madeira's FEX fork 3bec2ac, which FEX's WoW64 module is
+# built from (tests/fex-wow64): it has no GUEST_PATCHABLE_* types, and
+# patches/fex-wow64/0007-0009 add the AOT types after GUEST_RIP_MOVE.
+RELOC_TYPES_WOW64 = RELOC_TYPES[:4] + RELOC_TYPES[8:]
 # Relocations that change code when a cache is loaded (all but data slots)
 DATA_ONLY_TYPES = {"GUEST_RIP_DATA_SLOT", "GUEST_RIP_LINK_RECORD", "AOT_BLOCK_TAIL"}
 NAMED_SYMBOLS = ["EXITFUNCTION_LINKER"]
