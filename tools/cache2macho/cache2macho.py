@@ -36,7 +36,10 @@ for Mach-O (iOS) by default, for ELF with --elf-asm. The dispatcher has no
 absolute addresses, so it needs no relocations; FEX uses it only if it matches
 what it would generate itself.
 
-Usage: cache2macho.py [--prefix NAME] [--min-ios 15.0 | --macos 14.4 | --ios-simulator 17.4] [--elf-asm] CACHE_FILE OUT
+With --wow64 the cache comes from FEX's WoW64 module (Madeira's FEX fork,
+tests/fex-wow64), whose relocation types are numbered differently.
+
+Usage: cache2macho.py [--wow64] [--prefix NAME] [--min-ios 15.0 | --macos 14.4 | --ios-simulator 17.4] [--elf-asm] CACHE_FILE OUT
        cache2macho.py --dispatcher [--elf-asm] DISPATCHER_FILE OUT.s
 """
 import argparse
@@ -354,7 +357,10 @@ def main():
     ap.add_argument("--ios-simulator", metavar="MIN", help="build the object for the iOS MIN simulator instead")
     ap.add_argument("--elf-asm", action="store_true", help="write AArch64 ELF assembly for Linux instead")
     ap.add_argument("--dispatcher", action="store_true", help="input is a dispatcher dump; write assembly")
+    ap.add_argument("--wow64", action="store_true", help="cache from FEX's WoW64 module (FEX 3bec2ac relocation types)")
     args = ap.parse_args()
+    if args.wow64:
+        fi.RELOC_TYPES = fi.RELOC_TYPES_WOW64
     with open(args.cache, "rb") as fh:
         data = fh.read()
     if args.dispatcher:

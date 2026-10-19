@@ -1,0 +1,485 @@
+WoW64 AOT code caches linked into an image: run them in place (FEX 3bec2ac, on top of 0009)
+
+Port of patches/fex/0005 to Madeira's FEX fork, for the WoW64 module on iOS.
+
+WinPad's tools/cache2macho turns each AOT code cache into an object whose
+linker resolves every reference from the code to the data area;
+tools/cache2macho/aotindex.py adds an index of them (_fexaot_index). On
+iOS the objects are linked into the app, so the code arrives in its signed
+text segment and FEX must neither copy nor write it.
+
+- CodeCache::LoadLinkedCache takes an image's _meta (the cache file without
+  its code, behind an "FXAM" header), _text (the code) and _data (a
+  writable data area). It fills the data area like LoadCache, but uses the
+  code where the image put it: every page counts as loaded and the code is
+  ReadOnlyCode. LoadCache's header parsing, data area fill and relocation
+  grouping move into helpers shared by both.
+- The image's data area is ordinary memory, not the RX view of the JIT
+  pool, so its link records carry DATA_ONLY_LINK_RECORD_LINKED and
+  ExitFunctionLink and the delinker store to them directly instead of
+  through DualMap::WriteAddr.
+- xtajit is a Windows DLL and cannot dlsym, so the host loads the image and
+  puts the address of its index in WINE_IOS_AOT_INDEX.
+  ImageTracker::LoadImageCache looks the image's file id up there first and
+  falls back to the cache file.
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index 06831cc..abf33a3 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -64,6 +64,9 @@ struct CustomIRResult {
+ // CallerOffset of a link record that lives in the data area of an AOT code
+ // cache: linking only stores HostCode, the code is never patched.
+ constexpr int64_t DATA_ONLY_LINK_RECORD = INT64_MIN;
++// Same, for a record in a linked AOT image (CodeCache::LoadLinkedCache): the
++// data area is ordinary writable memory, not part of the dual-mapped JIT pool.
++constexpr int64_t DATA_ONLY_LINK_RECORD_LINKED = INT64_MIN + 1;
+ 
+ using BlockDelinkerFunc = void (*)(FEXCore::Context::ExitFunctionLinkData* Record);
+ constexpr uint32_t TSC_SCALE_MAXIMUM = 1'000'000'000; ///< 1Ghz
+@@ -89,6 +92,8 @@ public:
+   bool SaveData(Core::InternalThreadState&, int TargetFD, const ExecutableFileSectionInfo&, uint64_t SerializedBaseAddress) override;
+ 
+   fextl::unique_ptr<MappedCodeCacheFile> LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo&, uint64_t FileStartVA) override;
++  fextl::unique_ptr<MappedCodeCacheFile>
++  LoadLinkedCache(const std::byte* Meta, std::byte* Code, std::byte* Data, const ExecutableFileInfo&, uint64_t FileStartVA) override;
+ 
+   bool EnableLoadedSection(Core::InternalThreadState*, MappedCodeCacheFile&, const ExecutableFileSectionInfo&) override;
+ 
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 8947eea..c520005 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -616,38 +616,36 @@ bool CodeCache::ApplyCodeRelocations(uint64_t GuestEntry, std::span<std::byte> C
+   return true;
+ }
+ 
+-fextl::unique_ptr<MappedCodeCacheFile>
+-CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& FileInfo, uint64_t FileStartVA) {
+-  if (!EnableCodeCaching) {
+-    return nullptr;
++// Checks the cache file header and finds the block list and relocations.
++// Returns the offset of the code from the start of the file, or 0 on error.
++static size_t ParseCacheFile(std::span<std::byte> CacheFile, CodeCacheHeader& header, std::byte*& BlockListStart,
++                             std::span<const CPU::Relocation>& Relocations) {
++  if (CacheFile.size_bytes() < sizeof(header)) {
++    LogMan::Msg::EFmt("Invalid cache file header");
++    return 0;
+   }
+-
+-  FEXCORE_PROFILE_SCOPED("LoadCache");
+-
+-  // Read file header
+-  CodeCacheHeader header {};
+   ::memcpy(&header, CacheFile.data(), sizeof(header));
+ 
+   if (!std::ranges::equal(header.Magic, header.ExpectedMagic)) {
+     LogMan::Msg::EFmt("Invalid cache file header");
+-    return nullptr;
++    return 0;
+   }
+ 
+   if (!std::ranges::equal(header.FEXVersion, GIT_HASH)) {
+     LogMan::Msg::IFmt("Cache generated from old FEX version {:02x}, current is {:02x}; skipping", fmt::join(header.FEXVersion, ""),
+                       fmt::join(GIT_HASH, ""));
+-    return nullptr;
++    return 0;
+   }
+ 
+   if (header.NumBlocks == 0) {
+     // Valid caches are never empty
+     LogMan::Msg::IFmt("Code cache empty, aborting");
+-    return nullptr;
++    return 0;
+   }
+ 
+   // Skip over BlockEntry data since it won't be used until EnableLoadedSection
+   // TODO: Store direct offset to relocations in the header
+-  auto* BlockListStart = CacheFile.data() + sizeof(header);
++  BlockListStart = CacheFile.data() + sizeof(header);
+   auto* Cursor = BlockListStart;
+   for (uint32_t i = 0; i < header.NumBlocks; ++i) {
+     Cursor += sizeof(uint64_t); // guest address
+@@ -658,12 +656,77 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+     Cursor += NumGuestCodePages * sizeof(uint64_t);
+   }
+ 
+-  auto Relocations = std::span {reinterpret_cast<const FEXCore::CPU::Relocation*>(Cursor), header.NumRelocations};
++  Relocations = std::span {reinterpret_cast<const FEXCore::CPU::Relocation*>(Cursor), header.NumRelocations};
+   Cursor += Relocations.size_bytes();
+ 
+   // Pad to next page to get the code buffer data
+-  Cursor = reinterpret_cast<std::byte*>(AlignUp(reinterpret_cast<uintptr_t>(Cursor), Utils::FEX_PAGE_SIZE));
+-  auto CodeDataInFile = std::span {Cursor, header.CodeBufferSize};
++  return AlignUp(Cursor - CacheFile.data(), Utils::FEX_PAGE_SIZE);
++}
++
++// Groups relocations by the code page they apply to (see MappedCodeCacheFile::PageRelocationRanges)
++static fextl::vector<MappedCodeCacheFile::PageRelocationRange>
++GroupRelocationsByPage(std::span<std::byte> CacheFile, std::span<const CPU::Relocation> Relocations, size_t NumPages) {
++  fextl::vector<MappedCodeCacheFile::PageRelocationRange> PageRelocationRanges(NumPages, {0, 0});
++  auto RelocBaseOffset = std::as_bytes(Relocations).data() - CacheFile.data();
++  auto RelocIt = Relocations.begin();
++  for (size_t Page = 0; Page < NumPages; ++Page) {
++    auto EndRelocIt = std::upper_bound(RelocIt, Relocations.end(), Page,
++                                       [](auto& Page, auto& Reloc) { return Page < Reloc.Header.Offset / Utils::FEX_PAGE_SIZE; });
++    PageRelocationRanges.at(Page) = {static_cast<uint32_t>(RelocBaseOffset + (RelocIt - Relocations.begin()) * sizeof(CPU::Relocation)),
++                                     static_cast<uint32_t>(EndRelocIt - RelocIt)};
++    RelocIt = EndRelocIt;
++  }
++  return PageRelocationRanges;
++}
++
++#if defined(FEX_IOS_HOST) && defined(_WIN32)
++// Fills an AOT data area: slots in relocation order (see CPU::AOTDataSlotCount).
++// Block tails are copied from Code, which holds the code as stored in the cache.
++// LinkRecordMarker is the CallerOffset of the block link records.
++// Returns the number of block link records.
++static size_t FillAOTDataArea(std::span<const CPU::Relocation> Relocations, uint64_t* Slot, const std::byte* Code, uint64_t FileStartVA,
++                              bool ReadOnlyCode, int64_t LinkRecordMarker) {
++  size_t NumLinkRecords = 0;
++  for (const auto& Reloc : Relocations) {
++    if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT) {
++      *Slot++ = FileStartVA + Reloc.GuestRIP.GuestRIP;
++    } else if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD) {
++      static_assert(sizeof(FEXCore::Context::ExitFunctionLinkData) == 3 * sizeof(uint64_t));
++      auto* Record = reinterpret_cast<FEXCore::Context::ExitFunctionLinkData*>(Slot);
++      Record->HostCode = 0;
++      Record->GuestRIP = FileStartVA + Reloc.GuestRIP.GuestRIP;
++      Record->CallerOffset = LinkRecordMarker;
++      Slot += 3;
++      ++NumLinkRecords;
++    } else if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_AOT_BLOCK_TAIL) {
++      memcpy(Slot, Code + Reloc.Header.Offset, Reloc.AOTBlockTail.TailSize);
++      auto* Tail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(Slot);
++      Tail->RIP = FileStartVA + Reloc.AOTBlockTail.GuestRIP;
++      Tail->SpinLockFutex = 0;
++      Tail->ReadOnlyCode = ReadOnlyCode;
++      Slot += CPU::AOTDataSlotCount(Reloc);
++    }
++  }
++  return NumLinkRecords;
++}
++#endif
++
++fextl::unique_ptr<MappedCodeCacheFile>
++CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& FileInfo, uint64_t FileStartVA) {
++  if (!EnableCodeCaching) {
++    return nullptr;
++  }
++
++  FEXCORE_PROFILE_SCOPED("LoadCache");
++
++  CodeCacheHeader header {};
++  std::byte* BlockListStart {};
++  std::span<const CPU::Relocation> Relocations;
++  const size_t CodeOffset = ParseCacheFile(CacheFile, header, BlockListStart, Relocations);
++  if (!CodeOffset) {
++    return nullptr;
++  }
++  auto CodeDataInFile = std::span {CacheFile.data() + CodeOffset, header.CodeBufferSize};
+ 
+ #ifndef _WIN32
+   // Allocate target memory for post-relocation code. This is PROT_NONE until
+@@ -698,28 +761,8 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+     }
+     auto* Writable = Code + FEXCore::DualMap::WriteOffset;
+     memcpy(Writable, CodeDataInFile.data(), header.CodeBufferSize);
+-    auto* Slot = reinterpret_cast<uint64_t*>(Writable + DataAreaOffset);
+-    size_t NumLinkRecords = 0;
+-    for (const auto& Reloc : Relocations) {
+-      if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_DATA_SLOT) {
+-        *Slot++ = FileStartVA + Reloc.GuestRIP.GuestRIP;
+-      } else if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_GUEST_RIP_LINK_RECORD) {
+-        static_assert(sizeof(FEXCore::Context::ExitFunctionLinkData) == 3 * sizeof(uint64_t));
+-        auto* Record = reinterpret_cast<FEXCore::Context::ExitFunctionLinkData*>(Slot);
+-        Record->HostCode = 0;
+-        Record->GuestRIP = FileStartVA + Reloc.GuestRIP.GuestRIP;
+-        Record->CallerOffset = FEXCore::Context::DATA_ONLY_LINK_RECORD;
+-        Slot += 3;
+-        ++NumLinkRecords;
+-      } else if (Reloc.Header.Type == CPU::RelocationTypes::RELOC_AOT_BLOCK_TAIL) {
+-        memcpy(Slot, CodeDataInFile.data() + Reloc.Header.Offset, Reloc.AOTBlockTail.TailSize);
+-        auto* Tail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(Slot);
+-        Tail->RIP = FileStartVA + Reloc.AOTBlockTail.GuestRIP;
+-        Tail->SpinLockFutex = 0;
+-        Tail->ReadOnlyCode = ReadOnlyCode;
+-        Slot += CPU::AOTDataSlotCount(Reloc);
+-      }
+-    }
++    const auto NumLinkRecords = FillAOTDataArea(Relocations, reinterpret_cast<uint64_t*>(Writable + DataAreaOffset), CodeDataInFile.data(),
++                                                FileStartVA, ReadOnlyCode, FEXCore::Context::DATA_ONLY_LINK_RECORD);
+     CodeBuffer = std::span {Code, header.CodeBufferSize};
+     LogMan::Msg::IFmt("AOT data area: {} slots ({} link records) at code+{:#x}", NumDataSlots, NumLinkRecords, DataAreaOffset);
+   }
+@@ -728,18 +771,8 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+   auto CodeBuffer = CodeDataInFile;
+ #endif
+ 
+-  // Group relocations by page
+   size_t NumPages = header.CodeBufferSize / Utils::FEX_PAGE_SIZE;
+-  fextl::vector<MappedCodeCacheFile::PageRelocationRange> PageRelocationRanges(NumPages, {0, 0});
+-  auto RelocBaseOffset = std::as_bytes(Relocations).data() - CacheFile.data();
+-  auto RelocIt = Relocations.begin();
+-  for (size_t Page = 0; Page < NumPages; ++Page) {
+-    auto EndRelocIt = std::upper_bound(RelocIt, Relocations.end(), Page,
+-                                       [](auto& Page, auto& Reloc) { return Page < Reloc.Header.Offset / Utils::FEX_PAGE_SIZE; });
+-    PageRelocationRanges.at(Page) = {static_cast<uint32_t>(RelocBaseOffset + (RelocIt - Relocations.begin()) * sizeof(CPU::Relocation)),
+-                                     static_cast<uint32_t>(EndRelocIt - RelocIt)};
+-    RelocIt = EndRelocIt;
+-  }
++  auto PageRelocationRanges = GroupRelocationsByPage(CacheFile, Relocations, NumPages);
+ 
+   auto Storage = FEXCore::Allocator::aligned_alloc(alignof(MappedCodeCacheFile), sizeof(MappedCodeCacheFile));
+   auto Result = fextl::unique_ptr<MappedCodeCacheFile>(
+@@ -756,6 +789,81 @@ CodeCache::LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo& F
+   return Result;
+ }
+ 
++fextl::unique_ptr<MappedCodeCacheFile> CodeCache::LoadLinkedCache(const std::byte* Meta, std::byte* Code, std::byte* Data,
++                                                                  const ExecutableFileInfo& FileInfo, uint64_t FileStartVA) {
++#if defined(FEX_IOS_HOST) && defined(_WIN32)
++  if (!EnableCodeCaching) {
++    return nullptr;
++  }
++
++  FEXCORE_PROFILE_SCOPED("LoadLinkedCache");
++
++  // Written by WinPad's tools/cache2macho: the cache file without its code, which the
++  // image holds in its signed text section, with its data area in a writable section.
++  struct {
++    char Magic[4];
++    uint32_t Version;
++    uint64_t CodeSize;
++    uint64_t DataSize;
++    uint64_t CodeOffset;
++    uint64_t CacheSize;
++  } MetaHeader;
++  static_assert(sizeof(MetaHeader) == 40);
++  ::memcpy(&MetaHeader, Meta, sizeof(MetaHeader));
++  if (::memcmp(MetaHeader.Magic, "FXAM", 4) != 0 || MetaHeader.Version != 1) {
++    LogMan::Msg::EFmt("Invalid AOT image metadata");
++    return nullptr;
++  }
++
++  auto CacheFile = std::span {const_cast<std::byte*>(Meta) + sizeof(MetaHeader), MetaHeader.CacheSize};
++  CodeCacheHeader header {};
++  std::byte* BlockListStart {};
++  std::span<const CPU::Relocation> Relocations;
++  if (ParseCacheFile(CacheFile, header, BlockListStart, Relocations) != MetaHeader.CodeOffset ||
++      header.CodeBufferSize != MetaHeader.CodeSize || MetaHeader.CodeOffset > CacheFile.size_bytes()) {
++    LogMan::Msg::EFmt("AOT image metadata does not match its cache");
++    return nullptr;
++  }
++
++  // The linker has resolved every reference from the code to the data area, so
++  // only relocations that fill the data area are allowed.
++  uint64_t NumDataSlots = 0;
++  for (const auto& Reloc : Relocations) {
++    const auto Count = CPU::AOTDataSlotCount(Reloc);
++    if (!Count) {
++      LogMan::Msg::EFmt("AOT image has a relocation into code (type {}); it needs an AOTCodeCacheWIP cache", ToUnderlying(Reloc.Header.Type));
++      return nullptr;
++    }
++    NumDataSlots += Count;
++  }
++  if (NumDataSlots * sizeof(uint64_t) > MetaHeader.DataSize) {
++    LogMan::Msg::EFmt("AOT image data area is too small");
++    return nullptr;
++  }
++
++  // The data area is ordinary memory of the image, written directly (not through the JIT pool's RW alias).
++  const auto NumLinkRecords = FillAOTDataArea(Relocations, reinterpret_cast<uint64_t*>(Data), Code, FileStartVA, true,
++                                              FEXCore::Context::DATA_ONLY_LINK_RECORD_LINKED);
++  LogMan::Msg::IFmt("[aot-image] linked: code {} bytes at {}, data area {} slots ({} link records) at {}", header.CodeBufferSize,
++                    fmt::ptr(Code), NumDataSlots, NumLinkRecords, fmt::ptr(Data));
++
++  size_t NumPages = header.CodeBufferSize / Utils::FEX_PAGE_SIZE;
++  auto PageRelocationRanges = GroupRelocationsByPage(CacheFile, Relocations, NumPages);
++
++  // CodeBufferInFile is empty and ends where the code ended in the cache file,
++  // which is where EnableLoadedSection reads the code page entries from.
++  // Every page counts as loaded, so FinalizeCodePages never touches the code.
++  auto Storage = FEXCore::Allocator::aligned_alloc(alignof(MappedCodeCacheFile), sizeof(MappedCodeCacheFile));
++  auto Result = fextl::unique_ptr<MappedCodeCacheFile>(new (Storage) MappedCodeCacheFile {
++    this, CacheFile, std::span {CacheFile.data() + MetaHeader.CodeOffset, 0}, std::span {Code, header.CodeBufferSize}, BlockListStart,
++    header.NumBlocks, header.NumCodePages, std::move(PageRelocationRanges), fextl::vector<bool>(NumPages, true), FileStartVA});
++  Result->ReadOnlyCode = true;
++  return Result;
++#else
++  return nullptr;
++#endif
++}
++
+ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCodeCacheFile& Code, const ExecutableFileSectionInfo& BinarySection) {
+   if (!EnableCodeCaching) {
+     return true;
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index 0bbbf0b..c557899 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -568,9 +568,15 @@ static void IndirectBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record
+   // No need to reset HostCode here as the exit linker pointer is stored separately, and if the block is relinked it will be updated.
+ }
+ 
++// A data-only link record sits next to the code in the JIT pool's RX view, so stores go to
++// the RW alias; one in a linked AOT image's data area is ordinary writable memory.
++static FEXCore::Context::ExitFunctionLinkData* DataOnlyRecordWriteAddr(FEXCore::Context::ExitFunctionLinkData* Record) {
++  return Record->CallerOffset == FEXCore::Context::DATA_ONLY_LINK_RECORD_LINKED ? Record : FEXCore::DualMap::WriteAddr(Record);
++}
++
+ static void DataOnlyBlockDelinker(FEXCore::Context::ExitFunctionLinkData* Record) {
+   // The thunk falls back to the exit linker once HostCode is zero again.
+-  std::atomic_ref<uint64_t>(FEXCore::DualMap::WriteAddr(Record)->HostCode).store(0, std::memory_order::seq_cst);
++  std::atomic_ref<uint64_t>(DataOnlyRecordWriteAddr(Record)->HostCode).store(0, std::memory_order::seq_cst);
+ }
+ 
+ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEXCore::Context::ExitFunctionLinkData* Record) {
+@@ -653,10 +659,10 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
+   // Lock here is necessary to prevent simultaneous linking and delinking
+   auto lk = Thread->LookupCache->AcquireWriteLock();
+ 
+-  if (Record->CallerOffset == FEXCore::Context::DATA_ONLY_LINK_RECORD) {
+-    // AOT code cache: the record is data, the code stays untouched. The record
+-    // sits next to the code in the RX view, so the store goes to the RW alias.
+-    std::atomic_ref<uint64_t>(FEXCore::DualMap::WriteAddr(Record)->HostCode).store(HostCode, std::memory_order::seq_cst);
++  if (Record->CallerOffset == FEXCore::Context::DATA_ONLY_LINK_RECORD ||
++      Record->CallerOffset == FEXCore::Context::DATA_ONLY_LINK_RECORD_LINKED) {
++    // AOT code cache: the record is data, the code stays untouched.
++    std::atomic_ref<uint64_t>(DataOnlyRecordWriteAddr(Record)->HostCode).store(HostCode, std::memory_order::seq_cst);
+     Thread->LookupCache->AddBlockLink(GuestRip, Record, DataOnlyBlockDelinker, lk);
+     static std::atomic<bool> Reported {};
+     if (!Reported.exchange(true, std::memory_order_relaxed)) {
+diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
+index fe5c078..b57effa 100644
+--- a/FEXCore/include/FEXCore/Core/CodeCache.h
++++ b/FEXCore/include/FEXCore/Core/CodeCache.h
+@@ -263,6 +263,18 @@ public:
+    */
+   virtual fextl::unique_ptr<MappedCodeCacheFile> LoadCache(std::span<std::byte> CacheFile, const ExecutableFileInfo&, uint64_t FileStartVA) = 0;
+ 
++  /**
++   * Loads an AOT code cache that was linked into an image (tools/cache2macho in WinPad).
++   *
++   * Meta, Code and Data are the image's _meta, _text and _data symbols. The
++   * code is used in place and never written; the data area is filled here.
++   * Code sections must then be enabled with EnableLoadedSection as for LoadCache.
++   */
++  virtual fextl::unique_ptr<MappedCodeCacheFile>
++  LoadLinkedCache(const std::byte* Meta, std::byte* Code, std::byte* Data, const ExecutableFileInfo&, uint64_t FileStartVA) {
++    return nullptr;
++  }
++
+   /**
+    * Registers cached blocks for the given file section to the LookupCache.
+    *
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index dacbbb3..5205cdc 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -6,6 +6,8 @@
+ #include <optional>
+ #include <string_view>
+ #include <cctype>
++#include <cstdlib>
++#include <cstring>
+ 
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
+@@ -246,7 +248,84 @@ int ImageTracker::OpenCodeMapFile() {
+ // (the name the Linux frontend loads, config id 0). The whole file goes into executable JIT-pool
+ // memory: on Windows FEXCore runs the cached code where the file was loaded and applies its
+ // relocations there (through the pool's RW alias, see FinalizeCodePages).
++// WinPad: caches linked into the app (tools/cache2macho, index from tools/cache2macho/aotindex.py).
++// The host publishes the address of the image's index in WINE_IOS_AOT_INDEX; its code is in the
++// app's signed text and is run in place, never copied or written.
++namespace {
++struct AOTIndexEntry {
++  uint64_t FileId;
++  uint64_t ConfigId;
++  const std::byte* Meta;
++  std::byte* Text;
++  std::byte* Data;
++};
++
++struct AOTIndex {
++  char Magic[4];
++  uint32_t Version;
++  uint64_t NumEntries;
++  // Followed by NumEntries AOTIndexEntry
++
++  const AOTIndexEntry* Entries() const {
++    return reinterpret_cast<const AOTIndexEntry*>(this + 1);
++  }
++};
++static_assert(sizeof(AOTIndex) == 16 && sizeof(AOTIndexEntry) == 40);
++
++const AOTIndex* GetAOTIndex() {
++  static const AOTIndex* Index = []() -> const AOTIndex* {
++    const char* Env = getenv("WINE_IOS_AOT_INDEX");
++    if (!Env || !*Env) {
++      return nullptr;
++    }
++    auto* Index = reinterpret_cast<const AOTIndex*>(strtoull(Env, nullptr, 16));
++    if (!Index || memcmp(Index->Magic, "FXAI", 4) != 0 || Index->Version != 1) {
++      LogMan::Msg::EFmt("[aot-image] WINE_IOS_AOT_INDEX={} is not an AOT image index", Env);
++      return nullptr;
++    }
++    LogMan::Msg::EFmt("[aot-image] index at {}: {} caches", fmt::ptr(Index), Index->NumEntries);
++    return Index;
++  }();
++  return Index;
++}
++} // namespace
++
++bool ImageTracker::LoadLinkedImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size) {
++  const auto* Index = GetAOTIndex();
++  if (!Index) {
++    return false;
++  }
++  const AOTIndexEntry* Entry = nullptr;
++  for (uint64_t i = 0; i < Index->NumEntries; ++i) {
++    if (Index->Entries()[i].FileId == Image.Info.FileId && Index->Entries()[i].ConfigId == 0) {
++      Entry = &Index->Entries()[i];
++      break;
++    }
++  }
++  if (!Entry) {
++    LogMan::Msg::EFmt("[aot-image] no linked cache for {}", ID);
++    return false;
++  }
++
++  const uint64_t GuestBase = Guest32Base();
++  auto Cache = CTX.GetCodeCache().LoadLinkedCache(Entry->Meta, Entry->Text, Entry->Data, Image.Info, Address - GuestBase);
++  if (!Cache) {
++    LogMan::Msg::EFmt("[aot-image] linked cache for {} rejected by FEXCore", ID);
++    return false;
++  }
++  CTX.GetCodeCache().RegisterMappedCodeBuffer(*Cache);
++  LogMan::Msg::EFmt("[aot-image] loaded linked cache for {}: code {} bytes at {} for guest {:#x}", ID, Cache->CodeBuffer.size_bytes(),
++                    fmt::ptr(Entry->Text), Address - GuestBase);
++
++  std::scoped_lock Lk {LoadedCachesLock};
++  LoadedCaches.push_back({std::move(Cache), &Image, Address - GuestBase, Address - GuestBase + Size, false});
++  return true;
++}
++
+ void ImageTracker::LoadImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size) {
++  if (LoadLinkedImageCache(Image, ID, Address, Size)) {
++    return;
++  }
+   const auto AnsiPath = fmt::format("\\??\\{}cache\\{}-{:016x}", FEX::Config::GetCacheDirectory(), ID, 0);
+   ScopedUnicodeString NtPath(AnsiPath.c_str());
+ 
+diff --git a/Source/Windows/Common/ImageTracker.h b/Source/Windows/Common/ImageTracker.h
+index 7bdd4c3..1c6eb5f 100644
+--- a/Source/Windows/Common/ImageTracker.h
++++ b/Source/Windows/Common/ImageTracker.h
+@@ -80,6 +80,7 @@ private:
+     bool Enabled;
+   };
+   void LoadImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size);
++  bool LoadLinkedImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size);
+ 
+   std::mutex LoadedCachesLock;
+   fextl::vector<LoadedCache> LoadedCaches;

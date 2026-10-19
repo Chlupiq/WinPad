@@ -134,6 +134,8 @@ fi
 # WINEHOST_FEX_CACHE=DIR is FEX's cache directory (code maps, caches), shared
 # by runs. With WINEHOST_FEX_CODEMAP=1, FEX records there which blocks of the
 # x86 code it compiled (a code map, the input of its offline compiler).
+# WINEHOST_AOT_IMAGE=DYLIB gives FEX code caches linked into a dylib instead
+# (tests/fex-wow64/build-aot-image.sh); the host loads it.
 fex_codemap=
 fex_cache=
 if [ -n "${WINEHOST_FEX_CACHE:-}" ]; then
@@ -156,6 +158,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_CLICK="${WINEHOST_CLICK:-}" SIMCTL_CHILD_WINEHOST_WINDOW="$expect_window" \
     SIMCTL_CHILD_FEX_ENABLECODECACHINGWIP="${fex_codemap:-0}" SIMCTL_CHILD_FEX_APP_CACHE_LOCATION="$fex_cache" \
     SIMCTL_CHILD_WINEHOST_JIT="${WINEHOST_JIT:-}" \
+    SIMCTL_CHILD_WINEHOST_AOT_IMAGE="${WINEHOST_AOT_IMAGE:-}" \
     SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
