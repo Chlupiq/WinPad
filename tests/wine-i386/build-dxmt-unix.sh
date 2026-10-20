@@ -5,9 +5,11 @@
 # native D3D9 frontend, merged with LLVM (build-llvm.sh) into
 # libdxmt_combined.a as Madeira's README says. Madeira's script builds for
 # iphoneos; for another SDK it runs as a copy with the SDK and target
-# replaced. It does not generate airconv's shader headers (Madeira keeps
-# them from an earlier meson build), so they are made here the way
-# dxmt/src/airconv/meson.build makes them.
+# replaced, and with sim-metalfx/MetalFX/MetalFX.h for the MetalFX the
+# simulator SDK lacks (the host answers that it is not supported,
+# tests/wine-loader/host/metal-display.m). It does not generate airconv's
+# shader headers (Madeira keeps them from an earlier meson build), so they
+# are made here the way dxmt/src/airconv/meson.build makes them.
 #
 # Usage: build-dxmt-unix.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
 # WORK_DIR must hold the Madeira checkout tests/wine-loader/build.sh made.
@@ -42,14 +44,8 @@ if [ "$sdk_name" = iphoneos ]; then
     cp "$work/madeira/build/dxmt-ios/build.sh" "$b/build.sh"
 else
     sed -e "s/-sdk iphoneos /-sdk $sdk_name /g; s/--sdk iphoneos /--sdk $sdk_name /g" \
-        -e 's/-arch arm64 -isysroot $SDK -miphoneos-version-min=18.0/-target arm64-apple-ios18.0-simulator -isysroot $SDK -F$BUILD_DIR\/sim-frameworks/' \
+        -e "s|-arch arm64 -isysroot \$SDK -miphoneos-version-min=18.0|-target arm64-apple-ios18.0-simulator -isysroot \$SDK -I$here/sim-metalfx|" \
         "$work/madeira/build/dxmt-ios/build.sh" >"$b/build.sh"
-    # The simulator SDK has no MetalFX (DXMT's upscalers and frame
-    # interpolation); winemetal_unix.c compiles against the iPhoneOS SDK's
-    # headers of it, and the host answers that MetalFX is not supported
-    # (tests/wine-loader/host/metal-display.m).
-    mkdir -p "$b/sim-frameworks"
-    ln -s "$(xcrun --sdk iphoneos --show-sdk-path)/System/Library/Frameworks/MetalFX.framework" "$b/sim-frameworks/"
     if grep -n 'iphoneos' "$b/build.sh" | grep -v '^ *[0-9]*: *#'; then
         echo "Madeira's build.sh still names iphoneos above" >&2
         exit 1
