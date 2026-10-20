@@ -333,6 +333,10 @@ static void publish_host_probe(void) {
 // executable view from a debugger). The simulator lets a process map it
 // itself. WINE_IOS_JIT_RX/RW/SIZE hand it to Wine, as ContentView.swift does.
 static int publish_jit_pool(size_t size) {
+  // WINEHOST_JIT_POOL_MB overrides the size: FEX's offline compiler compiling
+  // many modules in one process needs more than a program does.
+  const char* mb = getenv("WINEHOST_JIT_POOL_MB");
+  if (mb && atoi(mb) > 0) size = (size_t)atoi(mb) << 20;
   mach_port_t task = mach_task_self(), entry = MACH_PORT_NULL;
   memory_object_size_t entry_size = size;
   kern_return_t kr = mach_make_memory_entry_64(
