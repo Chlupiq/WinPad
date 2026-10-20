@@ -313,7 +313,10 @@ jobs:
           WINEHOST_FEX_ALL_CACHED: 1
           # FEX also writes its dispatcher code there, for the image below.
           WINEHOST_FEX_DUMP_DISPATCHER: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+        # Blocks a run still takes beyond the code map are compiled in and it runs again.
+        run: |
+          sh tests/wine-loader/converge-cache.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
       - name: The code caches and FEX's dispatcher are linked into a dylib, as they would be into the app
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot/fexaot.dylib"
       - name: The same AOT image links for an iPad
