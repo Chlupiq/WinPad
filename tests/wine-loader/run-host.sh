@@ -71,6 +71,8 @@ fi
 # WINEHOST_AOT_IMAGE=DYLIB gives FEX code caches linked into a dylib instead
 # (tests/fex-wow64/build-aot-image.sh); the host loads it. With
 # WINEHOST_FEX_NOJIT=1 FEX runs only that image and makes no memory executable.
+# WINEHOST_FEX_INTERP_SURVEY=1 makes FEX's offline compiler report which blocks
+# of the code map the NoJIT interpreter could run and which IR ops it lacks.
 fex_codemap=
 fex_cache=
 fex_dump_dispatcher=
@@ -100,6 +102,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_AOT_IMAGE="${WINEHOST_AOT_IMAGE:-}" \
     SIMCTL_CHILD_FEX_DUMPDISPATCHER="$fex_dump_dispatcher" SIMCTL_CHILD_FEX_NOJIT="${WINEHOST_FEX_NOJIT:-0}" \
     SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
+    SIMCTL_CHILD_FEX_INTERP_SURVEY="${WINEHOST_FEX_INTERP_SURVEY:-0}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!

@@ -26,10 +26,18 @@ mkdir -p "$objs"
 
 caches=$(find "$cache_dir/cache" -type f -size +0 | grep -E -- '-[0-9a-f]{16}-[0-9a-f]{16}$' | sort)
 [ -n "$caches" ] || { echo "no code caches in $cache_dir/cache" >&2; exit 1; }
+# A cache can come out without blocks (its code map held only blocks the
+# offline compiler did not keep); the image leaves it out, and FEX treats that
+# module as it would one with no cache.
+kept=
 for c in $caches; do
     # shellcheck disable=SC2086 # $platform is two arguments
-    python3 -I "$tools/cache2macho.py" --wow64 $platform "$c" "$objs/$(basename "$c").o"
+    python3 -I "$tools/cache2macho.py" --wow64 --skip-empty $platform "$c" "$objs/$(basename "$c").o"
+    [ -f "$objs/$(basename "$c").o" ] && kept="$kept $c"
 done
+# shellcheck disable=SC2086 # one cache per word
+caches=$(echo $kept | tr ' ' '\n')
+[ -n "$caches" ] || { echo "only empty code caches in $cache_dir/cache" >&2; exit 1; }
 # The dispatcher, if a run dumped it there (WINEHOST_FEX_DUMP_DISPATCHER=1)
 dispatcher=
 if [ -s "$cache_dir/dispatcher.bin" ]; then
