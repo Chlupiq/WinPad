@@ -34,7 +34,7 @@ sh "$here/build.sh" "$work" ntdll kernelbase kernel32 user32 gdi32 win32u advapi
 # What DXMT's meson build takes from the Wine tree (src/winemetal/meson.build).
 targets=
 for lib in winecrt0 ntdll dbghelp; do
-    t=$(grep -oE "^dlls/$lib/i386-windows/lib$lib\.a" "$b/Makefile" | sort -u | head -1)
+    t=$(grep -oE "^(dlls|libs)/$lib/i386-windows/lib$lib\.a" "$b/Makefile" | sort -u | head -1)
     [ -n "$t" ] || { echo "no i386 lib$lib.a target in $b/Makefile" >&2; exit 2; }
     targets="$targets $t"
 done

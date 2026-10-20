@@ -7,6 +7,7 @@
 // every HWND gets a layer of its own that is never shown. Presenting into it
 // works the same: DXMT takes a drawable from it for each frame it presents,
 // and the host counts those (-[CAMetalLayer nextDrawable] is wrapped).
+// On the simulator it also stands in for MetalFX, which the simulator lacks.
 // Linked into winehost by link-host.sh when DXMT's unix side is there.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -15,6 +16,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <TargetConditionals.h>
 
 typedef struct opaque_HWND* HWND;
 typedef void* macdrv_view;
@@ -113,3 +115,24 @@ __attribute__((constructor)) static void wrap_next_drawable(void) {
   id<MTLDevice> device = MTLCreateSystemDefaultDevice();
   fprintf(stderr, "winehost: Metal device %s\n", device ? [[device name] UTF8String] : "none");
 }
+
+#if TARGET_OS_SIMULATOR
+// The simulator has no MetalFX, so DXMT's references to its classes have
+// nothing to bind to. These stand-ins say that no MetalFX scaler or frame
+// interpolator is supported, which turns those features off in DXMT.
+@interface MTLFXSpatialScalerDescriptor : NSObject
+@end
+@implementation MTLFXSpatialScalerDescriptor
++ (BOOL)supportsDevice:(id)device { return NO; }
+@end
+@interface MTLFXTemporalScalerDescriptor : NSObject
+@end
+@implementation MTLFXTemporalScalerDescriptor
++ (BOOL)supportsDevice:(id)device { return NO; }
+@end
+@interface MTLFXFrameInterpolatorDescriptor : NSObject
+@end
+@implementation MTLFXFrameInterpolatorDescriptor
++ (BOOL)supportsDevice:(id)device { return NO; }
+@end
+#endif

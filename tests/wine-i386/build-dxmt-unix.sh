@@ -42,8 +42,14 @@ if [ "$sdk_name" = iphoneos ]; then
     cp "$work/madeira/build/dxmt-ios/build.sh" "$b/build.sh"
 else
     sed -e "s/-sdk iphoneos /-sdk $sdk_name /g; s/--sdk iphoneos /--sdk $sdk_name /g" \
-        -e 's/-arch arm64 -isysroot $SDK -miphoneos-version-min=18.0/-target arm64-apple-ios18.0-simulator -isysroot $SDK/' \
+        -e 's/-arch arm64 -isysroot $SDK -miphoneos-version-min=18.0/-target arm64-apple-ios18.0-simulator -isysroot $SDK -F$BUILD_DIR\/sim-frameworks/' \
         "$work/madeira/build/dxmt-ios/build.sh" >"$b/build.sh"
+    # The simulator SDK has no MetalFX (DXMT's upscalers and frame
+    # interpolation); winemetal_unix.c compiles against the iPhoneOS SDK's
+    # headers of it, and the host answers that MetalFX is not supported
+    # (tests/wine-loader/host/metal-display.m).
+    mkdir -p "$b/sim-frameworks"
+    ln -s "$(xcrun --sdk iphoneos --show-sdk-path)/System/Library/Frameworks/MetalFX.framework" "$b/sim-frameworks/"
     if grep -n 'iphoneos' "$b/build.sh" | grep -v '^ *[0-9]*: *#'; then
         echo "Madeira's build.sh still names iphoneos above" >&2
         exit 1
@@ -60,9 +66,9 @@ done
 # stops unless told that D3D12 is not needed.
 if ! MADEIRA_ALLOW_NO_D3D12=1 bash "$b/build.sh"; then
     for e in "$b"/obj/*.err; do
-        grep -q 'error' "$e" || continue
+        grep -q 'error:' "$e" || continue
         echo "--- $e ---"
-        head -30 "$e"
+        grep -B2 -A4 'error:' "$e" | head -40
     done
     exit 1
 fi
