@@ -283,7 +283,12 @@ jobs:
             [wow-exit] the code map is written at NtTerminateProcess
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+        # ntdll does not take quite the same path in every run (a few blocks differ),
+        # so the code map is the union of three runs.
+        run: |
+          for run in 1 2 3; do
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+          done
       - name: FEX's offline compiler turns that code map into code caches, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Successfully populated cache
@@ -308,7 +313,10 @@ jobs:
           WINEHOST_FEX_ALL_CACHED: 1
           # FEX also writes its dispatcher code there, for the image below.
           WINEHOST_FEX_DUMP_DISPATCHER: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+        # Blocks a run still takes beyond the code map are compiled in and it runs again.
+        run: |
+          sh tests/wine-loader/converge-cache.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
       - name: The code caches and FEX's dispatcher are linked into a dylib, as they would be into the app
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot/fexaot.dylib"
       - name: The same AOT image links for an iPad
@@ -341,14 +349,55 @@ jobs:
       - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
         env:
           # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.
+          # It exits after the tap, and FEX writes the code map of the run.
           WINEHOST_CLICK: 50,50
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
+          WINEHOST_EXPECT_LOG: |
+            [wow-exit] the code map is written at NtTerminateProcess
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
+          WINEHOST_FEX_CODEMAP: 1
+        # As for hello.exe, the code map is the union of three runs.
+        run: |
+          for run in 1 2 3; do
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
+          done
+      - name: FEX's offline compiler turns that code map into code caches (x86 program with a window)
+        env:
+          WINEHOST_EXPECT_OUTPUT: Successfully populated cache
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
+          WINEHOST_EXPECT_FEX_CACHE: 1
+          WINEHOST_SYSWOW64: 1
+          WINEHOST_JIT: 1
+          # It compiles user32, gdi32 and the rest in one process, which outgrows 512 MB of JIT pool.
+          WINEHOST_JIT_POOL_MB: 2048
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+      - name: The x86 program with a window runs again with the code caches loaded
+        env:
+          WINEHOST_CLICK: 50,50
+          WINEHOST_EXPECT_LOG: |
+            [aot-cache] enabled
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
+          WINEHOST_FEX_CODEMAP: 1
+          # Every x86 block the window, the tap and the exit take was in the code map.
+          WINEHOST_FEX_ALL_CACHED: 1
+          WINEHOST_FEX_DUMP_DISPATCHER: 1
+        run: |
+          sh tests/wine-loader/converge-cache.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/window.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
+      - name: Those code caches linked into a dylib
+        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-window" "$RUNNER_TEMP/fexaot-window/fexaot.dylib"
       - name: Window content of the x86 program
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wine-window-x86
           path: ${{ runner.temp }}/wine-loader/host-window/frames
+          if-no-files-found: ignore
+      - name: FEX code map and code caches of the x86 program with a window
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex-cache-window
+          path: ${{ runner.temp }}/fexcache-window
           if-no-files-found: ignore
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         run: |
