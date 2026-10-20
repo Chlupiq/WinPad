@@ -221,7 +221,7 @@ jobs:
       - name: Madeira's Wine modules wrapped into dylibs for the iPad simulator
         if: steps.wine-built.outputs.cache-hit != 'true'
         run: sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
-      - name: Wine's 32-bit x86 ntdll, kernelbase and kernel32, and a 32-bit test program
+      - name: Wine's 32-bit x86 modules (ntdll up to the DLLs a game imports) and the 32-bit test programs
         run: |
           PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
           sh tests/wine-i386/build.sh "$RUNNER_TEMP/wine-loader"
@@ -399,6 +399,12 @@ jobs:
           name: fex-cache-window
           path: ${{ runner.temp }}/fexcache-window
           if-no-files-found: ignore
+      - name: A 32-bit x86 program with a game's import table (DirectInput 8, DirectSound, DirectDraw, winmm, Winsock, TAPI, shell32) loads and calls into it, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # The loader resolves every import and the DLLs behind them (a missing one is c0000135);
+          # FEX runs the program and those 32-bit DLLs with its JIT. Its last line:
+          WINEHOST_EXPECT_OUTPUT: "imports: done"
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe"
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         run: |
           sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos
