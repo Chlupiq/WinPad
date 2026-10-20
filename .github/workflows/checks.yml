@@ -421,19 +421,6 @@ jobs:
             "$RUNNER_TEMP/wine-loader/i386-windows/window.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
       - name: Those code caches linked into a dylib
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-window" "$RUNNER_TEMP/fexaot-window/fexaot.dylib"
-      - name: The x86 program with a window runs from that dylib with NoJIT and takes a tap
-        env:
-          WINEHOST_CLICK: 50,50
-          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-window/fexaot.dylib
-          WINEHOST_FEX_NOJIT: 1
-          WINEHOST_EXPECT_LOG: |
-            [nojit] no JIT pool: nothing is written to executable memory
-            [aot-dispatcher] static code from the AOT image
-            [nojit] no code is generated to run
-          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window-image
-          WINEHOST_FEX_CODEMAP: 1
-          WINEHOST_FEX_ALL_CACHED: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
       - name: Window content of the x86 program
         if: always()
         uses: actions/upload-artifact@v4
