@@ -31,6 +31,13 @@ sh "$here/build-llvm.sh" "$r" "$sdk_name"
 b="$r/build/dxmt-ios"
 rm -rf "$b"
 mkdir -p "$b/shader-headers"
+# winemetal_unix.c includes Madeira's build/madeira_cfg.h and the headers of
+# research/remote-metal (its remote Metal wire format) by relative paths.
+git -C "$work/madeira" sparse-checkout add /research/remote-metal/
+cp "$work/madeira/build/madeira_cfg.h" "$r/build/madeira_cfg.h"
+rm -rf "$r/research"
+mkdir -p "$r/research"
+cp -R "$work/madeira/research/remote-metal" "$r/research/remote-metal"
 if [ "$sdk_name" = iphoneos ]; then
     cp "$work/madeira/build/dxmt-ios/build.sh" "$b/build.sh"
 else
@@ -53,7 +60,7 @@ done
 # stops unless told that D3D12 is not needed.
 if ! MADEIRA_ALLOW_NO_D3D12=1 bash "$b/build.sh"; then
     for e in "$b"/obj/*.err; do
-        [ -s "$e" ] || continue
+        grep -q 'error' "$e" || continue
         echo "--- $e ---"
         head -30 "$e"
     done

@@ -283,7 +283,12 @@ jobs:
             [wow-exit] the code map is written at NtTerminateProcess
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+        # ntdll does not take quite the same path in every run (a few blocks differ),
+        # so the code map is the union of three runs.
+        run: |
+          for run in 1 2 3; do
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+          done
       - name: FEX's offline compiler turns that code map into code caches, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Successfully populated cache
@@ -362,8 +367,20 @@ jobs:
           brew install meson ninja
           xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
           xcrun -sdk macosx metal --version
+      # Saved right after it is built, not at the end of the job: it takes long
+      # to build and should not be lost to a later failing step.
       - name: Restore LLVM for the iPad simulator
-        uses: actions/cache@v4
+        id: llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/dxmt-root/toolchains
+          key: llvm-15.0.7-iphonesimulator-${{ hashFiles('tests/wine-i386/build-llvm.sh') }}
+      - name: LLVM 15 for the iPad simulator, for DXMT's shader compiler
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: sh tests/wine-i386/build-llvm.sh "$RUNNER_TEMP/wine-loader/dxmt-root" iphonesimulator
+      - name: Save LLVM for the iPad simulator
+        if: steps.llvm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/wine-loader/dxmt-root/toolchains
           key: llvm-15.0.7-iphonesimulator-${{ hashFiles('tests/wine-i386/build-llvm.sh') }}
