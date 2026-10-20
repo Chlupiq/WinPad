@@ -283,7 +283,12 @@ jobs:
             [wow-exit] the code map is written at NtTerminateProcess
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache
           WINEHOST_FEX_CODEMAP: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+        # ntdll does not take quite the same path in every run (a few blocks differ),
+        # so the code map is the union of three runs.
+        run: |
+          for run in 1 2 3; do
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+          done
       - name: FEX's offline compiler turns that code map into code caches, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Successfully populated cache
@@ -347,7 +352,11 @@ jobs:
             [wow-exit] the code map is written at NtTerminateProcess
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
           WINEHOST_FEX_CODEMAP: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
+        # As for hello.exe, the code map is the union of three runs.
+        run: |
+          for run in 1 2 3; do
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
+          done
       - name: FEX's offline compiler turns that code map into code caches (x86 program with a window)
         env:
           WINEHOST_EXPECT_OUTPUT: Successfully populated cache
