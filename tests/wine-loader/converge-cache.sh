@@ -24,6 +24,9 @@ while :; do
     [ -n "$(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin' -size +0 2>/dev/null)" ] ||
         { echo "the run failed without new code map blocks" >&2; exit 1; }
     echo "=== round $round: the run took blocks missing from the caches; compiling them too"
+    # shellcheck disable=SC2046 # one argument per code map file
+    python3 "$here/../fex-wow64/codemap-name-main.py" "\\??\\Z:$(printf '%s' "$program" | tr / '\\')" \
+        $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin')
     env -u WINEHOST_CLICK -u WINEHOST_EXPECT_LOG -u WINEHOST_EXPECT_OUTPUT -u WINEHOST_FEX_CODEMAP \
         -u WINEHOST_FEX_ALL_CACHED -u WINEHOST_FEX_DUMP_DISPATCHER \
         WINEHOST_EXPECT_OUTPUT="Successfully populated cache" WINEHOST_EXPECT_FEX_CACHE=1 \
