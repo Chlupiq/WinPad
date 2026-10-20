@@ -18,7 +18,7 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 work=$1
 shift
-[ $# -gt 0 ] || set -- ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt imm32
+[ $# -gt 0 ] || set -- ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32
 wine="$work/madeira/wine"
 b="$wine/build-i386"
 out="$work/i386-windows"
