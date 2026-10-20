@@ -40,7 +40,7 @@ fi
 mkdir -p "$tc"
 if [ ! -d "$src/.git" ]; then
     git init -q "$src"
-    git -C "$src" sparse-checkout set /llvm/ /cmake/ /third-party/
+    git -C "$src" sparse-checkout set --no-cone /llvm/ '!/llvm/test/' '!/llvm/unittests/' /cmake/ /third-party/
     git -C "$src" fetch -q --depth 1 --filter=blob:none https://github.com/llvm/llvm-project.git \
         refs/tags/llvmorg-15.0.7
     git -C "$src" checkout -q FETCH_HEAD
