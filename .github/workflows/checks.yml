@@ -186,7 +186,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/wine-loader/madeira/wine/build-i386
-          key: wine-i386-257f271-${{ hashFiles('tests/wine-i386/build.sh', 'patches/wine/0003-*') }}
+          key: wine-i386-257f271-${{ hashFiles('tests/wine-i386/build.sh', 'tests/wine-i386/build-d3d9.sh', 'patches/wine/0003-*') }}
       - name: Restore built Wine libraries
         id: wine-built
         uses: actions/cache@v4
@@ -353,6 +353,41 @@ jobs:
         with:
           name: WinPadWine-xcode
           path: ${{ runner.temp }}/wine-app/WinPadWine-xcode
+      # Direct3D 9 for 32-bit programs, as in Madeira (docs/WOW64.md there):
+      # DXMT's i386 d3d9shim forwards to its D3D9 frontend (d3d9-emulated.dll),
+      # which FEX runs like the program and which reaches Metal through
+      # winemetal's 32-bit unix-call table, linked into the host.
+      - name: Tools for DXMT (meson, ninja, the Metal toolchain)
+        run: |
+          brew install meson ninja
+          xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+          xcrun -sdk macosx metal --version
+      - name: Restore LLVM for the iPad simulator
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/dxmt-root/toolchains
+          key: llvm-15.0.7-iphonesimulator-${{ hashFiles('tests/wine-i386/build-llvm.sh') }}
+      - name: DXMT's unix side (winemetal, airconv with LLVM) for the iPad simulator, with Madeira's build script
+        run: sh tests/wine-i386/build-dxmt-unix.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
+      - name: DXMT's i386 d3d9shim, D3D9 frontend and winemetal, the Wine modules they need, and a 32-bit D3D9 cube
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          sh tests/wine-i386/build-d3d9.sh "$RUNNER_TEMP/wine-loader"
+      - name: A 32-bit Direct3D 9 program presents frames through DXMT and Metal, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # The cube (Madeira's tests/x86/d3d9-cube-x86.c) spins for 8 s and exits with 43.
+          WINEHOST_EXPECT_OUTPUT: "MADEIRA-D3D9: done, frames presented = "
+          WINEHOST_EXPECT_EXIT: 43
+          WINEHOST_SECONDS: 60
+          # Device creation, the first Presents, and Metal drawables for them
+          # from the layer the host gave DXMT for the window.
+          WINEHOST_EXPECT_LOG: |
+            MADEIRA-D3D9: Direct3DCreate9 ok
+            MADEIRA-D3D9: device created
+            MADEIRA-D3D9: present 1 hr=0x00000000
+            winehost: Metal layer
+            winehost: drawable 1 of Metal layer
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d9-cube.exe"
       - name: FEX code map and code caches of the x86 run
         if: always()
         uses: actions/upload-artifact@v4

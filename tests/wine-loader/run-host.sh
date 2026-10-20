@@ -14,7 +14,9 @@
 # first menu, which has to open (a new window); with WINEHOST_CLICK=X,Y it
 # taps at X %, Y % of the window's client area, which has to change what the
 # window shows. WINEHOST_WINEDEBUG replaces
-# WINEDEBUG=+loaddll.
+# WINEDEBUG=+loaddll. A console program has to exit with
+# WINEHOST_EXPECT_EXIT (default 0); WINEHOST_SECONDS (default 30) is how
+# long the host waits for the program.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -88,7 +90,7 @@ udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcod
 echo "iPad simulator $udid"
 xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
-seconds=30
+seconds=${WINEHOST_SECONDS:-30}
 SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
     SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG="${WINEHOST_WINEDEBUG:-+loaddll}" \
     SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
@@ -162,7 +164,7 @@ if [ -n "$default_program" ]; then
     grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
     grep -q '^Hello from Wine' "$out/run.log"
 elif [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ]; then
-    grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
+    grep -q "^winehost: Wine process exited with code ${WINEHOST_EXPECT_EXIT:-0}\$" "$out/run.log"
     grep -qF "$WINEHOST_EXPECT_OUTPUT" "$out/run.log"
 else
     grep -q '^winehost: frame of window' "$out/run.log"
