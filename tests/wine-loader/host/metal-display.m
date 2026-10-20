@@ -135,4 +135,12 @@ __attribute__((constructor)) static void wrap_next_drawable(void) {
 @implementation MTLFXFrameInterpolatorDescriptor
 + (BOOL)supportsDevice:(id)device { return NO; }
 @end
+// Nor textures shared across processes (DXMT's shared resources): no
+// handle can be made from a mach port.
+@interface MTLSharedTextureHandle : NSObject
+@end
+@implementation MTLSharedTextureHandle
+- (instancetype)initWithMachPort:(unsigned int)port { return nil; }
+- (unsigned int)createMachPort { return 0; }
+@end
 #endif

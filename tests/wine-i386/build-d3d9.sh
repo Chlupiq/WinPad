@@ -95,6 +95,10 @@ p="$d/build-pe-i386/src"
     -Wl,--entry=_start -Wl,--large-address-aware \
     -DMADEIRA_D3D9_SECONDS="${D3D9_CUBE_SECONDS:-8}" \
     -o "$out/d3d9-cube.exe" "$here/d3d9-cube.c" -lkernel32 -luser32 -ld3d9
+# MinGW's import libraries name USER32.dll and GDI32.dll, which Wine does not
+# find in these runs; see lowercase-imports.py.
+python3 -I "$here/lowercase-imports.py" "$out/winemetal.dll" "$out/d3d9.dll" "$out/d3d9shim.dll" \
+    "$out/d3d9-emulated.dll" "$out/d3d9-cube.exe"
 
 # Every DLL a module imports has to be there (api-ms-win-* resolve through
 # the API set schema, to ucrtbase).

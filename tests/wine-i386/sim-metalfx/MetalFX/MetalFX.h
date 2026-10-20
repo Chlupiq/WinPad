@@ -8,6 +8,12 @@
 // supported, so DXMT never creates a scaler or interpolator there.
 #import <Metal/Metal.h>
 
+// Not MetalFX, but missing from the simulator's Metal headers too: textures
+// shared across processes by a mach port, which DXMT's shared resources use.
+// It comes before winemetal_unix.c's own category of it, as MetalFX.h does.
+@interface MTLSharedTextureHandle : NSObject
+@end
+
 @interface MTLFXSpatialScalerDescriptor : NSObject
 @property(nonatomic) MTLPixelFormat colorTextureFormat;
 @property(nonatomic) MTLPixelFormat outputTextureFormat;

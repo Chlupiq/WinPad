@@ -60,17 +60,6 @@ if [ "$wow64" = 1 ]; then
     # the i386 set there (madeira_link_syswow64 in WineProcessBridge.m).
     mkdir -p "$out/prefix/drive_c/windows/syswow64"
     for f in "$work/i386-windows"/*.dll; do ln -s "$f" "$out/prefix/drive_c/windows/syswow64/"; done
-    # Programs and DXMT's DLLs (MinGW import libraries) import USER32.dll,
-    # GDI32.dll and so on. Where the volume is case-sensitive, Wine did not
-    # find user32.dll by those names (c0000135 for the D3D9 cube), so the
-    # upper-case names are linked as well then.
-    if [ ! -e "$work/i386-windows/NTDLL.DLL" ]; then
-        echo "run-host: case-sensitive volume, syswow64 also gets upper-case DLL names"
-        for f in "$work/i386-windows"/*.dll; do
-            n=${f##*/}
-            ln -s "$f" "$out/prefix/drive_c/windows/syswow64/$(printf '%s' "${n%.dll}" | tr a-z A-Z).dll"
-        done
-    fi
     # The 64-bit half (wow64.dll, xtajit.dll) is loaded by its full
     # C:\windows\system32 path, so that farm is needed too, as the app makes it.
     mkdir -p "$out/prefix/drive_c/windows/system32"
