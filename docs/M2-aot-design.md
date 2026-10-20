@@ -81,9 +81,9 @@ Na iOS tak FEX nepotřebuje spustitelnou paměť pro dispatcher ani pro bloky v 
 Volba `NoJIT` zaručí, že FEX nikdy nežádá o spustitelnou paměť, což je na iOS bez debuggeru podmínka:
 
 - Paměť pro JIT kód se alokuje jen pro čtení a zápis.
-- Když blok hosta není v lookup cache (tedy ani v AOT obrazu), `CompileBlock` FEX zastaví s chybou s adresou bloku. Nic nepřekládá.
+- Když blok hosta není v lookup cache (tedy ani v AOT obrazu), `CompileBlock` nic nepřekládá. Původně FEX zastavil s adresou bloku, od patche 0018 blok spustí interpret IR (docs/M4-interpreter.md).
 - Dispatcher musí být z obrazu. Když tam žádný odpovídající není, FEX skončí, místo aby udělal spustitelný vlastní.
 
-CI spouští běh z `.so` s `FEX_NOJIT=1`, takže ověřuje, že testovací program proběhne celý jen z AOT kódu. Pro skutečné hry zůstává otázka bloků, které při nahrávání neproběhly: interpret, nebo opakované nahrávání, dokud cache nepokryje vše.
+CI spouští běh z `.so` s `FEX_NOJIT=1`, takže ověřuje, že testovací program proběhne celý jen z AOT kódu. Bloky, které při nahrávání neproběhly, teď spouští interpret IR (docs/M4-interpreter.md).
 
 Zbývá: iOS build a test na iPadu.

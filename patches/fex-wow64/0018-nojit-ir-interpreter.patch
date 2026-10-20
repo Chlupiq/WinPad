@@ -1,0 +1,2933 @@
+With NoJIT, blocks missing from the AOT image run in an IR interpreter (FEX 3bec2ac, on top of 0017)
+
+A NoJIT run used to stop at the first guest block the AOT image did not
+have ("NoJIT: guest block ... is not in the AOT image"). Code maps are
+not deterministic, so any run could hit one.
+
+CompileBlock now generates the block's IR as usual, with the register
+allocator left out (PassManager::SkipRA), copies it out of the thread's
+OpDispatcher and runs it in Interface/Core/Interpreter/IRInterpreter.cpp
+against Frame->State. The dispatcher already spilled the static
+registers there, so the interpreter sets State.rip at the block's exit
+and returns the dispatcher loop top; a Break returns the guest signal
+stub with SynchronousFaultData set, as the JIT does. Nothing is mapped
+executable. ExitFunctionLink no longer links under NoJIT when the
+target is missing: it bounces to the dispatcher loop, which interprets
+the target on every visit.
+
+Op semantics follow the arm64 JIT (sizes under 32 bits, which flags each
+op writes, the guest window's 32-bit address wrap). Before a block runs,
+every op it uses is checked; an unknown one stops the process with
+"[interp] guest block X needs IR op Y, which the interpreter does not
+implement" for each, then "NoJIT: ... has no implementation of IR op Y".
+x87/F80, AES/SHA/CRC, thunks and most of the wider SSE ops are not
+implemented yet (docs/M4-interpreter.md).
+
+Each interpreted block is logged once as "[interp] learned block X"
+(first 64) and appended to the code map when one is being written, so
+the next process-all puts it into the image. At NtTerminateProcess the
+run logs "[interp] fallback ran N blocks (M distinct) that are not in
+the AOT image".
+
+FEX_INTERP_SURVEY=1 in the offline compiler reports, per process, how
+many of the code map's blocks the interpreter could run and which ops
+the rest need ("[interp-survey] ...").
+
+diff --git a/FEXCore/Source/CMakeLists.txt b/FEXCore/Source/CMakeLists.txt
+index 40b921444..cf329f6e7 100644
+--- a/FEXCore/Source/CMakeLists.txt
++++ b/FEXCore/Source/CMakeLists.txt
+@@ -35,6 +35,7 @@ set(SRCS
+   Interface/Core/Dispatcher/Dispatcher.cpp
+   Interface/Core/Interpreter/Fallbacks/InterpreterFallbacks.cpp
+   Interface/Core/Interpreter/Fallbacks/StringCompareFallbacks.cpp
++  Interface/Core/Interpreter/IRInterpreter.cpp
+   Interface/Core/JIT/JIT.cpp
+   Interface/Core/JIT/ALUOps.cpp
+   Interface/Core/JIT/AtomicOps.cpp
+diff --git a/FEXCore/Source/Interface/Context/Context.cpp b/FEXCore/Source/Interface/Context/Context.cpp
+index de8415b0a..e6aff993b 100644
+--- a/FEXCore/Source/Interface/Context/Context.cpp
++++ b/FEXCore/Source/Interface/Context/Context.cpp
+@@ -20,6 +20,17 @@ fextl::unique_ptr<FEXCore::Context::Context> FEXCore::Context::Context::CreateNe
+ }
+ 
+ void FEXCore::Context::ContextImpl::CompileRIP(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) {
++  // WinPad: FEX_INTERP_SURVEY=1 makes the offline compiler report how much of a code map the
++  // NoJIT interpreter could run, and which IR ops it is missing.
++  static const bool InterpSurvey = [] {
++    const char* Env = getenv("FEX_INTERP_SURVEY");
++    return Env && *Env && *Env != '0';
++  }();
++  if (InterpSurvey) {
++    if (auto IR = GenerateInterpreterIR(Thread, GuestRIP, false)) {
++      CPU::InterpreterSurvey(*IR, GuestRIP);
++    }
++  }
+   CompileBlock(Thread->CurrentFrame, GuestRIP);
+ }
+ 
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index cc52fb771..bbcbc133c 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -4,6 +4,7 @@
+ #include "Common/JitSymbols.h"
+ #include "Interface/Core/CPUBackend.h"
+ #include "Interface/Core/CPUID.h"
++#include "Interface/Core/Interpreter/IRInterpreter.h"
+ #include <Interface/IR/IntrusiveIRList.h>
+ #include <FEXCore/Config/Config.h>
+ #include <FEXCore/Core/Context.h>
+@@ -11,6 +12,7 @@
+ #include <FEXCore/Core/HostFeatures.h>
+ #include <FEXCore/IR/IR.h>
+ #include <FEXCore/Utils/CompilerDefs.h>
++#include <FEXCore/Utils/LogManager.h>
+ #include <FEXCore/Utils/SignalScopeGuards.h>
+ #include <FEXCore/fextl/memory.h>
+ #include <FEXCore/fextl/set.h>
+@@ -219,6 +221,11 @@ public:
+   }
+ 
+   void FlushAndCloseCodeMap() override {
++    // WinPad: the NoJIT interpreter's summary, at the point the process writes its code map.
++    if (const auto Runs = InterpRuns.load(std::memory_order_relaxed); Runs && !InterpSummaryLogged.exchange(true)) {
++      std::scoped_lock lk(InterpLearnedLock);
++      LogMan::Msg::EFmt("[interp] fallback ran {} blocks ({} distinct) that are not in the AOT image", Runs, InterpLearned.size());
++    }
+     if (CodeMapWriter) {
+       CodeMapWriter.reset();
+     }
+@@ -438,6 +445,15 @@ public:
+   uintptr_t CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP, uint64_t MaxInst = 0);
+   uintptr_t CompileSingleStep(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP);
+ 
++  // WinPad: NoJIT fallback. Generates the pre-RA IR for a block that is not in the AOT image and
++  // copies it out of the thread's OpDispatcher. Records the block as learned (log line and code
++  // map entry) the first time it is seen, unless Publish is false.
++  fextl::unique_ptr<CPU::InterpreterIR> GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool Publish);
++  std::atomic<uint64_t> InterpRuns {0};
++  std::atomic<bool> InterpSummaryLogged {false};
++  std::mutex InterpLearnedLock;
++  fextl::set<uint64_t> InterpLearned;
++
+   FEXCore::JITSymbols Symbols;
+ 
+   FEXCore::Utils::PooledAllocatorVirtual OpDispatcherAllocator {"FEXMem_OpDispatcher"};
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index aa40f8fdd..4368322bd 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -2153,7 +2153,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+ #endif
+ 
+   if (Config.NoJIT()) {
+-    ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image", GuestRIP);
++    // WinPad: the block is not in the AOT image. Run it through the IR interpreter, which needs no
++    // executable memory, and remember it so the next AOT build can include it.
++#ifdef FEX_IOS_HOST
++    auto InterpIR = GenerateInterpreterIR(Thread, GuestRIP, !IosUnpublished);
++#else
++    auto InterpIR = GenerateInterpreterIR(Thread, GuestRIP, true);
++#endif
++    if (!InterpIR) {
++      ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image, and the frontend produced no IR to interpret", GuestRIP);
++    }
++    if (const char* Unsupported = CPU::InterpreterFindUnsupported(*InterpIR, GuestRIP)) {
++      ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image, and the interpreter has no implementation of IR op {}",
++                        GuestRIP, Unsupported);
++    }
++    InterpRuns.fetch_add(1, std::memory_order_relaxed);
++#ifdef FEX_IOS_HOST
++    // The block may make a syscall, which can invalidate code or run nested guest code; neither may
++    // happen under the shared invalidation lock. The interpreter only reads its own copy of the IR.
++    if (lk.owns_lock()) {
++      lk.unlock();
++    }
++#endif
++    return CPU::InterpretIR(this, Frame, *InterpIR, GuestRIP);
+   }
+ 
+   // iOS-Madeira: cache miss reached — count as true compile.
+@@ -2297,6 +2319,50 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   return (uintptr_t)CodePtr;
+ }
+ 
++fextl::unique_ptr<CPU::InterpreterIR>
++ContextImpl::GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool Publish) {
++  Thread->PassManager->SkipRA = true;
++  auto Result = GenerateIR(Thread, GuestRIP, false, 0);
++  Thread->PassManager->SkipRA = false;
++  FEX_MadeiraIRCapClear();
++  if (!Result.IRView) {
++    // OpDispatcher IR already released in this case.
++    return {};
++  }
++
++  auto Copy = fextl::make_unique<CPU::InterpreterIR>();
++  const auto& View = *Result.IRView;
++  Copy->DataSize = View.GetDataSize();
++  Copy->ListSize = View.GetListSize();
++  Copy->Data.resize((Copy->DataSize + 7) / 8);
++  Copy->List.resize((Copy->ListSize + 7) / 8);
++  memcpy(Copy->Data.data(), reinterpret_cast<const void*>(View.GetData()), Copy->DataSize);
++  memcpy(Copy->List.data(), reinterpret_cast<const void*>(View.GetListData()), Copy->ListSize);
++  Thread->OpDispatcher->DelayedDisownBuffer();
++
++  if (Publish) {
++    bool New;
++    size_t Count;
++    {
++      std::scoped_lock lk(InterpLearnedLock);
++      New = InterpLearned.insert(GuestRIP).second;
++      Count = InterpLearned.size();
++    }
++    if (New) {
++      if (Count <= 64) {
++        LogMan::Msg::EFmt("[interp] learned block {:#x}: not in the AOT image, interpreted", GuestRIP);
++      }
++      if (CodeMapWriter) {
++        auto Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
++        if (Region && Region->FileStartVA != 0) {
++          CodeMapWriter->AppendBlock(*Region, GuestRIP);
++        }
++      }
++    }
++  }
++  return Copy;
++}
++
+ uintptr_t ContextImpl::CompileSingleStep(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP) {
+   FEXCORE_PROFILE_SCOPED("CompileSingleStep");
+   auto Thread = Frame->Thread;
+diff --git a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
+new file mode 100644
+index 000000000..e8baa08e6
+--- /dev/null
++++ b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
+@@ -0,0 +1,2617 @@
++// SPDX-License-Identifier: MIT
++/*
++ * WinPad: IR interpreter for the NoJIT mode.
++ *
++ * Under FEX_NOJIT=1 FEX runs only code from the AOT image and never maps executable memory. A
++ * guest block that is not in the image used to stop the process. Instead, CompileBlock now hands
++ * the block's IR to this interpreter: the frontend and the OpcodeDispatcher run as usual (they
++ * only produce data), the register allocator is skipped, and the pre-RA IR is executed here
++ * against Frame->State.
++ *
++ * Contract with the dispatcher: the dispatcher calls CompileBlock with the static registers
++ * spilled to Frame->State (GPRs to gregs, FPRs to xmm.sse, NZCV to flags[24], PF/AF to
++ * pf_raw/af_raw), and refills them from there before it jumps to what CompileBlock returned. So
++ * State is the complete guest state while the interpreter runs, and returning the dispatcher
++ * loop top with State.rip set makes the dispatcher continue at the next guest block.
++ *
++ * Semantics follow the arm64 JIT op by op (the files in Core/JIT), including how sizes below 32 bits
++ * are widened and which flags each op writes, so that IR the frontend emitted for the JIT means
++ * the same thing here. Ops the interpreter does not know are found before anything runs; the
++ * block is then refused with a log line naming each one.
++ */
++#include "Interface/Core/Interpreter/IRInterpreter.h"
++
++#include "Interface/Context/Context.h"
++#include "Interface/IR/IntrusiveIRList.h"
++#include "Interface/IR/RegisterAllocationData.h"
++
++#include <FEXCore/Core/CoreState.h>
++#include <FEXCore/Core/X86Enums.h>
++#include <FEXCore/HLE/SyscallHandler.h>
++#include <FEXCore/IR/IR.h>
++#include <FEXCore/Utils/LogManager.h>
++
++#include <atomic>
++#include <bit>
++#include <cmath>
++#include <cstring>
++#include <limits>
++#include <mutex>
++#include <type_traits>
++
++namespace FEXCore::CPU {
++namespace {
++
++using namespace FEXCore::IR;
++
++struct alignas(16) Val {
++  uint8_t B[32];
++};
++
++template<typename T>
++inline T GetEl(const Val& V, size_t i) {
++  T t;
++  memcpy(&t, V.B + i * sizeof(T), sizeof(T));
++  return t;
++}
++
++template<typename T>
++inline void SetEl(Val& V, size_t i, T t) {
++  memcpy(V.B + i * sizeof(T), &t, sizeof(T));
++}
++
++inline uint64_t Mask(unsigned Bytes) {
++  return Bytes >= 8 ? ~0ULL : ((1ULL << (Bytes * 8)) - 1);
++}
++
++// The JIT's ConvertSize: an op narrower than 64 bits is a 32-bit arm64 instruction, which
++// zero-extends its result from 32 bits.
++inline uint64_t ResW(bool Is64, uint64_t V) {
++  return Is64 ? V : static_cast<uint32_t>(V);
++}
++
++constexpr uint32_t FLAG_N = 1U << 31;
++constexpr uint32_t FLAG_Z = 1U << 30;
++constexpr uint32_t FLAG_C = 1U << 29;
++constexpr uint32_t FLAG_V = 1U << 28;
++
++inline uint32_t PackNZCV(bool N, bool Z, bool C, bool V) {
++  return (N ? FLAG_N : 0) | (Z ? FLAG_Z : 0) | (C ? FLAG_C : 0) | (V ? FLAG_V : 0);
++}
++
++// arm64 AddWithCarry at 32 or 64 bits.
++inline uint64_t AddWithCarry(uint64_t X, uint64_t Y, bool Carry, bool Is64, uint32_t* NZCV) {
++  if (Is64) {
++    const unsigned __int128 US = static_cast<unsigned __int128>(X) + Y + (Carry ? 1 : 0);
++    const uint64_t R = static_cast<uint64_t>(US);
++    const bool C = (US >> 64) != 0;
++    const bool V = ((~(X ^ Y) & (X ^ R)) >> 63) & 1;
++    *NZCV = PackNZCV(R >> 63, R == 0, C, V);
++    return R;
++  }
++  const uint32_t x = static_cast<uint32_t>(X);
++  const uint32_t y = static_cast<uint32_t>(Y);
++  const uint64_t US = static_cast<uint64_t>(x) + y + (Carry ? 1 : 0);
++  const uint32_t R = static_cast<uint32_t>(US);
++  const bool C = (US >> 32) != 0;
++  const bool V = ((~(x ^ y) & (x ^ R)) >> 31) & 1;
++  *NZCV = PackNZCV(R >> 31, R == 0, C, V);
++  return R;
++}
++
++inline bool CondHolds(CondClass Cond, uint32_t NZCV) {
++  const bool N = NZCV & FLAG_N;
++  const bool Z = NZCV & FLAG_Z;
++  const bool C = NZCV & FLAG_C;
++  const bool V = NZCV & FLAG_V;
++  switch (Cond) {
++  case CondClass::EQ: return Z;
++  case CondClass::NEQ: return !Z;
++  case CondClass::UGE: return C;
++  case CondClass::ULT: return !C;
++  case CondClass::MI: return N;
++  case CondClass::PL: return !N;
++  case CondClass::VS:
++  case CondClass::FU: return V;
++  case CondClass::VC:
++  case CondClass::FNU: return !V;
++  case CondClass::UGT: return C && !Z;
++  case CondClass::ULE: return !(C && !Z);
++  case CondClass::SGE:
++  case CondClass::FGE: return N == V;
++  case CondClass::SLT:
++  case CondClass::FLU: return N != V;
++  case CondClass::SGT:
++  case CondClass::FGT: return !Z && N == V;
++  case CondClass::SLE:
++  case CondClass::FLEU: return !(!Z && N == V);
++  case CondClass::AL: return true;
++  default: ERROR_AND_DIE_FMT("[interp] unhandled condition {}", static_cast<uint32_t>(Cond));
++  }
++}
++
++template<typename F>
++inline uint32_t FCmpNZCV(F A, F B) {
++  if (std::isnan(A) || std::isnan(B)) {
++    return FLAG_C | FLAG_V;
++  }
++  if (A == B) {
++    return FLAG_Z | FLAG_C;
++  }
++  if (A < B) {
++    return FLAG_N;
++  }
++  return FLAG_C;
++}
++
++inline uint64_t ShiftBy(ShiftType Type, uint64_t V, unsigned Amount, bool Is64) {
++  const unsigned Bits = Is64 ? 64 : 32;
++  Amount &= Bits - 1;
++  V = ResW(Is64, V);
++  switch (Type) {
++  case ShiftType::LSL: return ResW(Is64, V << Amount);
++  case ShiftType::LSR: return V >> Amount;
++  case ShiftType::ASR:
++    return Is64 ? static_cast<uint64_t>(static_cast<int64_t>(V) >> Amount) :
++                  static_cast<uint32_t>(static_cast<int32_t>(static_cast<uint32_t>(V)) >> Amount);
++  case ShiftType::ROR:
++    if (Amount == 0) {
++      return V;
++    }
++    return ResW(Is64, (V >> Amount) | (V << (Bits - Amount)));
++  }
++  return V;
++}
++
++template<typename I, typename F>
++inline I SatCvt(F f) {
++  if (std::isnan(f)) {
++    return 0;
++  }
++  if (f >= static_cast<F>(std::numeric_limits<I>::max())) {
++    return std::numeric_limits<I>::max();
++  }
++  if (f <= static_cast<F>(std::numeric_limits<I>::min())) {
++    return std::numeric_limits<I>::min();
++  }
++  return static_cast<I>(f);
++}
++
++#define FOR_ES(ES, BODY)                          \
++  switch (ES) {                                   \
++  case 1: {                                       \
++    using T = uint8_t;                            \
++    BODY;                                         \
++    break;                                        \
++  }                                               \
++  case 2: {                                       \
++    using T = uint16_t;                           \
++    BODY;                                         \
++    break;                                        \
++  }                                               \
++  case 4: {                                       \
++    using T = uint32_t;                           \
++    BODY;                                         \
++    break;                                        \
++  }                                               \
++  case 8: {                                       \
++    using T = uint64_t;                           \
++    BODY;                                         \
++    break;                                        \
++  }                                               \
++  default: ERROR_AND_DIE_FMT("[interp] bad element size {}", ES); \
++  }
++
++#define FOR_FES(ES, BODY)                         \
++  switch (ES) {                                   \
++  case 4: {                                       \
++    using F = float;                              \
++    using T = uint32_t;                           \
++    using S [[maybe_unused]] = int32_t;           \
++    BODY;                                         \
++    break;                                        \
++  }                                               \
++  case 8: {                                       \
++    using F = double;                             \
++    using T = uint64_t;                           \
++    using S [[maybe_unused]] = int64_t;           \
++    BODY;                                         \
++    break;                                        \
++  }                                               \
++  default: ERROR_AND_DIE_FMT("[interp] bad float element size {}", ES); \
++  }
++
++template<typename F>
++inline F FBits(uint64_t V) {
++  if constexpr (sizeof(F) == 4) {
++    return std::bit_cast<float>(static_cast<uint32_t>(V));
++  } else {
++    return std::bit_cast<double>(V);
++  }
++}
++
++template<typename F>
++inline uint64_t FToBits(F f) {
++  if constexpr (sizeof(F) == 4) {
++    return std::bit_cast<uint32_t>(f);
++  } else {
++    return std::bit_cast<uint64_t>(f);
++  }
++}
++
++bool IsSupported(IROps Op) {
++  switch (Op) {
++  case OP_DUMMY:
++  case OP_IRHEADER:
++  case OP_CODEBLOCK:
++  case OP_BEGINBLOCK:
++  case OP_ENDBLOCK:
++  case OP_INVALIDATEFLAGS:
++  case OP_GUESTOPCODE:
++  case OP_GETROUNDINGMODE:
++  case OP_SETROUNDINGMODE:
++  case OP_PUSHROUNDINGMODE:
++  case OP_POPROUNDINGMODE:
++  case OP_PRINT:
++  case OP_PRINTMSG:
++  case OP_ALLOCATEGPR:
++  case OP_ALLOCATEFPR:
++  case OP_ALLOCATEGPRAFTER:
++  case OP_YIELD:
++  case OP_JUMP:
++  case OP_CONDJUMP:
++  case OP_EXITFUNCTION:
++  case OP_BREAK:
++  case OP_SYSCALL:
++  case OP_CPUID:
++  case OP_XGETBV:
++  case OP_COPY:
++  case OP_LOADREGISTER:
++  case OP_LOADPF:
++  case OP_LOADAF:
++  case OP_STOREREGISTER:
++  case OP_STOREPF:
++  case OP_STOREAF:
++  case OP_LOADCONTEXT:
++  case OP_LOADCONTEXTPAIR:
++  case OP_STORECONTEXT:
++  case OP_STORECONTEXTPAIR:
++  case OP_LOADCONTEXTINDEXED:
++  case OP_STORECONTEXTINDEXED:
++  case OP_FORMCONTEXTADDRESS:
++  case OP_LOADNZCV:
++  case OP_STORENZCV:
++  case OP_LOADDF:
++  case OP_LOADMEM:
++  case OP_LOADMEMPAIR:
++  case OP_STOREMEM:
++  case OP_STOREMEMPAIR:
++  case OP_LOADMEMTSO:
++  case OP_STOREMEMTSO:
++  case OP_VLOADVECTORELEMENT:
++  case OP_VSTOREVECTORELEMENT:
++  case OP_VBROADCASTFROMMEM:
++  case OP_PUSH:
++  case OP_RMWHANDLE:
++  case OP_POP:
++  case OP_MEMSET:
++  case OP_MEMCPY:
++  case OP_CACHELINECLEAR:
++  case OP_CACHELINECLEAN:
++  case OP_CACHELINEZERO:
++  case OP_FENCE:
++  case OP_PREFETCH:
++  case OP_VSTORENONTEMPORAL:
++  case OP_VSTORENONTEMPORALPAIR:
++  case OP_VLOADNONTEMPORAL:
++  case OP_CONTEXTCLEAR:
++  case OP_CAS:
++  case OP_CASPAIR:
++  case OP_ATOMICSWAP:
++  case OP_ATOMICFETCHADD:
++  case OP_ATOMICFETCHSUB:
++  case OP_ATOMICFETCHAND:
++  case OP_ATOMICFETCHCLR:
++  case OP_ATOMICFETCHOR:
++  case OP_ATOMICFETCHXOR:
++  case OP_ATOMICFETCHNEG:
++  case OP_TELEMETRYSETVALUE:
++  case OP_ENTRYPOINTOFFSET:
++  case OP_INLINEENTRYPOINTOFFSET:
++  case OP_CONSTANT:
++  case OP_INLINECONSTANT:
++  case OP_CYCLECOUNTER:
++  case OP_PROCESSORID:
++  case OP_NEG:
++  case OP_NOT:
++  case OP_POPCOUNT:
++  case OP_FINDLSB:
++  case OP_FINDMSB:
++  case OP_FINDTRAILINGZEROES:
++  case OP_COUNTLEADINGZEROES:
++  case OP_REV:
++  case OP_RBIT:
++  case OP_ADD:
++  case OP_ADC:
++  case OP_SBB:
++  case OP_ADDSHIFT:
++  case OP_ADDWITHFLAGS:
++  case OP_ADDNZCV:
++  case OP_SETSMALLNZV:
++  case OP_CARRYINVERT:
++  case OP_AXFLAG:
++  case OP_PARITY:
++  case OP_RMIFNZCV:
++  case OP_CONDADDNZCV:
++  case OP_CONDSUBNZCV:
++  case OP_ADCWITHFLAGS:
++  case OP_ADCZERO:
++  case OP_ADCZEROWITHFLAGS:
++  case OP_SBBWITHFLAGS:
++  case OP_ADCNZCV:
++  case OP_SBBNZCV:
++  case OP_SUB:
++  case OP_SUBSHIFT:
++  case OP_SUBWITHFLAGS:
++  case OP_CMPPAIRZ:
++  case OP_SUBNZCV:
++  case OP_OR:
++  case OP_ORLSHL:
++  case OP_ORLSHR:
++  case OP_ORNROR:
++  case OP_XOR:
++  case OP_XORSHIFT:
++  case OP_XORNSHIFT:
++  case OP_AND:
++  case OP_ANDSHIFT:
++  case OP_ANDWITHFLAGS:
++  case OP_ANDN:
++  case OP_TESTNZ:
++  case OP_TESTZ:
++  case OP_LSHL:
++  case OP_LSHR:
++  case OP_ASHR:
++  case OP_SHIFTFLAGS:
++  case OP_ROTATEFLAGS:
++  case OP_ROR:
++  case OP_MUL:
++  case OP_UMUL:
++  case OP_UMULL:
++  case OP_SMULL:
++  case OP_MULH:
++  case OP_UMULH:
++  case OP_BFI:
++  case OP_BFXIL:
++  case OP_BFE:
++  case OP_SBFE:
++  case OP_NZCVSELECT:
++  case OP_NZCVSELECTV:
++  case OP_NZCVSELECTINCREMENT:
++  case OP_SELECT:
++  case OP_MASKGENERATEFROMBITWIDTH:
++  case OP_EXTR:
++  case OP_PDEP:
++  case OP_PEXT:
++  case OP_DIV:
++  case OP_UDIV:
++  case OP_VEXTRACTTOGPR:
++  case OP_FLOAT_TOGPR_S:
++  case OP_FLOAT_TOGPR_ZS:
++  case OP_FCMP:
++  case OP_VFADDSCALARINSERT:
++  case OP_VFSUBSCALARINSERT:
++  case OP_VFMULSCALARINSERT:
++  case OP_VFDIVSCALARINSERT:
++  case OP_VFMINSCALARINSERT:
++  case OP_VFMAXSCALARINSERT:
++  case OP_VFSQRTSCALARINSERT:
++  case OP_VFRSQRTSCALARINSERT:
++  case OP_VFRECPSCALARINSERT:
++  case OP_VFTOFSCALARINSERT:
++  case OP_VSTOFGPRINSERT:
++  case OP_VFCMPSCALARINSERT:
++  case OP_VMOV:
++  case OP_VECTORIMM:
++  case OP_LOADNAMEDVECTORCONSTANT:
++  case OP_LOADNAMEDVECTORINDEXEDCONSTANT:
++  case OP_VNEG:
++  case OP_VNOT:
++  case OP_VABS:
++  case OP_VPOPCOUNT:
++  case OP_VADDV:
++  case OP_VUMINV:
++  case OP_VUMAXV:
++  case OP_VFABS:
++  case OP_VFNEG:
++  case OP_VFRECP:
++  case OP_VFSQRT:
++  case OP_VFRSQRT:
++  case OP_VCMPEQZ:
++  case OP_VCMPGTZ:
++  case OP_VCMPLTZ:
++  case OP_VDUPELEMENT:
++  case OP_VSHLI:
++  case OP_VUSHRI:
++  case OP_VUSHRAI:
++  case OP_VSSHRI:
++  case OP_VSXTL:
++  case OP_VSXTL2:
++  case OP_VUXTL:
++  case OP_VUXTL2:
++  case OP_VREV32:
++  case OP_VREV64:
++  case OP_VADD:
++  case OP_VSUB:
++  case OP_VAND:
++  case OP_VANDN:
++  case OP_VORN:
++  case OP_VOR:
++  case OP_VXOR:
++  case OP_VUQADD:
++  case OP_VUQSUB:
++  case OP_VSQADD:
++  case OP_VSQSUB:
++  case OP_VADDP:
++  case OP_VURAVG:
++  case OP_VUMIN:
++  case OP_VUMAX:
++  case OP_VSMIN:
++  case OP_VSMAX:
++  case OP_VZIP:
++  case OP_VZIP2:
++  case OP_VUNZIP:
++  case OP_VUNZIP2:
++  case OP_VTRN:
++  case OP_VTRN2:
++  case OP_VFADD:
++  case OP_VFSUB:
++  case OP_VFMUL:
++  case OP_VFDIV:
++  case OP_VFMIN:
++  case OP_VFMAX:
++  case OP_VMUL:
++  case OP_VUMULL:
++  case OP_VSMULL:
++  case OP_VUMULL2:
++  case OP_VSMULL2:
++  case OP_VUMULH:
++  case OP_VSMULH:
++  case OP_VUSHL:
++  case OP_VUSHR:
++  case OP_VSSHR:
++  case OP_VUSHLS:
++  case OP_VUSHRS:
++  case OP_VSSHRS:
++  case OP_VINSELEMENT:
++  case OP_VINSGPR:
++  case OP_VEXTR:
++  case OP_VCMPEQ:
++  case OP_VCMPGT:
++  case OP_VFCMPEQ:
++  case OP_VFCMPNEQ:
++  case OP_VFCMPLT:
++  case OP_VFCMPGT:
++  case OP_VFCMPLE:
++  case OP_VFCMPORD:
++  case OP_VFCMPUNO:
++  case OP_VTBL1:
++  case OP_VTBL2:
++  case OP_VTBX1:
++  case OP_VBSL:
++  case OP_VCASTFROMGPR:
++  case OP_VDUPFROMGPR:
++  case OP_VLOADTWOGPRS:
++  case OP_FLOAT_FROMGPR_S:
++  case OP_FLOAT_FTOF:
++  case OP_VECTOR_STOF:
++  case OP_VECTOR_FTOS:
++  case OP_VECTOR_FTOZS:
++  case OP_VECTOR_FTOF: return true;
++  default: return false;
++  }
++}
++
++class Interpreter {
++public:
++  Interpreter(Context::ContextImpl* CTX, Core::CpuStateFrame* Frame, const InterpreterIR& Copy, uint64_t Entry)
++    : CTX {CTX}
++    , Frame {Frame}
++    , IR(reinterpret_cast<void*>(const_cast<uint64_t*>(Copy.Data.data())), reinterpret_cast<void*>(const_cast<uint64_t*>(Copy.List.data())),
++         Copy.DataSize, Copy.ListSize)
++    , Entry {Entry}
++    , GuestBase {CTX->GetGuestBase()} {
++    Vals.resize(IR.GetSSACount() + 1);
++  }
++
++  uintptr_t Run();
++
++private:
++  Context::ContextImpl* CTX;
++  Core::CpuStateFrame* Frame;
++  IRListView IR;
++  uint64_t Entry;
++  uint64_t GuestBase;
++  fextl::vector<Val> Vals;
++
++  uint32_t ID(OrderedNodeWrapper W) const {
++    return W.ID().Value;
++  }
++  uint32_t ID(Ref Node) const {
++    return IR.GetID(Node).Value;
++  }
++
++  uint64_t G(OrderedNodeWrapper W) const {
++    uint64_t V;
++    memcpy(&V, Vals[ID(W)].B, 8);
++    return V;
++  }
++  const Val& VV(OrderedNodeWrapper W) const {
++    return Vals[ID(W)];
++  }
++  void SetG(uint32_t Id, uint64_t V) {
++    memcpy(Vals[Id].B, &V, 8);
++    memset(Vals[Id].B + 8, 0, 8);
++  }
++  void SetV(uint32_t Id, const Val& V) {
++    Vals[Id] = V;
++  }
++
++  bool IsInline(OrderedNodeWrapper W) const {
++    if (W.IsInvalid()) {
++      return false;
++    }
++    const auto Op = IR.GetOp<IROp_Header>(W)->Op;
++    return Op == OP_INLINECONSTANT || Op == OP_INLINEENTRYPOINTOFFSET;
++  }
++
++  bool IsFPRNode(OrderedNodeWrapper W) const {
++    const auto* Op = IR.GetOp<IROp_Header>(W);
++    auto Class = GetRegClass(Op->Op);
++    if (Class == RegClass::Complex) {
++      switch (Op->Op) {
++      case OP_LOADREGISTER: Class = Op->C<IROp_LoadRegister>()->Class; break;
++      case OP_LOADCONTEXT: Class = Op->C<IROp_LoadContext>()->Class; break;
++      case OP_LOADCONTEXTINDEXED: Class = Op->C<IROp_LoadContextIndexed>()->Class; break;
++      case OP_LOADMEM: Class = Op->C<IROp_LoadMem>()->Class; break;
++      case OP_LOADMEMTSO: Class = Op->C<IROp_LoadMemTSO>()->Class; break;
++      default: break;
++      }
++    }
++    return Class == RegClass::FPR || Class == RegClass::FPRFixed;
++  }
++
++  uint32_t NZCV() const {
++    uint32_t V;
++    memcpy(&V, &Frame->State.flags[X86State::RFLAG_NZCV_LOC], sizeof(V));
++    return V;
++  }
++  void SetNZCV(uint32_t V) {
++    V &= 0xF000'0000U;
++    memcpy(&Frame->State.flags[X86State::RFLAG_NZCV_LOC], &V, sizeof(V));
++  }
++  // Replace only the flags in FlagMask.
++  void SetNZCVMasked(uint32_t V, uint32_t FlagMask) {
++    SetNZCV((NZCV() & ~FlagMask) | (V & FlagMask));
++  }
++
++  uint8_t* ToHost(uint64_t Guest) const {
++    if (GuestBase) {
++      return reinterpret_cast<uint8_t*>(GuestBase + static_cast<uint32_t>(Guest));
++    }
++    return reinterpret_cast<uint8_t*>(Guest);
++  }
++
++  uint8_t* MemAddr(OrderedNodeWrapper Addr, OrderedNodeWrapper Offset, MemOffsetType OffsetType, uint8_t OffsetScale, bool HostAddr) const {
++    uint64_t EA = G(Addr);
++    if (!Offset.IsInvalid()) {
++      uint64_t Off = G(Offset);
++      if (!IsInline(Offset)) {
++        switch (OffsetType) {
++        case MemOffsetType::SXTX: break;
++        case MemOffsetType::UXTW: Off = static_cast<uint32_t>(Off); break;
++        case MemOffsetType::SXTW: Off = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(Off))); break;
++        default: ERROR_AND_DIE_FMT("[interp] bad offset type {}", static_cast<uint32_t>(OffsetType));
++        }
++        Off *= OffsetScale;
++      }
++      EA += Off;
++    }
++    if (HostAddr) {
++      return reinterpret_cast<uint8_t*>(EA);
++    }
++    return ToHost(EA);
++  }
++
++  static void LoadBytes(Val& Dst, const uint8_t* Src, unsigned Size) {
++    memset(&Dst, 0, sizeof(Dst));
++    memcpy(Dst.B, Src, Size);
++  }
++
++  uint64_t AtomicOp(IROps Op, uint8_t* Ptr, unsigned Size, uint64_t Value);
++
++  uintptr_t ExitTo(uint64_t RIP) {
++    Frame->State.rip = RIP;
++    return Frame->Pointers.DispatcherLoopTop;
++  }
++};
++
++template<typename T>
++inline T AtomicApply(IROps Op, T Old, T V) {
++  switch (Op) {
++  case OP_ATOMICSWAP: return V;
++  case OP_ATOMICFETCHADD: return Old + V;
++  case OP_ATOMICFETCHSUB: return Old - V;
++  case OP_ATOMICFETCHAND: return Old & V;
++  case OP_ATOMICFETCHCLR: return Old & ~V;
++  case OP_ATOMICFETCHOR: return Old | V;
++  case OP_ATOMICFETCHXOR: return Old ^ V;
++  case OP_ATOMICFETCHNEG: return static_cast<T>(0 - Old);
++  default: return Old;
++  }
++}
++
++// Unaligned or 128-bit atomics have no single host instruction here; they are serialized
++// against each other with this lock (the JIT's own unaligned path is not atomic against plain
++// stores either).
++std::mutex SlowAtomicLock;
++
++uint64_t Interpreter::AtomicOp(IROps Op, uint8_t* Ptr, unsigned Size, uint64_t Value) {
++  uint64_t Result {};
++  FOR_ES(Size, {
++    T V = static_cast<T>(Value);
++    if ((reinterpret_cast<uintptr_t>(Ptr) & (sizeof(T) - 1)) == 0) {
++      T* P = reinterpret_cast<T*>(Ptr);
++      T Old = __atomic_load_n(P, __ATOMIC_RELAXED);
++      while (!__atomic_compare_exchange_n(P, &Old, AtomicApply<T>(Op, Old, V), true, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
++      }
++      Result = Old;
++    } else {
++      std::scoped_lock lk(SlowAtomicLock);
++      T Old;
++      memcpy(&Old, Ptr, sizeof(T));
++      T New = AtomicApply<T>(Op, Old, V);
++      memcpy(Ptr, &New, sizeof(T));
++      Result = Old;
++    }
++  });
++  return Result;
++}
++
++uintptr_t Interpreter::Run() {
++  // Constants first: they are SSA values with no dependencies.
++  for (auto [Node, Op] : IR.GetAllCode()) {
++    const auto Id = ID(Node);
++    switch (Op->Op) {
++    case OP_CONSTANT: SetG(Id, Op->C<IROp_Constant>()->Constant); break;
++    case OP_INLINECONSTANT: SetG(Id, Op->C<IROp_InlineConstant>()->Constant); break;
++    case OP_ENTRYPOINTOFFSET:
++    case OP_INLINEENTRYPOINTOFFSET: {
++      const int64_t Offset =
++        Op->Op == OP_ENTRYPOINTOFFSET ? Op->C<IROp_EntrypointOffset>()->Offset : Op->C<IROp_InlineEntrypointOffset>()->Offset;
++      uint64_t V = Entry + Offset;
++      if (Op->Size == OpSize::i32Bit) {
++        V &= 0xFFFF'FFFFULL;
++      }
++      SetG(Id, V);
++      break;
++    }
++    default: break;
++    }
++  }
++
++  auto Header = IR.GetHeader();
++  Ref Block = IR.GetNode(Header->Blocks);
++
++  for (;;) {
++    Ref NextBlock = nullptr;
++
++    for (auto [CodeNode, IROp] : IR.GetCode(Block)) {
++      const uint32_t Id = ID(CodeNode);
++      const unsigned SZ = OpSizeToSize(IROp->Size);
++      const bool Is64 = IROp->Size == OpSize::i64Bit;
++      const unsigned ES = OpSizeToSize(IROp->ElementSize);
++
++      switch (IROp->Op) {
++      case OP_DUMMY:
++      case OP_IRHEADER:
++      case OP_CODEBLOCK:
++      case OP_BEGINBLOCK:
++      case OP_ENDBLOCK:
++      case OP_INVALIDATEFLAGS:
++      case OP_GUESTOPCODE:
++      case OP_CONSTANT:
++      case OP_INLINECONSTANT:
++      case OP_ENTRYPOINTOFFSET:
++      case OP_INLINEENTRYPOINTOFFSET:
++      case OP_YIELD:
++      case OP_CACHELINECLEAR:
++      case OP_CACHELINECLEAN:
++      case OP_PREFETCH:
++      case OP_TELEMETRYSETVALUE: break;
++
++      case OP_ALLOCATEGPR:
++      case OP_ALLOCATEFPR:
++      case OP_ALLOCATEGPRAFTER: memset(&Vals[Id], 0, sizeof(Val)); break;
++
++      case OP_COPY: SetV(Id, VV(IROp->Args[0])); break;
++      case OP_RMWHANDLE: SetV(Id, VV(IROp->Args[0])); break;
++
++      case OP_PRINT: LogMan::Msg::IFmt("[interp] Print {:#x}", G(IROp->Args[0])); break;
++      case OP_PRINTMSG: LogMan::Msg::IFmt("[interp] {}", IROp->C<IROp_PrintMsg>()->Value); break;
++
++      case OP_GETROUNDINGMODE: {
++        uint64_t FPCR = 0;
++#if defined(__aarch64__) || defined(_M_ARM64)
++        __asm__ volatile("mrs %0, fpcr" : "=r"(FPCR));
++#endif
++        uint64_t Dst = (FPCR >> 22) & 7;
++        const uint32_t Rev = __builtin_bitreverse32(static_cast<uint32_t>(Dst));
++        Dst = (Dst & ~3ULL) | ((Rev >> 30) & 3);
++        SetG(Id, Dst);
++        break;
++      }
++      case OP_SETROUNDINGMODE: {
++        auto Op = IROp->C<IROp_SetRoundingMode>();
++        const uint64_t Src = G(Op->RoundMode);
++        uint64_t FPCR = 0;
++#if defined(__aarch64__) || defined(_M_ARM64)
++        __asm__ volatile("mrs %0, fpcr" : "=r"(FPCR));
++#endif
++        const uint64_t Round = __builtin_bitreverse32(static_cast<uint32_t>(Src)) >> 30;
++        FPCR = (FPCR & ~(3ULL << 22)) | (Round << 22);
++        FPCR = (FPCR & ~(1ULL << 24)) | (((Src >> 2) & 1) << 24);
++        if (Op->SetDAZ && CTX->HostFeatures.SupportsAFP) {
++          FPCR = (FPCR & ~1ULL) | ((G(Op->MXCSR) >> 6) & 1);
++        }
++#if defined(__aarch64__) || defined(_M_ARM64)
++        __asm__ volatile("msr fpcr, %0" : : "r"(FPCR));
++#endif
++        break;
++      }
++      case OP_PUSHROUNDINGMODE: {
++        auto Op = IROp->C<IROp_PushRoundingMode>();
++        uint64_t FPCR = 0;
++#if defined(__aarch64__) || defined(_M_ARM64)
++        __asm__ volatile("mrs %0, fpcr" : "=r"(FPCR));
++#endif
++        SetG(Id, FPCR);
++        uint64_t New = FPCR;
++        if (Op->RoundMode == 3) {
++          New |= 3ULL << 22;
++        } else if (Op->RoundMode == 0) {
++          New &= ~(3ULL << 22);
++        } else {
++          New &= ~(static_cast<uint64_t>(Op->RoundMode) << 22);
++          New |= static_cast<uint64_t>(Op->RoundMode == 2 ? 1 : 2) << 22;
++        }
++#if defined(__aarch64__) || defined(_M_ARM64)
++        __asm__ volatile("msr fpcr, %0" : : "r"(New));
++#endif
++        break;
++      }
++      case OP_POPROUNDINGMODE: {
++        [[maybe_unused]] const uint64_t FPCR = G(IROp->C<IROp_PopRoundingMode>()->FPCR);
++#if defined(__aarch64__) || defined(_M_ARM64)
++        __asm__ volatile("msr fpcr, %0" : : "r"(FPCR));
++#endif
++        break;
++      }
++      case OP_CYCLECOUNTER: {
++        uint64_t V = 0;
++#if defined(__aarch64__) || defined(_M_ARM64)
++        __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(V));
++#endif
++        SetG(Id, V);
++        break;
++      }
++      case OP_PROCESSORID: SetG(Id, 0); break;
++
++      // ---- Control flow ----
++      case OP_JUMP: NextBlock = IR.GetNode(IROp->C<IROp_Jump>()->TargetBlock); break;
++      case OP_CONDJUMP: {
++        auto Op = IROp->C<IROp_CondJump>();
++        bool Taken;
++        if (Op->FromNZCV) {
++          Taken = CondHolds(Op->Cond, NZCV());
++        } else {
++          const uint64_t A = G(Op->Cmp1);
++          const uint64_t B = G(Op->Cmp2);
++          const bool Cmp64 = Op->CompareSize != OpSize::i32Bit;
++          if (Op->Cond == CondClass::TSTZ) {
++            Taken = ((A >> (B & 63)) & 1) == 0;
++          } else if (Op->Cond == CondClass::TSTNZ) {
++            Taken = ((A >> (B & 63)) & 1) != 0;
++          } else {
++            uint32_t Flags;
++            AddWithCarry(A, ~B, true, Cmp64, &Flags);
++            Taken = CondHolds(Op->Cond, Flags);
++          }
++        }
++        NextBlock = IR.GetNode(Taken ? Op->TrueBlock : Op->FalseBlock);
++        break;
++      }
++      case OP_EXITFUNCTION: return ExitTo(G(IROp->C<IROp_ExitFunction>()->NewRIP));
++      case OP_BREAK: {
++        auto Op = IROp->C<IROp_Break>();
++        Core::CpuStateFrame::SynchronousFaultDataStruct State = {
++          .FaultToTopAndGeneratedException = 1,
++          .Signal = Op->Reason.Signal,
++          .TrapNo = Op->Reason.TrapNumber,
++          .si_code = Op->Reason.si_code,
++          .err_code = Op->Reason.ErrorRegister,
++        };
++        Frame->SynchronousFaultData = State;
++        switch (Op->Reason.Signal) {
++        case Core::FAULT_SIGILL: return Frame->Pointers.GuestSignal_SIGILL;
++        case Core::FAULT_SIGSEGV: return Frame->Pointers.GuestSignal_SIGSEGV;
++        case Core::FAULT_SIGTRAP:
++        default: return Frame->Pointers.GuestSignal_SIGTRAP;
++        }
++      }
++      case OP_SYSCALL: {
++        FEXCore::HLE::SyscallArguments Args {};
++        for (uint32_t i = 0; i < FEXCore::HLE::SyscallArguments::MAX_ARGS; ++i) {
++          if (!IROp->Args[i].IsInvalid()) {
++            Args.Argument[i] = G(IROp->Args[i]);
++          }
++        }
++        Frame->InSyscallInfo = 0xFFFF;
++        const uint64_t Ret = CTX->SyscallHandler->HandleSyscall(Frame, &Args);
++        Frame->InSyscallInfo = 0;
++        if (CTX->SyscallHandler->GetOSABI() != FEXCore::HLE::SyscallOSABI::OS_GENERIC) {
++          SetG(Id, Ret);
++        }
++        break;
++      }
++      case OP_CPUID: {
++        auto Op = IROp->C<IROp_CPUID>();
++        const auto R = CTX->CPUID.RunFunction(static_cast<uint32_t>(G(Op->Function)), static_cast<uint32_t>(G(Op->Leaf)));
++        SetG(ID(Op->OutEAX), R.eax);
++        SetG(ID(Op->OutEBX), R.ebx);
++        SetG(ID(Op->OutECX), R.ecx);
++        SetG(ID(Op->OutEDX), R.edx);
++        break;
++      }
++      case OP_XGETBV: {
++        auto Op = IROp->C<IROp_XGetBV>();
++        const auto R = CTX->CPUID.RunXCRFunction(static_cast<uint32_t>(G(Op->Function)));
++        SetG(ID(Op->OutEAX), R.eax);
++        SetG(ID(Op->OutEDX), R.edx);
++        break;
++      }
++
++      // ---- Static registers and context ----
++      case OP_LOADREGISTER: {
++        auto Op = IROp->C<IROp_LoadRegister>();
++        if (Op->Class == RegClass::GPR) {
++          SetG(Id, Frame->State.gregs[Op->Reg]);
++        } else {
++          Val V {};
++          memcpy(V.B, Frame->State.xmm.sse.data[Op->Reg], 16);
++          SetV(Id, V);
++        }
++        break;
++      }
++      case OP_STOREREGISTER: {
++        auto Op = IROp->C<IROp_StoreRegister>();
++        const PhysicalRegister Reg(CodeNode);
++        if (Reg.AsRegClass() == RegClass::GPRFixed) {
++          Frame->State.gregs[Reg.Reg] = G(Op->Value);
++        } else if (Reg.AsRegClass() == RegClass::FPRFixed) {
++          memcpy(Frame->State.xmm.sse.data[Reg.Reg], VV(Op->Value).B, 16);
++        } else {
++          ERROR_AND_DIE_FMT("[interp] StoreRegister without a fixed register (class {})", static_cast<uint32_t>(Reg.Class));
++        }
++        SetV(Id, VV(Op->Value));
++        break;
++      }
++      case OP_LOADPF: SetG(Id, Frame->State.pf_raw); break;
++      case OP_LOADAF: SetG(Id, Frame->State.af_raw); break;
++      case OP_STOREPF: Frame->State.pf_raw = static_cast<uint32_t>(G(IROp->Args[0])); break;
++      case OP_STOREAF: Frame->State.af_raw = static_cast<uint32_t>(G(IROp->Args[0])); break;
++      case OP_LOADCONTEXT: {
++        auto Op = IROp->C<IROp_LoadContext>();
++        Val V;
++        LoadBytes(V, reinterpret_cast<uint8_t*>(Frame) + Op->Offset, SZ);
++        SetV(Id, V);
++        break;
++      }
++      case OP_STORECONTEXT: {
++        auto Op = IROp->C<IROp_StoreContext>();
++        memcpy(reinterpret_cast<uint8_t*>(Frame) + Op->Offset, VV(Op->Value).B, SZ);
++        break;
++      }
++      case OP_LOADCONTEXTPAIR: {
++        auto Op = IROp->C<IROp_LoadContextPair>();
++        Val V1, V2;
++        LoadBytes(V1, reinterpret_cast<uint8_t*>(Frame) + Op->Offset, SZ);
++        LoadBytes(V2, reinterpret_cast<uint8_t*>(Frame) + Op->Offset + SZ, SZ);
++        SetV(ID(Op->OutValue1), V1);
++        SetV(ID(Op->OutValue2), V2);
++        break;
++      }
++      case OP_STORECONTEXTPAIR: {
++        auto Op = IROp->C<IROp_StoreContextPair>();
++        memcpy(reinterpret_cast<uint8_t*>(Frame) + Op->Offset, VV(Op->Value1).B, SZ);
++        memcpy(reinterpret_cast<uint8_t*>(Frame) + Op->Offset + SZ, VV(Op->Value2).B, SZ);
++        break;
++      }
++      case OP_LOADCONTEXTINDEXED: {
++        auto Op = IROp->C<IROp_LoadContextIndexed>();
++        Val V;
++        LoadBytes(V, reinterpret_cast<uint8_t*>(Frame) + G(Op->Index) * Op->Stride + Op->BaseOffset, SZ);
++        SetV(Id, V);
++        break;
++      }
++      case OP_STORECONTEXTINDEXED: {
++        auto Op = IROp->C<IROp_StoreContextIndexed>();
++        memcpy(reinterpret_cast<uint8_t*>(Frame) + G(Op->Index) * Op->Stride + Op->BaseOffset, VV(Op->Value).B, SZ);
++        break;
++      }
++      case OP_FORMCONTEXTADDRESS: {
++        auto Op = IROp->C<IROp_FormContextAddress>();
++        SetG(Id, reinterpret_cast<uint64_t>(Frame) + G(Op->Index) * Op->Stride);
++        break;
++      }
++      case OP_CONTEXTCLEAR: {
++        auto Op = IROp->C<IROp_ContextClear>();
++        memset(reinterpret_cast<uint8_t*>(Frame) + Op->Offset, 0, Op->Size);
++        break;
++      }
++      case OP_LOADNZCV: SetG(Id, NZCV()); break;
++      case OP_STORENZCV: SetNZCV(static_cast<uint32_t>(G(IROp->Args[0]))); break;
++      case OP_LOADDF:
++        SetG(Id, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(Frame->State.flags[X86State::RFLAG_DF_RAW_LOC]))));
++        break;
++
++      // ---- Memory ----
++      case OP_LOADMEM:
++      case OP_LOADMEMTSO: {
++        uint8_t* P;
++        if (IROp->Op == OP_LOADMEM) {
++          auto Op = IROp->C<IROp_LoadMem>();
++          P = MemAddr(Op->Addr, Op->Offset, Op->OffsetType, Op->OffsetScale, Op->HostAddr);
++        } else {
++          auto Op = IROp->C<IROp_LoadMemTSO>();
++          P = MemAddr(Op->Addr, Op->Offset, Op->OffsetType, Op->OffsetScale, false);
++        }
++        Val V;
++        LoadBytes(V, P, SZ);
++        if (IROp->Op == OP_LOADMEMTSO) {
++          std::atomic_thread_fence(std::memory_order_acquire);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_STOREMEM:
++      case OP_STOREMEMTSO: {
++        uint8_t* P;
++        OrderedNodeWrapper Value;
++        if (IROp->Op == OP_STOREMEM) {
++          auto Op = IROp->C<IROp_StoreMem>();
++          P = MemAddr(Op->Addr, Op->Offset, Op->OffsetType, Op->OffsetScale, Op->HostAddr);
++          Value = Op->Value;
++        } else {
++          auto Op = IROp->C<IROp_StoreMemTSO>();
++          P = MemAddr(Op->Addr, Op->Offset, Op->OffsetType, Op->OffsetScale, false);
++          Value = Op->Value;
++          std::atomic_thread_fence(std::memory_order_release);
++        }
++        memcpy(P, VV(Value).B, SZ);
++        break;
++      }
++      case OP_LOADMEMPAIR: {
++        auto Op = IROp->C<IROp_LoadMemPair>();
++        uint8_t* P = ToHost(G(Op->Addr)) + Op->Offset;
++        Val V1, V2;
++        LoadBytes(V1, P, SZ);
++        LoadBytes(V2, P + SZ, SZ);
++        SetV(ID(Op->OutValue1), V1);
++        SetV(ID(Op->OutValue2), V2);
++        break;
++      }
++      case OP_STOREMEMPAIR: {
++        auto Op = IROp->C<IROp_StoreMemPair>();
++        uint8_t* P = ToHost(G(Op->Addr)) + Op->Offset;
++        memcpy(P, VV(Op->Value1).B, SZ);
++        memcpy(P + SZ, VV(Op->Value2).B, SZ);
++        break;
++      }
++      case OP_VLOADNONTEMPORAL: {
++        auto Op = IROp->C<IROp_VLoadNonTemporal>();
++        Val V;
++        LoadBytes(V, ToHost(G(Op->Addr)) + Op->Offset, SZ);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSTORENONTEMPORAL: {
++        auto Op = IROp->C<IROp_VStoreNonTemporal>();
++        memcpy(ToHost(G(Op->Addr)) + Op->Offset, VV(Op->Value).B, SZ);
++        break;
++      }
++      case OP_VSTORENONTEMPORALPAIR: {
++        auto Op = IROp->C<IROp_VStoreNonTemporalPair>();
++        uint8_t* P = ToHost(G(Op->Addr)) + Op->Offset;
++        memcpy(P, VV(Op->ValueLow).B, SZ);
++        memcpy(P + SZ, VV(Op->ValueHigh).B, SZ);
++        break;
++      }
++      case OP_VLOADVECTORELEMENT: {
++        auto Op = IROp->C<IROp_VLoadVectorElement>();
++        Val V {};
++        memcpy(V.B, VV(Op->DstSrc).B, SZ);
++        memcpy(V.B + Op->Index * ES, ToHost(G(Op->Addr)), ES);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSTOREVECTORELEMENT: {
++        auto Op = IROp->C<IROp_VStoreVectorElement>();
++        memcpy(ToHost(G(Op->Addr)), VV(Op->Value).B + Op->Index * ES, ES);
++        break;
++      }
++      case OP_VBROADCASTFROMMEM: {
++        auto Op = IROp->C<IROp_VBroadcastFromMem>();
++        const uint8_t* P = ToHost(G(Op->Address));
++        Val V {};
++        for (unsigned i = 0; i < SZ; i += ES) {
++          memcpy(V.B + i, P, ES);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_PUSH: {
++        auto Op = IROp->C<IROp_Push>();
++        const unsigned VS = OpSizeToSize(Op->ValueSize);
++        const uint64_t Value = G(Op->Value);
++        uint64_t NewSP = G(Op->Addr) - VS;
++        if (GuestBase) {
++          NewSP = static_cast<uint32_t>(NewSP);
++        }
++        memcpy(ToHost(NewSP), &Value, VS);
++        SetG(Id, NewSP);
++        break;
++      }
++      case OP_POP: {
++        auto Op = IROp->C<IROp_Pop>();
++        const unsigned S = OpSizeToSize(Op->Size);
++        const uint64_t SP = G(Op->InoutAddr);
++        uint64_t Value = 0;
++        memcpy(&Value, ToHost(SP), S);
++        SetG(ID(Op->OutValue), Value);
++        SetG(ID(Op->InoutAddr), GuestBase ? static_cast<uint32_t>(SP + S) : SP + S);
++        break;
++      }
++      case OP_MEMSET: {
++        auto Op = IROp->C<IROp_MemSet>();
++        const unsigned S = OpSizeToSize(Op->Size);
++        const uint64_t Addr = G(Op->Addr);
++        const uint64_t Prefix = Op->Prefix.IsInvalid() ? 0 : G(Op->Prefix);
++        const uint64_t Length = G(Op->Length);
++        const bool Backward = (G(Op->Direction) & 2) != 0;
++        const uint64_t Value = G(Op->Value);
++        uint8_t* P = ToHost(Prefix + Addr);
++        for (uint64_t i = 0; i < Length; ++i) {
++          memcpy(P, &Value, S);
++          P = Backward ? P - S : P + S;
++        }
++        SetG(Id, Backward ? Addr - Length * S : Addr + Length * S);
++        break;
++      }
++      case OP_MEMCPY: {
++        auto Op = IROp->C<IROp_MemCpy>();
++        const unsigned S = OpSizeToSize(Op->Size);
++        const uint64_t Dest = G(Op->Dest);
++        const uint64_t Src = G(Op->Src);
++        const uint64_t Length = G(Op->Length);
++        const bool Backward = (G(Op->Direction) & 2) != 0;
++        uint8_t* D = ToHost(Dest);
++        const uint8_t* Sp = ToHost(Src);
++        for (uint64_t i = 0; i < Length; ++i) {
++          uint64_t Tmp;
++          memcpy(&Tmp, Sp, S);
++          memcpy(D, &Tmp, S);
++          D = Backward ? D - S : D + S;
++          Sp = Backward ? Sp - S : Sp + S;
++        }
++        SetG(ID(Op->OutDstAddress), Backward ? Dest - Length * S : Dest + Length * S);
++        SetG(ID(Op->OutSrcAddress), Backward ? Src - Length * S : Src + Length * S);
++        break;
++      }
++      case OP_CACHELINEZERO: {
++        auto P = reinterpret_cast<uintptr_t>(ToHost(G(IROp->Args[0])));
++        memset(reinterpret_cast<void*>(P & ~uintptr_t {63}), 0, 64);
++        break;
++      }
++      case OP_FENCE: std::atomic_thread_fence(std::memory_order_seq_cst); break;
++
++      case OP_CAS: {
++        auto Op = IROp->C<IROp_CAS>();
++        uint8_t* P = ToHost(G(Op->Addr));
++        uint64_t Result {};
++        FOR_ES(SZ, {
++          T Expected = static_cast<T>(G(Op->Expected));
++          const T Desired = static_cast<T>(G(Op->Desired));
++          if ((reinterpret_cast<uintptr_t>(P) & (sizeof(T) - 1)) == 0) {
++            __atomic_compare_exchange_n(reinterpret_cast<T*>(P), &Expected, Desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
++            Result = Expected;
++          } else {
++            std::scoped_lock lk(SlowAtomicLock);
++            T Old;
++            memcpy(&Old, P, sizeof(T));
++            if (Old == Expected) {
++              memcpy(P, &Desired, sizeof(T));
++            }
++            Result = Old;
++          }
++        });
++        SetG(Id, Result);
++        break;
++      }
++      case OP_CASPAIR: {
++        auto Op = IROp->C<IROp_CASPair>();
++        uint8_t* P = ToHost(G(Op->Addr));
++        if (SZ == 4) {
++          uint64_t Expected = (G(Op->ExpectedLo) & 0xFFFF'FFFFULL) | (G(Op->ExpectedHi) << 32);
++          const uint64_t Desired = (G(Op->DesiredLo) & 0xFFFF'FFFFULL) | (G(Op->DesiredHi) << 32);
++          if ((reinterpret_cast<uintptr_t>(P) & 7) == 0) {
++            __atomic_compare_exchange_n(reinterpret_cast<uint64_t*>(P), &Expected, Desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
++          } else {
++            std::scoped_lock lk(SlowAtomicLock);
++            uint64_t Old;
++            memcpy(&Old, P, 8);
++            if (Old == Expected) {
++              memcpy(P, &Desired, 8);
++            }
++            Expected = Old;
++          }
++          SetG(ID(Op->OutLo), static_cast<uint32_t>(Expected));
++          SetG(ID(Op->OutHi), Expected >> 32);
++        } else {
++          std::scoped_lock lk(SlowAtomicLock);
++          uint64_t Old[2];
++          memcpy(Old, P, 16);
++          if (Old[0] == G(Op->ExpectedLo) && Old[1] == G(Op->ExpectedHi)) {
++            const uint64_t New[2] = {G(Op->DesiredLo), G(Op->DesiredHi)};
++            memcpy(P, New, 16);
++          }
++          SetG(ID(Op->OutLo), Old[0]);
++          SetG(ID(Op->OutHi), Old[1]);
++        }
++        break;
++      }
++      case OP_ATOMICSWAP:
++      case OP_ATOMICFETCHADD:
++      case OP_ATOMICFETCHSUB:
++      case OP_ATOMICFETCHAND:
++      case OP_ATOMICFETCHCLR:
++      case OP_ATOMICFETCHOR:
++      case OP_ATOMICFETCHXOR: SetG(Id, AtomicOp(IROp->Op, ToHost(G(IROp->Args[1])), SZ, G(IROp->Args[0]))); break;
++      case OP_ATOMICFETCHNEG: SetG(Id, AtomicOp(IROp->Op, ToHost(G(IROp->Args[0])), SZ, 0)); break;
++
++      // ---- Integer ALU ----
++      case OP_ADD: SetG(Id, ResW(Is64, G(IROp->Args[0]) + G(IROp->Args[1]))); break;
++      case OP_SUB: SetG(Id, ResW(Is64, G(IROp->Args[0]) - G(IROp->Args[1]))); break;
++      case OP_OR: SetG(Id, ResW(Is64, G(IROp->Args[0]) | G(IROp->Args[1]))); break;
++      case OP_AND: SetG(Id, ResW(Is64, G(IROp->Args[0]) & G(IROp->Args[1]))); break;
++      case OP_ANDN: SetG(Id, ResW(Is64, G(IROp->Args[0]) & ~G(IROp->Args[1]))); break;
++      case OP_XOR: SetG(Id, ResW(Is64, G(IROp->Args[0]) ^ G(IROp->Args[1]))); break;
++      case OP_LSHL: SetG(Id, ShiftBy(ShiftType::LSL, G(IROp->Args[0]), G(IROp->Args[1]), Is64)); break;
++      case OP_LSHR: SetG(Id, ShiftBy(ShiftType::LSR, G(IROp->Args[0]), G(IROp->Args[1]), Is64)); break;
++      case OP_ROR: SetG(Id, ShiftBy(ShiftType::ROR, G(IROp->Args[0]), G(IROp->Args[1]), Is64)); break;
++      case OP_ASHR: {
++        const uint64_t A = G(IROp->Args[0]);
++        const uint64_t B = G(IROp->Args[1]);
++        if (SZ >= 4) {
++          SetG(Id, ShiftBy(ShiftType::ASR, A, B, Is64));
++        } else {
++          const unsigned Bits = SZ * 8;
++          const int32_t S = static_cast<int32_t>(static_cast<uint32_t>(A) << (32 - Bits)) >> (32 - Bits);
++          SetG(Id, static_cast<uint32_t>(S >> (B & 31)) & Mask(SZ));
++        }
++        break;
++      }
++      case OP_ADDSHIFT:
++      case OP_SUBSHIFT:
++      case OP_ANDSHIFT:
++      case OP_XORSHIFT:
++      case OP_XORNSHIFT: {
++        // All five share {Src1, Src2, Shift, ShiftAmount}.
++        auto Op = IROp->C<IROp_AddShift>();
++        const uint64_t A = G(Op->Src1);
++        const uint64_t B = ShiftBy(Op->Shift, G(Op->Src2), Op->ShiftAmount, Is64);
++        uint64_t R;
++        switch (IROp->Op) {
++        case OP_ADDSHIFT: R = A + B; break;
++        case OP_SUBSHIFT: R = A - B; break;
++        case OP_ANDSHIFT: R = A & B; break;
++        case OP_XORSHIFT: R = A ^ B; break;
++        default: R = A ^ ~B; break;
++        }
++        SetG(Id, ResW(Is64, R));
++        break;
++      }
++      case OP_ORLSHL: {
++        auto Op = IROp->C<IROp_Orlshl>();
++        SetG(Id, ResW(Is64, G(Op->Src1) | ShiftBy(ShiftType::LSL, G(Op->Src2), Op->BitShift, Is64)));
++        break;
++      }
++      case OP_ORLSHR: {
++        auto Op = IROp->C<IROp_Orlshr>();
++        SetG(Id, ResW(Is64, G(Op->Src1) | ShiftBy(ShiftType::LSR, G(Op->Src2), Op->BitShift, Is64)));
++        break;
++      }
++      case OP_ORNROR: {
++        auto Op = IROp->C<IROp_Ornror>();
++        SetG(Id, ResW(Is64, G(Op->Src1) | ~ShiftBy(ShiftType::ROR, G(Op->Src2), Op->BitShift, Is64)));
++        break;
++      }
++      case OP_NOT: SetG(Id, ResW(Is64, ~G(IROp->Args[0]))); break;
++      case OP_NEG: {
++        auto Op = IROp->C<IROp_Neg>();
++        const uint64_t A = G(Op->Src);
++        const bool DoNeg = Op->Cond == CondClass::AL || CondHolds(Op->Cond, NZCV());
++        SetG(Id, ResW(Is64, DoNeg ? 0 - A : A));
++        break;
++      }
++      case OP_MUL:
++      case OP_UMUL: SetG(Id, ResW(Is64, G(IROp->Args[0]) * G(IROp->Args[1]))); break;
++      case OP_UMULL: SetG(Id, static_cast<uint64_t>(static_cast<uint32_t>(G(IROp->Args[0]))) * static_cast<uint32_t>(G(IROp->Args[1]))); break;
++      case OP_SMULL:
++        SetG(Id, static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(G(IROp->Args[0]))) *
++                                       static_cast<int64_t>(static_cast<int32_t>(G(IROp->Args[1])))));
++        break;
++      case OP_MULH: {
++        const uint64_t A = G(IROp->Args[0]);
++        const uint64_t B = G(IROp->Args[1]);
++        if (Is64) {
++          const __int128 P = static_cast<__int128>(static_cast<int64_t>(A)) * static_cast<int64_t>(B);
++          SetG(Id, static_cast<uint64_t>(static_cast<unsigned __int128>(P) >> 64));
++        } else {
++          const int64_t P = static_cast<int64_t>(static_cast<int32_t>(A)) * static_cast<int32_t>(B);
++          SetG(Id, static_cast<uint32_t>(static_cast<uint64_t>(P) >> 32));
++        }
++        break;
++      }
++      case OP_UMULH: {
++        const uint64_t A = G(IROp->Args[0]);
++        const uint64_t B = G(IROp->Args[1]);
++        if (Is64) {
++          SetG(Id, static_cast<uint64_t>((static_cast<unsigned __int128>(A) * B) >> 64));
++        } else {
++          SetG(Id, (static_cast<uint64_t>(static_cast<uint32_t>(A)) * static_cast<uint32_t>(B)) >> 32);
++        }
++        break;
++      }
++      case OP_POPCOUNT: SetG(Id, std::popcount(G(IROp->Args[0]) & Mask(SZ))); break;
++      case OP_FINDLSB: {
++        const uint64_t A = ResW(Is64, G(IROp->Args[0]));
++        SetG(Id, Is64 ? std::countr_zero(A) : std::countr_zero(static_cast<uint32_t>(A)));
++        break;
++      }
++      case OP_FINDMSB: {
++        const uint64_t A = G(IROp->Args[0]);
++        uint64_t Clz;
++        if (SZ == 2) {
++          Clz = std::countl_zero(static_cast<uint32_t>(A << 16));
++        } else if (Is64) {
++          Clz = std::countl_zero(A);
++        } else {
++          Clz = std::countl_zero(static_cast<uint32_t>(A));
++        }
++        SetG(Id, static_cast<uint64_t>(SZ * 8 - 1) - Clz);
++        break;
++      }
++      case OP_FINDTRAILINGZEROES: {
++        const uint64_t A = G(IROp->Args[0]);
++        if (SZ == 2) {
++          SetG(Id, std::countr_zero(static_cast<uint32_t>((A & 0xFFFF) | 0x10000)));
++        } else if (Is64) {
++          SetG(Id, std::countr_zero(A));
++        } else {
++          SetG(Id, std::countr_zero(static_cast<uint32_t>(A)));
++        }
++        break;
++      }
++      case OP_COUNTLEADINGZEROES: {
++        const uint64_t A = G(IROp->Args[0]);
++        if (SZ == 2) {
++          SetG(Id, std::countl_zero(static_cast<uint32_t>((A << 16) | 0x8000)));
++        } else if (Is64) {
++          SetG(Id, std::countl_zero(A));
++        } else {
++          SetG(Id, std::countl_zero(static_cast<uint32_t>(A)));
++        }
++        break;
++      }
++      case OP_REV: {
++        const uint64_t A = G(IROp->Args[0]);
++        if (Is64) {
++          SetG(Id, __builtin_bswap64(A));
++        } else if (SZ == 4) {
++          SetG(Id, __builtin_bswap32(static_cast<uint32_t>(A)));
++        } else {
++          SetG(Id, __builtin_bswap32(static_cast<uint32_t>(A)) >> 16);
++        }
++        break;
++      }
++      case OP_RBIT: {
++        const uint64_t A = G(IROp->Args[0]);
++        SetG(Id, Is64 ? __builtin_bitreverse64(A) : __builtin_bitreverse32(static_cast<uint32_t>(A)));
++        break;
++      }
++      case OP_BFI: {
++        auto Op = IROp->C<IROp_Bfi>();
++        const uint64_t M = Op->Width >= 64 ? ~0ULL : ((1ULL << Op->Width) - 1);
++        const uint64_t R = (G(Op->Dest) & ~(M << Op->lsb)) | ((G(Op->Src) & M) << Op->lsb);
++        SetG(Id, ResW(Is64, R));
++        break;
++      }
++      case OP_BFXIL: {
++        auto Op = IROp->C<IROp_Bfxil>();
++        const uint64_t M = Op->Width >= 64 ? ~0ULL : ((1ULL << Op->Width) - 1);
++        const uint64_t R = (G(Op->Dest) & ~M) | ((ResW(Is64, G(Op->Src)) >> Op->lsb) & M);
++        SetG(Id, ResW(Is64, R));
++        break;
++      }
++      case OP_BFE: {
++        auto Op = IROp->C<IROp_Bfe>();
++        const uint64_t M = Op->Width >= 64 ? ~0ULL : ((1ULL << Op->Width) - 1);
++        SetG(Id, (ResW(Is64, G(Op->Src)) >> Op->lsb) & M);
++        break;
++      }
++      case OP_SBFE: {
++        auto Op = IROp->C<IROp_Sbfe>();
++        const uint64_t V = ResW(Is64, G(Op->Src)) >> Op->lsb;
++        const unsigned Shift = 64 - Op->Width;
++        const int64_t S = static_cast<int64_t>(V << Shift) >> Shift;
++        SetG(Id, ResW(Is64, static_cast<uint64_t>(S)));
++        break;
++      }
++      case OP_EXTR: {
++        auto Op = IROp->C<IROp_Extr>();
++        const uint64_t U = G(Op->Upper);
++        const uint64_t L = G(Op->Lower);
++        if (Is64) {
++          SetG(Id, Op->LSB == 0 ? L : (L >> Op->LSB) | (U << (64 - Op->LSB)));
++        } else {
++          const uint32_t u = static_cast<uint32_t>(U);
++          const uint32_t l = static_cast<uint32_t>(L);
++          SetG(Id, Op->LSB == 0 ? l : static_cast<uint32_t>((l >> Op->LSB) | (u << (32 - Op->LSB))));
++        }
++        break;
++      }
++      case OP_PDEP: {
++        auto Op = IROp->C<IROp_PDep>();
++        uint64_t In = G(Op->Input);
++        uint64_t M = ResW(Is64, G(Op->Mask));
++        uint64_t R = 0;
++        for (uint64_t Bit = 1; M; Bit <<= 1) {
++          if (M & Bit) {
++            if (In & 1) {
++              R |= Bit;
++            }
++            In >>= 1;
++            M &= ~Bit;
++          }
++        }
++        SetG(Id, R);
++        break;
++      }
++      case OP_PEXT: {
++        auto Op = IROp->C<IROp_PExt>();
++        const uint64_t In = G(Op->Input);
++        uint64_t M = ResW(Is64, G(Op->Mask));
++        uint64_t R = 0;
++        unsigned Out = 0;
++        for (unsigned i = 0; i < 64 && M; ++i) {
++          if (M & (1ULL << i)) {
++            if (In & (1ULL << i)) {
++              R |= 1ULL << Out;
++            }
++            ++Out;
++            M &= ~(1ULL << i);
++          }
++        }
++        SetG(Id, R);
++        break;
++      }
++      case OP_MASKGENERATEFROMBITWIDTH: {
++        const uint64_t W = G(IROp->Args[0]);
++        SetG(Id, W == 0 ? ~0ULL : ~(~0ULL << (W & 63)));
++        break;
++      }
++      case OP_DIV:
++      case OP_UDIV: {
++        // Div and UDiv share {Lower, Upper, Divisor, OutQuotient, OutRemainder}. Like the arm64
++        // instructions, division by zero gives 0 and the signed overflow case wraps.
++        auto Op = IROp->C<IROp_Div>();
++        const bool Signed = IROp->Op == OP_DIV;
++        const uint64_t Lower = G(Op->Lower);
++        const uint64_t Divisor = G(Op->Divisor);
++        uint64_t Q = 0, R = 0;
++        if (Op->Upper.IsInvalid() || SZ < 4) {
++          // 32/64-bit plain divide; 8/16-bit with or without an upper half run at 32 bits.
++          uint64_t N = Lower, D = Divisor;
++          bool W64 = Is64;
++          if (!Op->Upper.IsInvalid()) {
++            // 16-bit with upper: dividend is Upper:Lower in 32 bits.
++            N = (Lower & 0xFFFF) | ((G(Op->Upper) & 0xFFFF) << 16);
++            W64 = false;
++          }
++          if (Signed) {
++            int64_t n, d;
++            if (W64) {
++              n = static_cast<int64_t>(N);
++              d = static_cast<int64_t>(D);
++            } else if (SZ == 1 && Op->Upper.IsInvalid()) {
++              n = static_cast<int8_t>(N);
++              d = static_cast<int8_t>(D);
++            } else if (SZ == 2) {
++              n = Op->Upper.IsInvalid() ? static_cast<int16_t>(N) : static_cast<int32_t>(static_cast<uint32_t>(N));
++              d = static_cast<int16_t>(D);
++            } else {
++              n = static_cast<int32_t>(N);
++              d = static_cast<int32_t>(D);
++            }
++            if (d == 0) {
++              Q = 0;
++            } else if (W64 && n == std::numeric_limits<int64_t>::min() && d == -1) {
++              Q = static_cast<uint64_t>(n);
++            } else if (!W64 && n == std::numeric_limits<int32_t>::min() && d == -1) {
++              Q = static_cast<uint64_t>(n);
++            } else {
++              Q = static_cast<uint64_t>(n / d);
++            }
++            R = static_cast<uint64_t>(n - static_cast<int64_t>(Q) * d);
++          } else {
++            if (!W64) {
++              N = static_cast<uint32_t>(N);
++              D = static_cast<uint32_t>(D);
++            }
++            Q = D == 0 ? 0 : N / D;
++            R = N - Q * D;
++          }
++          Q = ResW(W64, Q);
++          R = ResW(W64, R);
++        } else if (SZ == 4) {
++          const uint64_t Upper = G(Op->Upper);
++          const uint64_t N = static_cast<uint32_t>(Lower) | (Upper << 32);
++          if (Signed) {
++            const int64_t n = static_cast<int64_t>(N);
++            const int64_t d = static_cast<int32_t>(Divisor);
++            if (d == 0) {
++              Q = 0;
++            } else if (n == std::numeric_limits<int64_t>::min() && d == -1) {
++              Q = static_cast<uint64_t>(n);
++            } else {
++              Q = static_cast<uint64_t>(n / d);
++            }
++            R = static_cast<uint64_t>(n - static_cast<int64_t>(Q) * d);
++          } else {
++            const uint64_t d = static_cast<uint32_t>(Divisor);
++            Q = d == 0 ? 0 : N / d;
++            R = N - Q * d;
++          }
++        } else {
++          const uint64_t Upper = G(Op->Upper);
++          if (Signed) {
++            const __int128 n = static_cast<__int128>((static_cast<unsigned __int128>(Upper) << 64) | Lower);
++            const __int128 d = static_cast<int64_t>(Divisor);
++            if (d == 0) {
++              Q = 0;
++              R = Lower;
++            } else {
++              const __int128 q = (d == -1) ? -n : n / d;
++              Q = static_cast<uint64_t>(q);
++              R = static_cast<uint64_t>(n - q * d);
++            }
++          } else {
++            const unsigned __int128 n = (static_cast<unsigned __int128>(Upper) << 64) | Lower;
++            if (Divisor == 0) {
++              Q = 0;
++              R = Lower;
++            } else {
++              Q = static_cast<uint64_t>(n / Divisor);
++              R = static_cast<uint64_t>(n % Divisor);
++            }
++          }
++        }
++        SetG(ID(Op->OutQuotient), Q);
++        SetG(ID(Op->OutRemainder), R);
++        break;
++      }
++
++      // ---- Flags ----
++      case OP_ADDWITHFLAGS:
++      case OP_SUBWITHFLAGS: {
++        uint32_t F;
++        const uint64_t A = G(IROp->Args[0]);
++        const uint64_t B = G(IROp->Args[1]);
++        const uint64_t R = IROp->Op == OP_ADDWITHFLAGS ? AddWithCarry(A, B, false, Is64, &F) : AddWithCarry(A, ~B, true, Is64, &F);
++        SetNZCV(F);
++        SetG(Id, R);
++        break;
++      }
++      case OP_ADDNZCV:
++      case OP_SUBNZCV: {
++        uint64_t A = G(IROp->Args[0]);
++        uint64_t B = G(IROp->Args[1]);
++        bool W64 = Is64;
++        if (SZ < 4) {
++          const unsigned Shift = 32 - SZ * 8;
++          A = static_cast<uint32_t>(A << Shift);
++          B = static_cast<uint32_t>(B << Shift);
++          W64 = false;
++        }
++        uint32_t F;
++        if (IROp->Op == OP_ADDNZCV) {
++          AddWithCarry(A, B, false, W64, &F);
++        } else {
++          AddWithCarry(A, ~B, true, W64, &F);
++        }
++        SetNZCV(F);
++        break;
++      }
++      case OP_ADCNZCV:
++      case OP_SBBNZCV:
++      case OP_ADCWITHFLAGS:
++      case OP_SBBWITHFLAGS: {
++        const bool C = NZCV() & FLAG_C;
++        const uint64_t A = G(IROp->Args[0]);
++        const uint64_t B = G(IROp->Args[1]);
++        const bool IsSub = IROp->Op == OP_SBBNZCV || IROp->Op == OP_SBBWITHFLAGS;
++        uint32_t F;
++        const uint64_t R = AddWithCarry(A, IsSub ? ~B : B, C, Is64, &F);
++        SetNZCV(F);
++        if (IROp->Op == OP_ADCWITHFLAGS || IROp->Op == OP_SBBWITHFLAGS) {
++          SetG(Id, R);
++        }
++        break;
++      }
++      case OP_ADC: {
++        const bool C = NZCV() & FLAG_C;
++        SetG(Id, ResW(Is64, G(IROp->Args[0]) + G(IROp->Args[1]) + (C ? 1 : 0)));
++        break;
++      }
++      case OP_SBB: {
++        const bool C = NZCV() & FLAG_C;
++        SetG(Id, ResW(Is64, G(IROp->Args[0]) + ~G(IROp->Args[1]) + (C ? 1 : 0)));
++        break;
++      }
++      case OP_ADCZERO: {
++        const bool C = NZCV() & FLAG_C;
++        SetG(Id, ResW(Is64, G(IROp->Args[0]) + (C ? 0 : 1)));
++        break;
++      }
++      case OP_ADCZEROWITHFLAGS: {
++        const bool C = NZCV() & FLAG_C;
++        uint32_t F;
++        const uint64_t R = AddWithCarry(G(IROp->Args[0]), C ? 0 : 1, false, Is64, &F);
++        SetNZCV(F);
++        SetG(Id, R);
++        break;
++      }
++      case OP_TESTNZ:
++      case OP_ANDWITHFLAGS: {
++        const uint64_t A = G(IROp->Args[0]);
++        const uint64_t B = G(IROp->Args[1]);
++        uint64_t R;
++        if (SZ < 4) {
++          R = static_cast<uint32_t>(A & B);
++          const uint32_t Shifted = static_cast<uint32_t>(R << (32 - SZ * 8));
++          SetNZCV(PackNZCV(Shifted >> 31, Shifted == 0, false, false));
++        } else {
++          R = ResW(Is64, A & B);
++          SetNZCV(PackNZCV(Is64 ? (R >> 63) : (R >> 31), R == 0, false, false));
++        }
++        if (IROp->Op == OP_ANDWITHFLAGS) {
++          SetG(Id, R);
++        }
++        break;
++      }
++      case OP_TESTZ: {
++        const uint32_t R = static_cast<uint32_t>(G(IROp->Args[0]) & G(IROp->Args[1]) & Mask(SZ));
++        SetNZCV(PackNZCV(R >> 31, R == 0, false, false));
++        break;
++      }
++      case OP_CMPPAIRZ: {
++        auto Op = IROp->C<IROp_CmpPairZ>();
++        const bool Eq = ResW(Is64, G(Op->Src1Lo)) == ResW(Is64, G(Op->Src2Lo)) && ResW(Is64, G(Op->Src1Hi)) == ResW(Is64, G(Op->Src2Hi));
++        SetNZCVMasked(Eq ? FLAG_Z : 0, FLAG_Z);
++        break;
++      }
++      case OP_CARRYINVERT: SetNZCV(NZCV() ^ FLAG_C); break;
++      case OP_RMIFNZCV: {
++        auto Op = IROp->C<IROp_RmifNZCV>();
++        const uint64_t V = G(Op->Src);
++        const unsigned Rot = Op->Rotate & 63;
++        const uint64_t R = Rot ? ((V >> Rot) | (V << (64 - Rot))) : V;
++        const uint32_t FlagMask = static_cast<uint32_t>(Op->Mask & 0xF) << 28;
++        SetNZCVMasked(static_cast<uint32_t>(R & 0xF) << 28, FlagMask);
++        break;
++      }
++      case OP_SETSMALLNZV: {
++        const uint64_t V = G(IROp->Args[0]);
++        const unsigned Bits = SZ * 8;
++        const bool N = (V >> (Bits - 1)) & 1;
++        const bool Z = (V & Mask(SZ)) == 0;
++        const bool Vf = ((V >> Bits) & 1) ^ N;
++        SetNZCVMasked(PackNZCV(N, Z, false, Vf), FLAG_N | FLAG_Z | FLAG_V);
++        break;
++      }
++      case OP_AXFLAG: {
++        const uint32_t F = NZCV();
++        const bool Z = F & FLAG_Z;
++        const bool C = F & FLAG_C;
++        const bool V = F & FLAG_V;
++        SetNZCV(PackNZCV(false, Z || V, C && !V, false));
++        break;
++      }
++      case OP_PARITY: {
++        auto Op = IROp->C<IROp_Parity>();
++        const uint32_t Raw = static_cast<uint32_t>(G(Op->Raw));
++        uint32_t T = Raw ^ (Raw >> 4);
++        T ^= T >> 2;
++        uint32_t D = Op->Invert ? ~(T ^ (T >> 1)) : (T ^ (T >> 1));
++        if (Op->Mask) {
++          D &= 1;
++        }
++        SetG(Id, D);
++        break;
++      }
++      case OP_CONDADDNZCV:
++      case OP_CONDSUBNZCV: {
++        auto Op = IROp->C<IROp_CondAddNZCV>();
++        if (CondHolds(Op->Cond, NZCV())) {
++          uint32_t F;
++          const uint64_t A = G(Op->Src1);
++          const uint64_t B = G(Op->Src2);
++          if (IROp->Op == OP_CONDADDNZCV) {
++            AddWithCarry(A, B, false, Is64, &F);
++          } else {
++            AddWithCarry(A, ~B, true, Is64, &F);
++          }
++          SetNZCV(F);
++        } else {
++          SetNZCV(static_cast<uint32_t>(Op->FalseNZCV) << 28);
++        }
++        break;
++      }
++      case OP_SHIFTFLAGS: {
++        auto Op = IROp->C<IROp_ShiftFlags>();
++        const unsigned S = OpSizeToSize(Op->Size);
++        const bool W64 = Op->Size == OpSize::i64Bit;
++        const unsigned Bits = S * 8;
++        const uint64_t Dst = G(Op->Result);
++        const uint64_t Src1 = G(Op->Src1);
++        const uint64_t Src2 = G(Op->Src2);
++        uint64_t PFOut = G(Op->PFInput);
++        if ((Src2 & (W64 ? 0x3f : 0x1f)) != 0) {
++          uint32_t F;
++          if (S >= 4) {
++            const uint64_t R = ResW(W64, Dst);
++            F = PackNZCV(W64 ? (R >> 63) : (R >> 31), R == 0, false, false);
++            PFOut = R;
++          } else {
++            const uint32_t Shifted = static_cast<uint32_t>(Dst << (32 - Bits));
++            F = PackNZCV(Shifted >> 31, Shifted == 0, false, false);
++            PFOut = Dst;
++          }
++          const unsigned WBits = W64 ? 64 : 32;
++          uint64_t CFWord;
++          unsigned CFBit = 0;
++          if (Op->Shift == ShiftType::LSL) {
++            if (S >= 4) {
++              CFWord = ResW(W64, Src1) >> ((0 - Src2) & (WBits - 1));
++            } else {
++              CFWord = Dst;
++              CFBit = Bits;
++            }
++          } else {
++            CFWord = ResW(W64, Src1) >> ((Src2 - 1) & (WBits - 1));
++          }
++          if (Op->InvertCF) {
++            CFWord = ~CFWord;
++          }
++          if ((CFWord >> CFBit) & 1) {
++            F |= FLAG_C;
++          }
++          if (Op->Shift != ShiftType::ASR) {
++            const uint64_t X = ResW(W64, Src1 ^ Dst);
++            if ((X >> (Bits - 1)) & 1) {
++              F |= FLAG_V;
++            }
++          }
++          SetNZCV(F);
++        }
++        SetG(Id, PFOut);
++        break;
++      }
++      case OP_ROTATEFLAGS: {
++        auto Op = IROp->C<IROp_RotateFlags>();
++        const bool W64 = Op->Size == OpSize::i64Bit;
++        if (ResW(W64, G(Op->Shift)) != 0) {
++          const unsigned Bits = OpSizeToSize(Op->Size) * 8;
++          const uint64_t Result = G(Op->Result);
++          const unsigned CFBit = Op->Left ? 0 : Bits - 1;
++          const uint64_t T1 = Result ^ (Result >> (Op->Left ? Bits - 1 : 1));
++          const unsigned OFBit = Op->Left ? 0 : Bits - 2;
++          const bool C = ((~Result) >> CFBit) & 1;
++          const bool V = (T1 >> OFBit) & 1;
++          SetNZCVMasked(PackNZCV(false, false, C, V), FLAG_C | FLAG_V);
++        }
++        break;
++      }
++      case OP_SELECT: {
++        auto Op = IROp->C<IROp_Select>();
++        uint32_t F;
++        if (IsFPRNode(Op->Cmp1)) {
++          if (Op->CompareSize == OpSize::i64Bit) {
++            F = FCmpNZCV(FBits<double>(G(Op->Cmp1)), FBits<double>(G(Op->Cmp2)));
++          } else {
++            F = FCmpNZCV(FBits<float>(G(Op->Cmp1)), FBits<float>(G(Op->Cmp2)));
++          }
++        } else {
++          AddWithCarry(G(Op->Cmp1), ~G(Op->Cmp2), true, Op->CompareSize == OpSize::i64Bit, &F);
++        }
++        SetG(Id, ResW(Is64, CondHolds(Op->Cond, F) ? G(Op->TrueVal) : G(Op->FalseVal)));
++        break;
++      }
++      case OP_NZCVSELECT: {
++        auto Op = IROp->C<IROp_NZCVSelect>();
++        SetG(Id, ResW(Is64, CondHolds(Op->Cond, NZCV()) ? G(Op->TrueVal) : G(Op->FalseVal)));
++        break;
++      }
++      case OP_NZCVSELECTINCREMENT: {
++        auto Op = IROp->C<IROp_NZCVSelectIncrement>();
++        SetG(Id, ResW(Is64, CondHolds(Op->Cond, NZCV()) ? G(Op->TrueVal) : G(Op->FalseVal) + 1));
++        break;
++      }
++      case OP_NZCVSELECTV: {
++        auto Op = IROp->C<IROp_NZCVSelectV>();
++        const Val& Src = CondHolds(Op->Cond, NZCV()) ? VV(Op->TrueVal) : VV(Op->FalseVal);
++        Val V {};
++        memcpy(V.B, Src.B, ES);
++        SetV(Id, V);
++        break;
++      }
++
++      // ---- Scalar float ----
++      case OP_FCMP: {
++        auto Op = IROp->C<IROp_FCmp>();
++        if (Op->ElementSize == OpSize::i64Bit) {
++          SetNZCV(FCmpNZCV(FBits<double>(G(Op->Scalar1)), FBits<double>(G(Op->Scalar2))));
++        } else {
++          SetNZCV(FCmpNZCV(FBits<float>(G(Op->Scalar1)), FBits<float>(G(Op->Scalar2))));
++        }
++        break;
++      }
++      case OP_FLOAT_TOGPR_ZS:
++      case OP_FLOAT_TOGPR_S: {
++        // Both share {Scalar, SrcElementSize}.
++        auto Op = IROp->C<IROp_Float_ToGPR_ZS>();
++        const bool Round = IROp->Op == OP_FLOAT_TOGPR_S;
++        uint64_t R;
++        if (Op->SrcElementSize == OpSize::i64Bit) {
++          double D = FBits<double>(G(Op->Scalar));
++          if (Round) {
++            D = std::nearbyint(D);
++          }
++          R = Is64 ? static_cast<uint64_t>(SatCvt<int64_t>(D)) : static_cast<uint32_t>(SatCvt<int32_t>(D));
++        } else {
++          float Fv = FBits<float>(G(Op->Scalar));
++          if (Round) {
++            Fv = std::nearbyint(Fv);
++          }
++          R = Is64 ? static_cast<uint64_t>(SatCvt<int64_t>(Fv)) : static_cast<uint32_t>(SatCvt<int32_t>(Fv));
++        }
++        SetG(Id, R);
++        break;
++      }
++      case OP_FLOAT_FROMGPR_S: {
++        auto Op = IROp->C<IROp_Float_FromGPR_S>();
++        const uint64_t Src = G(Op->Src);
++        const int64_t I =
++          Op->SrcElementSize == OpSize::i64Bit ? static_cast<int64_t>(Src) : static_cast<int64_t>(static_cast<int32_t>(Src));
++        Val V {};
++        if (ES == 8) {
++          SetEl<uint64_t>(V, 0, FToBits(static_cast<double>(I)));
++        } else {
++          SetEl<uint32_t>(V, 0, static_cast<uint32_t>(FToBits(static_cast<float>(I))));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_FLOAT_FTOF: {
++        auto Op = IROp->C<IROp_Float_FToF>();
++        Val V {};
++        if (ES == 8 && Op->SrcElementSize == OpSize::i32Bit) {
++          SetEl<uint64_t>(V, 0, FToBits(static_cast<double>(FBits<float>(G(Op->Scalar)))));
++        } else if (ES == 4 && Op->SrcElementSize == OpSize::i64Bit) {
++          SetEl<uint32_t>(V, 0, static_cast<uint32_t>(FToBits(static_cast<float>(FBits<double>(G(Op->Scalar))))));
++        } else {
++          ERROR_AND_DIE_FMT("[interp] Float_FToF {} <- {} unsupported", ES, OpSizeToSize(Op->SrcElementSize));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFADDSCALARINSERT:
++      case OP_VFSUBSCALARINSERT:
++      case OP_VFMULSCALARINSERT:
++      case OP_VFDIVSCALARINSERT:
++      case OP_VFMINSCALARINSERT:
++      case OP_VFMAXSCALARINSERT:
++      case OP_VFSQRTSCALARINSERT:
++      case OP_VFRSQRTSCALARINSERT:
++      case OP_VFRECPSCALARINSERT: {
++        // All share {Vector1, Vector2, ZeroUpperBits}: element 0 is computed, the rest comes from Vector1.
++        auto Op = IROp->C<IROp_VFAddScalarInsert>();
++        Val V = VV(Op->Vector1);
++        if (SZ < 32) {
++          memset(V.B + SZ, 0, sizeof(V.B) - SZ);
++        }
++        FOR_FES(ES, {
++          const F A = std::bit_cast<F>(GetEl<T>(VV(Op->Vector1), 0));
++          const F B = std::bit_cast<F>(GetEl<T>(VV(Op->Vector2), 0));
++          F R {};
++          switch (IROp->Op) {
++          case OP_VFADDSCALARINSERT: R = A + B; break;
++          case OP_VFSUBSCALARINSERT: R = A - B; break;
++          case OP_VFMULSCALARINSERT: R = A * B; break;
++          case OP_VFDIVSCALARINSERT: R = A / B; break;
++          case OP_VFMINSCALARINSERT: R = A < B ? A : B; break;
++          case OP_VFMAXSCALARINSERT: R = A > B ? A : B; break;
++          case OP_VFSQRTSCALARINSERT: R = std::sqrt(B); break;
++          case OP_VFRSQRTSCALARINSERT: R = F {1} / std::sqrt(B); break;
++          default: R = F {1} / B; break;
++          }
++          SetEl<T>(V, 0, std::bit_cast<T>(R));
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFTOFSCALARINSERT: {
++        auto Op = IROp->C<IROp_VFToFScalarInsert>();
++        Val V = VV(Op->Vector1);
++        if (SZ < 32) {
++          memset(V.B + SZ, 0, sizeof(V.B) - SZ);
++        }
++        if (ES == 8 && Op->SrcElementSize == OpSize::i32Bit) {
++          SetEl<uint64_t>(V, 0, FToBits(static_cast<double>(std::bit_cast<float>(GetEl<uint32_t>(VV(Op->Vector2), 0)))));
++        } else if (ES == 4 && Op->SrcElementSize == OpSize::i64Bit) {
++          SetEl<uint32_t>(V, 0, static_cast<uint32_t>(FToBits(static_cast<float>(std::bit_cast<double>(GetEl<uint64_t>(VV(Op->Vector2), 0))))));
++        } else {
++          ERROR_AND_DIE_FMT("[interp] VFToFScalarInsert {} <- {} unsupported", ES, OpSizeToSize(Op->SrcElementSize));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSTOFGPRINSERT: {
++        auto Op = IROp->C<IROp_VSToFGPRInsert>();
++        Val V = VV(Op->Vector);
++        if (SZ < 32) {
++          memset(V.B + SZ, 0, sizeof(V.B) - SZ);
++        }
++        const uint64_t Src = G(Op->Src);
++        const int64_t I =
++          Op->SrcElementSize == OpSize::i64Bit ? static_cast<int64_t>(Src) : static_cast<int64_t>(static_cast<int32_t>(Src));
++        if (ES == 8) {
++          SetEl<uint64_t>(V, 0, FToBits(static_cast<double>(I)));
++        } else {
++          SetEl<uint32_t>(V, 0, static_cast<uint32_t>(FToBits(static_cast<float>(I))));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFCMPSCALARINSERT: {
++        auto Op = IROp->C<IROp_VFCMPScalarInsert>();
++        Val V = VV(Op->Vector1);
++        if (SZ < 32) {
++          memset(V.B + SZ, 0, sizeof(V.B) - SZ);
++        }
++        FOR_FES(ES, {
++          const F A = std::bit_cast<F>(GetEl<T>(VV(Op->Vector1), 0));
++          const F B = std::bit_cast<F>(GetEl<T>(VV(Op->Vector2), 0));
++          bool R = false;
++          switch (Op->Op) {
++          case FloatCompareOp::EQ: R = A == B; break;
++          case FloatCompareOp::LT: R = A < B; break;
++          case FloatCompareOp::LE: R = A <= B; break;
++          case FloatCompareOp::UNO: R = std::isnan(A) || std::isnan(B); break;
++          case FloatCompareOp::NEQ: R = !(A == B); break;
++          case FloatCompareOp::ORD: R = !std::isnan(A) && !std::isnan(B); break;
++          }
++          SetEl<T>(V, 0, R ? static_cast<T>(~T {0}) : T {0});
++        });
++        SetV(Id, V);
++        break;
++      }
++
++      // ---- Vector ----
++      case OP_VMOV: {
++        Val V {};
++        memcpy(V.B, VV(IROp->Args[0]).B, SZ);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VECTORIMM: {
++        auto Op = IROp->C<IROp_VectorImm>();
++        Val V {};
++        uint64_t Imm = Op->Immediate;
++        if (ES != 1) {
++          Imm <<= Op->ShiftAmount;
++        }
++        FOR_ES(ES, {
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            SetEl<T>(V, i, static_cast<T>(Imm));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_LOADNAMEDVECTORCONSTANT: {
++        auto Op = IROp->C<IROp_LoadNamedVectorConstant>();
++        Val V {};
++        if (Op->Constant != NamedVectorConstant::NAMED_VECTOR_ZERO) {
++          memcpy(V.B, reinterpret_cast<const uint8_t*>(Frame->Pointers.NamedVectorConstantPointers[Op->Constant]), SZ);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_LOADNAMEDVECTORINDEXEDCONSTANT: {
++        auto Op = IROp->C<IROp_LoadNamedVectorIndexedConstant>();
++        Val V {};
++        memcpy(V.B, reinterpret_cast<const uint8_t*>(Frame->Pointers.IndexedNamedVectorConstantPointers[Op->Constant]) + Op->Index, SZ);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VAND:
++      case OP_VANDN:
++      case OP_VORN:
++      case OP_VOR:
++      case OP_VXOR: {
++        const Val& A = VV(IROp->Args[0]);
++        const Val& B = VV(IROp->Args[1]);
++        Val V {};
++        for (unsigned i = 0; i < SZ; ++i) {
++          const uint8_t a = A.B[i], b = B.B[i];
++          switch (IROp->Op) {
++          case OP_VAND: V.B[i] = a & b; break;
++          case OP_VANDN: V.B[i] = a & ~b; break;
++          case OP_VORN: V.B[i] = a | ~b; break;
++          case OP_VOR: V.B[i] = a | b; break;
++          default: V.B[i] = a ^ b; break;
++          }
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VNOT: {
++        const Val& A = VV(IROp->Args[0]);
++        Val V {};
++        for (unsigned i = 0; i < SZ; ++i) {
++          V.B[i] = ~A.B[i];
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VBSL: {
++        auto Op = IROp->C<IROp_VBSL>();
++        const Val& M = VV(Op->VectorMask);
++        const Val& T1 = VV(Op->VectorTrue);
++        const Val& F1 = VV(Op->VectorFalse);
++        Val V {};
++        for (unsigned i = 0; i < SZ; ++i) {
++          V.B[i] = (M.B[i] & T1.B[i]) | (~M.B[i] & F1.B[i]);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VADD:
++      case OP_VSUB:
++      case OP_VMUL:
++      case OP_VUQADD:
++      case OP_VUQSUB:
++      case OP_VSQADD:
++      case OP_VSQSUB:
++      case OP_VURAVG:
++      case OP_VUMIN:
++      case OP_VUMAX:
++      case OP_VSMIN:
++      case OP_VSMAX:
++      case OP_VCMPEQ:
++      case OP_VCMPGT:
++      case OP_VUMULH:
++      case OP_VSMULH: {
++        const Val& A = VV(IROp->Args[0]);
++        const Val& B = VV(IROp->Args[1]);
++        Val V {};
++        FOR_ES(ES, {
++          using ST = std::make_signed_t<T>;
++          constexpr unsigned Bits = sizeof(T) * 8;
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const T a = GetEl<T>(A, i);
++            const T b = GetEl<T>(B, i);
++            const ST sa = static_cast<ST>(a);
++            const ST sb = static_cast<ST>(b);
++            T r {};
++            switch (IROp->Op) {
++            case OP_VADD: r = static_cast<T>(a + b); break;
++            case OP_VSUB: r = static_cast<T>(a - b); break;
++            case OP_VMUL: r = static_cast<T>(a * b); break;
++            case OP_VUQADD: r = static_cast<T>(a + b) < a ? static_cast<T>(~T {0}) : static_cast<T>(a + b); break;
++            case OP_VUQSUB: r = a < b ? T {0} : static_cast<T>(a - b); break;
++            case OP_VSQADD:
++            case OP_VSQSUB: {
++              const __int128 w = IROp->Op == OP_VSQADD ? static_cast<__int128>(sa) + sb : static_cast<__int128>(sa) - sb;
++              const __int128 mx = std::numeric_limits<ST>::max();
++              const __int128 mn = std::numeric_limits<ST>::min();
++              r = static_cast<T>(static_cast<ST>(w > mx ? mx : (w < mn ? mn : w)));
++              break;
++            }
++            case OP_VURAVG: r = static_cast<T>((static_cast<unsigned __int128>(a) + b + 1) >> 1); break;
++            case OP_VUMIN: r = a < b ? a : b; break;
++            case OP_VUMAX: r = a > b ? a : b; break;
++            case OP_VSMIN: r = static_cast<T>(sa < sb ? sa : sb); break;
++            case OP_VSMAX: r = static_cast<T>(sa > sb ? sa : sb); break;
++            case OP_VCMPEQ: r = a == b ? static_cast<T>(~T {0}) : T {0}; break;
++            case OP_VCMPGT: r = sa > sb ? static_cast<T>(~T {0}) : T {0}; break;
++            case OP_VUMULH: r = static_cast<T>((static_cast<unsigned __int128>(a) * b) >> Bits); break;
++            default: r = static_cast<T>(static_cast<unsigned __int128>(static_cast<__int128>(sa) * sb) >> Bits); break;
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VNEG:
++      case OP_VABS:
++      case OP_VCMPEQZ:
++      case OP_VCMPGTZ:
++      case OP_VCMPLTZ:
++      case OP_VPOPCOUNT: {
++        const Val& A = VV(IROp->Args[0]);
++        Val V {};
++        FOR_ES(ES, {
++          using ST = std::make_signed_t<T>;
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const T a = GetEl<T>(A, i);
++            const ST sa = static_cast<ST>(a);
++            T r {};
++            switch (IROp->Op) {
++            case OP_VNEG: r = static_cast<T>(T {0} - a); break;
++            case OP_VABS: r = sa < 0 ? static_cast<T>(T {0} - a) : a; break;
++            case OP_VCMPEQZ: r = a == 0 ? static_cast<T>(~T {0}) : T {0}; break;
++            case OP_VCMPGTZ: r = sa > 0 ? static_cast<T>(~T {0}) : T {0}; break;
++            case OP_VCMPLTZ: r = sa < 0 ? static_cast<T>(~T {0}) : T {0}; break;
++            default: r = static_cast<T>(std::popcount(a)); break;
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VADDV:
++      case OP_VUMINV:
++      case OP_VUMAXV: {
++        const Val& A = VV(IROp->Args[0]);
++        Val V {};
++        FOR_ES(ES, {
++          T r = GetEl<T>(A, 0);
++          for (unsigned i = 1; i < SZ / ES; ++i) {
++            const T a = GetEl<T>(A, i);
++            if (IROp->Op == OP_VADDV) {
++              r = static_cast<T>(r + a);
++            } else if (IROp->Op == OP_VUMINV) {
++              r = a < r ? a : r;
++            } else {
++              r = a > r ? a : r;
++            }
++          }
++          SetEl<T>(V, 0, r);
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VADDP: {
++        auto Op = IROp->C<IROp_VAddP>();
++        Val C[2] = {VV(Op->VectorLower), VV(Op->VectorUpper)};
++        Val V {};
++        FOR_ES(ES, {
++          const unsigned N = SZ / ES;
++          for (unsigned i = 0; i < N; ++i) {
++            const unsigned j = 2 * i;
++            const T a = GetEl<T>(C[j / N], j % N);
++            const T b = GetEl<T>(C[(j + 1) / N], (j + 1) % N);
++            SetEl<T>(V, i, static_cast<T>(a + b));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VZIP:
++      case OP_VZIP2:
++      case OP_VUNZIP:
++      case OP_VUNZIP2:
++      case OP_VTRN:
++      case OP_VTRN2: {
++        const Val& L = VV(IROp->Args[0]);
++        const Val& U = VV(IROp->Args[1]);
++        Val V {};
++        FOR_ES(ES, {
++          const unsigned N = SZ / ES;
++          for (unsigned i = 0; i < N; ++i) {
++            T r {};
++            switch (IROp->Op) {
++            case OP_VZIP: r = (i & 1) ? GetEl<T>(U, i / 2) : GetEl<T>(L, i / 2); break;
++            case OP_VZIP2: r = (i & 1) ? GetEl<T>(U, N / 2 + i / 2) : GetEl<T>(L, N / 2 + i / 2); break;
++            case OP_VUNZIP: {
++              const unsigned j = 2 * i;
++              r = j < N ? GetEl<T>(L, j) : GetEl<T>(U, j - N);
++              break;
++            }
++            case OP_VUNZIP2: {
++              const unsigned j = 2 * i + 1;
++              r = j < N ? GetEl<T>(L, j) : GetEl<T>(U, j - N);
++              break;
++            }
++            case OP_VTRN: r = (i & 1) ? GetEl<T>(U, i - 1) : GetEl<T>(L, i); break;
++            default: r = (i & 1) ? GetEl<T>(U, i) : GetEl<T>(L, i + 1); break;
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSHLI:
++      case OP_VUSHRI:
++      case OP_VSSHRI: {
++        // All share {Vector, BitShift}.
++        auto Op = IROp->C<IROp_VShlI>();
++        const Val& A = VV(Op->Vector);
++        Val V {};
++        FOR_ES(ES, {
++          using ST = std::make_signed_t<T>;
++          constexpr unsigned Bits = sizeof(T) * 8;
++          const unsigned Sh = Op->BitShift;
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const T a = GetEl<T>(A, i);
++            T r;
++            if (IROp->Op == OP_VSHLI) {
++              r = Sh >= Bits ? T {0} : static_cast<T>(a << Sh);
++            } else if (IROp->Op == OP_VUSHRI) {
++              r = Sh >= Bits ? T {0} : static_cast<T>(a >> Sh);
++            } else {
++              r = static_cast<T>(static_cast<ST>(a) >> (Sh >= Bits ? Bits - 1 : Sh));
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VUSHRAI: {
++        auto Op = IROp->C<IROp_VUShraI>();
++        const Val& D = VV(Op->DestVector);
++        const Val& A = VV(Op->Vector);
++        Val V {};
++        FOR_ES(ES, {
++          constexpr unsigned Bits = sizeof(T) * 8;
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const T s = Op->BitShift >= Bits ? T {0} : static_cast<T>(GetEl<T>(A, i) >> Op->BitShift);
++            SetEl<T>(V, i, static_cast<T>(GetEl<T>(D, i) + s));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VUSHL:
++      case OP_VUSHR:
++      case OP_VSSHR: {
++        auto Op = IROp->C<IROp_VUShl>();
++        const Val& A = VV(Op->Vector);
++        const Val& S = VV(Op->ShiftVector);
++        Val V {};
++        FOR_ES(ES, {
++          using ST = std::make_signed_t<T>;
++          constexpr unsigned Bits = sizeof(T) * 8;
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const T a = GetEl<T>(A, i);
++            const uint64_t Sh = GetEl<T>(S, i);
++            T r;
++            if (IROp->Op == OP_VUSHL) {
++              r = Sh >= Bits ? T {0} : static_cast<T>(a << Sh);
++            } else if (IROp->Op == OP_VUSHR) {
++              r = Sh >= Bits ? T {0} : static_cast<T>(a >> Sh);
++            } else {
++              r = static_cast<T>(static_cast<ST>(a) >> (Sh >= Bits ? Bits - 1 : Sh));
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VUSHLS:
++      case OP_VUSHRS:
++      case OP_VSSHRS: {
++        auto Op = IROp->C<IROp_VUShlS>();
++        const Val& A = VV(Op->Vector);
++        const uint64_t Sh = GetEl<uint64_t>(VV(Op->ShiftScalar), 0);
++        Val V {};
++        FOR_ES(ES, {
++          using ST = std::make_signed_t<T>;
++          constexpr unsigned Bits = sizeof(T) * 8;
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const T a = GetEl<T>(A, i);
++            T r;
++            if (IROp->Op == OP_VUSHLS) {
++              r = Sh >= Bits ? T {0} : static_cast<T>(a << Sh);
++            } else if (IROp->Op == OP_VUSHRS) {
++              r = Sh >= Bits ? T {0} : static_cast<T>(a >> Sh);
++            } else {
++              r = static_cast<T>(static_cast<ST>(a) >> (Sh >= Bits ? Bits - 1 : Sh));
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSXTL:
++      case OP_VSXTL2:
++      case OP_VUXTL:
++      case OP_VUXTL2: {
++        // ElementSize is the widened size; the sources are the half-size elements of the lower
++        // (or, for the "2" forms, upper) half of the input.
++        const Val& A = VV(IROp->Args[0]);
++        const bool Signed = IROp->Op == OP_VSXTL || IROp->Op == OP_VSXTL2;
++        const bool Upper = IROp->Op == OP_VSXTL2 || IROp->Op == OP_VUXTL2;
++        const unsigned N = SZ / ES;
++        const unsigned HS = ES / 2;
++        Val V {};
++        for (unsigned i = 0; i < N; ++i) {
++          uint64_t s = 0;
++          memcpy(&s, A.B + (Upper ? N : 0) * HS + i * HS, HS);
++          if (Signed) {
++            const unsigned Shift = 64 - HS * 8;
++            s = static_cast<uint64_t>(static_cast<int64_t>(s << Shift) >> Shift);
++          }
++          memcpy(V.B + i * ES, &s, ES);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VUMULL:
++      case OP_VSMULL:
++      case OP_VUMULL2:
++      case OP_VSMULL2: {
++        const Val& A = VV(IROp->Args[0]);
++        const Val& B = VV(IROp->Args[1]);
++        const bool Signed = IROp->Op == OP_VSMULL || IROp->Op == OP_VSMULL2;
++        const bool Upper = IROp->Op == OP_VUMULL2 || IROp->Op == OP_VSMULL2;
++        const unsigned N = SZ / ES;
++        const unsigned HS = ES / 2;
++        Val V {};
++        for (unsigned i = 0; i < N; ++i) {
++          uint64_t a = 0, b = 0;
++          memcpy(&a, A.B + (Upper ? N : 0) * HS + i * HS, HS);
++          memcpy(&b, B.B + (Upper ? N : 0) * HS + i * HS, HS);
++          uint64_t r;
++          if (Signed) {
++            const unsigned Shift = 64 - HS * 8;
++            r = static_cast<uint64_t>((static_cast<int64_t>(a << Shift) >> Shift) * (static_cast<int64_t>(b << Shift) >> Shift));
++          } else {
++            r = a * b;
++          }
++          memcpy(V.B + i * ES, &r, ES);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VREV32:
++      case OP_VREV64: {
++        const Val& A = VV(IROp->Args[0]);
++        const unsigned Group = IROp->Op == OP_VREV32 ? 4 : 8;
++        const unsigned PerGroup = Group / ES;
++        Val V {};
++        for (unsigned g = 0; g < SZ; g += Group) {
++          for (unsigned e = 0; e < PerGroup; ++e) {
++            memcpy(V.B + g + e * ES, A.B + g + (PerGroup - 1 - e) * ES, ES);
++          }
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VDUPELEMENT: {
++        auto Op = IROp->C<IROp_VDupElement>();
++        const Val& A = VV(Op->Vector);
++        Val V {};
++        for (unsigned i = 0; i < SZ; i += ES) {
++          memcpy(V.B + i, A.B + Op->Index * ES, ES);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VINSELEMENT: {
++        auto Op = IROp->C<IROp_VInsElement>();
++        Val V {};
++        memcpy(V.B, VV(Op->DestVector).B, SZ);
++        memcpy(V.B + Op->DestIdx * ES, VV(Op->SrcVector).B + Op->SrcIdx * ES, ES);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VINSGPR: {
++        auto Op = IROp->C<IROp_VInsGPR>();
++        Val V {};
++        memcpy(V.B, VV(Op->DestVector).B, SZ);
++        const uint64_t Src = G(Op->Src);
++        memcpy(V.B + Op->DestIdx * ES, &Src, ES);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VEXTRACTTOGPR: {
++        auto Op = IROp->C<IROp_VExtractToGPR>();
++        uint64_t R = 0;
++        memcpy(&R, VV(Op->Vector).B + Op->Index * SZ, SZ);
++        SetG(Id, R);
++        break;
++      }
++      case OP_VCASTFROMGPR: {
++        const uint64_t Src = G(IROp->Args[0]);
++        Val V {};
++        memcpy(V.B, &Src, ES);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VDUPFROMGPR: {
++        const uint64_t Src = G(IROp->Args[0]);
++        Val V {};
++        for (unsigned i = 0; i < SZ; i += ES) {
++          memcpy(V.B + i, &Src, ES);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VLOADTWOGPRS: {
++        auto Op = IROp->C<IROp_VLoadTwoGPRs>();
++        Val V {};
++        SetEl<uint64_t>(V, 0, G(Op->Lower));
++        SetEl<uint64_t>(V, 1, G(Op->Upper));
++        SetV(Id, V);
++        break;
++      }
++      case OP_VEXTR: {
++        auto Op = IROp->C<IROp_VExtr>();
++        // arm64 `ext` with the operands swapped: bytes [n, n + size) of VectorUpper:VectorLower,
++        // VectorUpper first, with zeros past both.
++        uint8_t C[96] {};
++        memcpy(C, VV(Op->VectorUpper).B, SZ);
++        memcpy(C + SZ, VV(Op->VectorLower).B, SZ);
++        const unsigned N = Op->Index * ES;
++        Val V {};
++        if (N < 2 * SZ) {
++          memcpy(V.B, C + N, SZ);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VTBL1:
++      case OP_VTBL2:
++      case OP_VTBX1: {
++        uint8_t Table[32] {};
++        const Val* Indices;
++        const Val* Fallback = nullptr;
++        unsigned TableSize = 16;
++        if (IROp->Op == OP_VTBL1) {
++          auto Op = IROp->C<IROp_VTBL1>();
++          memcpy(Table, VV(Op->VectorTable).B, 16);
++          Indices = &VV(Op->VectorIndices);
++        } else if (IROp->Op == OP_VTBL2) {
++          auto Op = IROp->C<IROp_VTBL2>();
++          memcpy(Table, VV(Op->VectorTable1).B, 16);
++          memcpy(Table + 16, VV(Op->VectorTable2).B, 16);
++          TableSize = 32;
++          Indices = &VV(Op->VectorIndices);
++        } else {
++          auto Op = IROp->C<IROp_VTBX1>();
++          memcpy(Table, VV(Op->VectorTable).B, 16);
++          Indices = &VV(Op->VectorIndices);
++          Fallback = &VV(Op->VectorSrcDst);
++        }
++        Val V {};
++        for (unsigned i = 0; i < SZ; ++i) {
++          const uint8_t Idx = Indices->B[i];
++          V.B[i] = Idx < TableSize ? Table[Idx] : (Fallback ? Fallback->B[i] : 0);
++        }
++        SetV(Id, V);
++        break;
++      }
++
++      // ---- Vector float ----
++      case OP_VFADD:
++      case OP_VFSUB:
++      case OP_VFMUL:
++      case OP_VFDIV:
++      case OP_VFMIN:
++      case OP_VFMAX:
++      case OP_VFCMPEQ:
++      case OP_VFCMPNEQ:
++      case OP_VFCMPLT:
++      case OP_VFCMPGT:
++      case OP_VFCMPLE:
++      case OP_VFCMPORD:
++      case OP_VFCMPUNO: {
++        const Val& A = VV(IROp->Args[0]);
++        const Val& B = VV(IROp->Args[1]);
++        Val V {};
++        FOR_FES(ES, {
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const F a = std::bit_cast<F>(GetEl<T>(A, i));
++            const F b = std::bit_cast<F>(GetEl<T>(B, i));
++            const T Ones = static_cast<T>(~T {0});
++            T r {};
++            switch (IROp->Op) {
++            case OP_VFADD: r = std::bit_cast<T>(a + b); break;
++            case OP_VFSUB: r = std::bit_cast<T>(a - b); break;
++            case OP_VFMUL: r = std::bit_cast<T>(a * b); break;
++            case OP_VFDIV: r = std::bit_cast<T>(a / b); break;
++            case OP_VFMIN: r = std::bit_cast<T>(a < b ? a : b); break;
++            case OP_VFMAX: r = std::bit_cast<T>(a > b ? a : b); break;
++            case OP_VFCMPEQ: r = a == b ? Ones : T {0}; break;
++            case OP_VFCMPNEQ: r = !(a == b) ? Ones : T {0}; break;
++            case OP_VFCMPLT: r = a < b ? Ones : T {0}; break;
++            case OP_VFCMPGT: r = a > b ? Ones : T {0}; break;
++            case OP_VFCMPLE: r = a <= b ? Ones : T {0}; break;
++            case OP_VFCMPORD: r = (!std::isnan(a) && !std::isnan(b)) ? Ones : T {0}; break;
++            default: r = (std::isnan(a) || std::isnan(b)) ? Ones : T {0}; break;
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFABS:
++      case OP_VFNEG:
++      case OP_VFRECP:
++      case OP_VFSQRT:
++      case OP_VFRSQRT:
++      case OP_VECTOR_STOF:
++      case OP_VECTOR_FTOS:
++      case OP_VECTOR_FTOZS: {
++        const Val& A = VV(IROp->Args[0]);
++        Val V {};
++        FOR_FES(ES, {
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const T bits = GetEl<T>(A, i);
++            const F a = std::bit_cast<F>(bits);
++            T r {};
++            switch (IROp->Op) {
++            case OP_VFABS: r = std::bit_cast<T>(std::fabs(a)); break;
++            case OP_VFNEG: r = std::bit_cast<T>(-a); break;
++            case OP_VFRECP: r = std::bit_cast<T>(F {1} / a); break;
++            case OP_VFSQRT: r = std::bit_cast<T>(std::sqrt(a)); break;
++            case OP_VFRSQRT: r = std::bit_cast<T>(F {1} / std::sqrt(a)); break;
++            case OP_VECTOR_STOF: r = std::bit_cast<T>(static_cast<F>(static_cast<S>(bits))); break;
++            case OP_VECTOR_FTOS: r = static_cast<T>(SatCvt<S>(std::nearbyint(a))); break;
++            default: r = static_cast<T>(SatCvt<S>(a)); break;
++            }
++            SetEl<T>(V, i, r);
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VECTOR_FTOF: {
++        auto Op = IROp->C<IROp_Vector_FToF>();
++        const Val& A = VV(Op->Vector);
++        Val V {};
++        if (ES == 8 && Op->SrcElementSize == OpSize::i32Bit) {
++          for (unsigned i = 0; i < SZ / 8; ++i) {
++            SetEl<uint64_t>(V, i, FToBits(static_cast<double>(std::bit_cast<float>(GetEl<uint32_t>(A, i)))));
++          }
++        } else if (ES == 4 && Op->SrcElementSize == OpSize::i64Bit) {
++          for (unsigned i = 0; i < SZ / 8; ++i) {
++            SetEl<uint32_t>(V, i, static_cast<uint32_t>(FToBits(static_cast<float>(std::bit_cast<double>(GetEl<uint64_t>(A, i))))));
++          }
++        } else {
++          ERROR_AND_DIE_FMT("[interp] Vector_FToF {} <- {} unsupported", ES, OpSizeToSize(Op->SrcElementSize));
++        }
++        SetV(Id, V);
++        break;
++      }
++
++      default: ERROR_AND_DIE_FMT("[interp] op {} reached the interpreter unsupported", GetName(IROp->Op));
++      }
++
++      if (NextBlock) {
++        break;
++      }
++    }
++
++    if (!NextBlock) {
++      ERROR_AND_DIE_FMT("[interp] block of guest {:#x} ended without a branch", Entry);
++    }
++    Block = NextBlock;
++  }
++}
++
++} // namespace
++
++const char* InterpreterFindUnsupported(const InterpreterIR& Copy, uint64_t GuestRIP) {
++  IR::IRListView IR(reinterpret_cast<void*>(const_cast<uint64_t*>(Copy.Data.data())),
++                    reinterpret_cast<void*>(const_cast<uint64_t*>(Copy.List.data())), Copy.DataSize, Copy.ListSize);
++  const char* First = nullptr;
++  for (auto [Node, Op] : IR.GetAllCode()) {
++    if (!IsSupported(Op->Op)) {
++      const auto& Name = IR::GetName(Op->Op);
++      LogMan::Msg::EFmt("[interp] guest block {:#x} needs IR op {}, which the interpreter does not implement", GuestRIP, Name);
++      if (!First) {
++        First = Name.data();
++      }
++    }
++  }
++  return First;
++}
++
++namespace {
++// Totals for InterpreterSurvey, printed when the process exits.
++struct SurveyTotals {
++  std::mutex Lock;
++  uint64_t Blocks {};
++  uint64_t Runnable {};
++  uint64_t MissingBlocks[IR::IROps::OP_LAST + 1] {};
++
++  ~SurveyTotals() {
++    if (!Blocks) {
++      return;
++    }
++    fprintf(stderr, "[interp-survey] blocks: %llu, runnable by the interpreter: %llu\n", static_cast<unsigned long long>(Blocks),
++            static_cast<unsigned long long>(Runnable));
++    for (size_t i = 0; i <= IR::IROps::OP_LAST; ++i) {
++      if (MissingBlocks[i]) {
++        fprintf(stderr, "[interp-survey] %s: needed by %llu blocks\n", IR::GetName(static_cast<IR::IROps>(i)).data(),
++                static_cast<unsigned long long>(MissingBlocks[i]));
++      }
++    }
++  }
++};
++SurveyTotals Survey;
++} // namespace
++
++void InterpreterSurvey(const InterpreterIR& Copy, uint64_t GuestRIP) {
++  IR::IRListView IR(reinterpret_cast<void*>(const_cast<uint64_t*>(Copy.Data.data())),
++                    reinterpret_cast<void*>(const_cast<uint64_t*>(Copy.List.data())), Copy.DataSize, Copy.ListSize);
++  bool Seen[IR::IROps::OP_LAST + 1] {};
++  bool Runnable = true;
++  for (auto [Node, Op] : IR.GetAllCode()) {
++    if (!IsSupported(Op->Op)) {
++      Runnable = false;
++      Seen[Op->Op] = true;
++    }
++  }
++  std::scoped_lock lk(Survey.Lock);
++  ++Survey.Blocks;
++  if (Runnable) {
++    ++Survey.Runnable;
++  }
++  for (size_t i = 0; i <= IR::IROps::OP_LAST; ++i) {
++    if (Seen[i]) {
++      if (Survey.MissingBlocks[i]++ == 0) {
++        fprintf(stderr, "[interp-survey] %s first needed by block %#llx\n", IR::GetName(static_cast<IR::IROps>(i)).data(),
++                static_cast<unsigned long long>(GuestRIP));
++      }
++    }
++  }
++}
++
++uintptr_t InterpretIR(Context::ContextImpl* CTX, Core::CpuStateFrame* Frame, const InterpreterIR& IR, uint64_t Entry) {
++  Interpreter I(CTX, Frame, IR, Entry);
++  return I.Run();
++}
++
++} // namespace FEXCore::CPU
+diff --git a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.h b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.h
+new file mode 100644
+index 000000000..6e76ca4bb
+--- /dev/null
++++ b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.h
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: MIT
++// WinPad: a NoJIT fallback that runs a guest block by interpreting FEX's IR for it.
++#pragma once
++
++#include <FEXCore/fextl/vector.h>
++
++#include <cstddef>
++#include <cstdint>
++
++namespace FEXCore::Context {
++class ContextImpl;
++}
++namespace FEXCore::Core {
++struct CpuStateFrame;
++}
++namespace FEXCore::IR {
++class IRListView;
++}
++
++namespace FEXCore::CPU {
++
++// A private copy of one block's IR. The OpDispatcher's buffer is reused by the next block
++// generated on the thread, and a syscall in the interpreted block can run nested guest code
++// that does exactly that, so the interpreter never executes from the shared buffer.
++struct InterpreterIR {
++  fextl::vector<uint64_t> Data;
++  fextl::vector<uint64_t> List;
++  size_t DataSize {};
++  size_t ListSize {};
++};
++
++// Returns the name of the first IR op the interpreter cannot run, or nullptr when it can run all of them.
++// Every unsupported op in the block is logged with the guest address.
++const char* InterpreterFindUnsupported(const InterpreterIR& IR, uint64_t GuestRIP);
++
++// Diagnostics (FEX_INTERP_SURVEY=1 in the offline compiler): counts the blocks the interpreter
++// could run and the ops it lacks; the totals go to stderr when the process exits.
++void InterpreterSurvey(const InterpreterIR& IR, uint64_t GuestRIP);
++
++// Runs the block that starts at Entry against Frame->State, which holds the whole guest state
++// (the dispatcher spilled the static registers before calling the compiler). Returns the host
++// address the dispatcher jumps to next: the dispatcher loop top, or a guest signal stub.
++uintptr_t InterpretIR(Context::ContextImpl* CTX, Core::CpuStateFrame* Frame, const InterpreterIR& IR, uint64_t Entry);
++
++} // namespace FEXCore::CPU
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index c557899e1..846748281 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -611,6 +611,12 @@ uint64_t Arm64JITCore::ExitFunctionLink(FEXCore::Core::CpuStateFrame* Frame, FEX
+         GuardSignalDeferringSection<std::shared_lock>(static_cast<Context::ContextImpl*>(Thread->CTX)->CodeInvalidationMutex, Thread);
+       HostCode = Thread->LookupCache->FindBlock(Thread, GuestRip);
+     }
++    if (!HostCode && static_cast<Context::ContextImpl*>(Thread->CTX)->Config.NoJIT()) {
++      // WinPad: under NoJIT a target outside the AOT image is interpreted, and there is nothing
++      // to link to. Let the dispatcher loop look it up and hand it to CompileBlock each time.
++      Frame->State.rip = GuestRip;
++      return Frame->Pointers.DispatcherLoopTop;
++    }
+     if (!HostCode) {
+       // Hold a reference to the code buffer, to avoid linking unmapped code if compilation triggers a recreation.
+       auto CodeBuffer = static_cast<Arm64JITCore*>(Thread->CPUBackend.get())->CurrentCodeBuffer;
+diff --git a/FEXCore/Source/Interface/IR/PassManager.cpp b/FEXCore/Source/Interface/IR/PassManager.cpp
+index ac1ed156c..2ffbf094b 100644
+--- a/FEXCore/Source/Interface/IR/PassManager.cpp
++++ b/FEXCore/Source/Interface/IR/PassManager.cpp
+@@ -470,8 +470,19 @@ void PassManager::Run(IREmitter* IREmit) {
+     }
+   }
+ 
++  Pass* RAPass = nullptr;
++  if (SkipRA) {
++    if (auto It = NameToPassMaping.find("RA"); It != NameToPassMaping.end()) {
++      RAPass = It->second;
++    }
++  }
++
+   int PassIndex = 0;
+   for (const auto& Pass : Passes) {
++    if (RAPass && Pass.get() == RAPass) {
++      ++PassIndex;
++      continue;
++    }
+     Pass->Run(IREmit);
+ 
+     if (Cap) {
+diff --git a/FEXCore/Source/Interface/IR/PassManager.h b/FEXCore/Source/Interface/IR/PassManager.h
+index 13b6787ce..6d4b408a6 100644
+--- a/FEXCore/Source/Interface/IR/PassManager.h
++++ b/FEXCore/Source/Interface/IR/PassManager.h
+@@ -59,6 +59,10 @@ public:
+ 
+   void Run(IREmitter* IREmit);
+ 
++  // WinPad: leave out the pass registered as "RA". The NoJIT interpreter runs pre-RA IR, where
++  // LoadRegister/StoreRegister still name the guest register they touch.
++  bool SkipRA {};
++
+   bool HasPass(fextl::string Name) const {
+     return NameToPassMaping.contains(Name);
+   }
