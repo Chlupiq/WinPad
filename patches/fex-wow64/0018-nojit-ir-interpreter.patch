@@ -203,10 +203,10 @@ index aa40f8fdd..4368322bd 100644
    auto Thread = Frame->Thread;
 diff --git a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
 new file mode 100644
-index 000000000..e8baa08e6
+index 000000000..c2c62326b
 --- /dev/null
 +++ b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
-@@ -0,0 +1,2617 @@
+@@ -0,0 +1,2795 @@
 +// SPDX-License-Identifier: MIT
 +/*
 + * WinPad: IR interpreter for the NoJIT mode.
@@ -233,6 +233,7 @@ index 000000000..e8baa08e6
 +#include "Interface/Context/Context.h"
 +#include "Interface/IR/IntrusiveIRList.h"
 +#include "Interface/IR/RegisterAllocationData.h"
++#include "Interface/Core/Interpreter/Fallbacks/F80Fallbacks.h"
 +
 +#include <FEXCore/Core/CoreState.h>
 +#include <FEXCore/Core/X86Enums.h>
@@ -606,6 +607,43 @@ index 000000000..e8baa08e6
 +  case OP_VEXTRACTTOGPR:
 +  case OP_FLOAT_TOGPR_S:
 +  case OP_FLOAT_TOGPR_ZS:
++  case OP_F80ADD:
++  case OP_F80SUB:
++  case OP_F80MUL:
++  case OP_F80DIV:
++  case OP_F80ATAN:
++  case OP_F80FPREM:
++  case OP_F80FPREM1:
++  case OP_F80SCALE:
++  case OP_F80FYL2X:
++  case OP_F80FYL2XP1:
++  case OP_F80CVT:
++  case OP_F80CVTINT:
++  case OP_F80CVTTO:
++  case OP_F80CVTTOINT:
++  case OP_F80ROUND:
++  case OP_F80F2XM1:
++  case OP_F80TAN:
++  case OP_F80SIN:
++  case OP_F80COS:
++  case OP_F80SINCOS:
++  case OP_F80SQRT:
++  case OP_F80XTRACT_EXP:
++  case OP_F80XTRACT_SIG:
++  case OP_F80CMP:
++  case OP_F80BCDLOAD:
++  case OP_F80BCDSTORE:
++  case OP_F64SIN:
++  case OP_F64COS:
++  case OP_F64TAN:
++  case OP_F64F2XM1:
++  case OP_F64SINCOS:
++  case OP_F64ATAN:
++  case OP_F64FPREM:
++  case OP_F64FPREM1:
++  case OP_F64FYL2X:
++  case OP_F64FYL2XP1:
++  case OP_F64SCALE:
 +  case OP_FCMP:
 +  case OP_VFADDSCALARINSERT:
 +  case OP_VFSUBSCALARINSERT:
@@ -763,6 +801,19 @@ index 000000000..e8baa08e6
 +  }
 +  void SetV(uint32_t Id, const Val& V) {
 +    Vals[Id] = V;
++  }
++  VectorRegType X80(OrderedNodeWrapper W) const {
++    VectorRegType R;
++    memcpy(&R, Vals[ID(W)].B, sizeof(R));
++    return R;
++  }
++  void SetX80(uint32_t Id, VectorRegType R) {
++    memset(&Vals[Id], 0, sizeof(Val));
++    memcpy(Vals[Id].B, &R, sizeof(R));
++  }
++  void SetF64(uint32_t Id, double D) {
++    memset(&Vals[Id], 0, sizeof(Val));
++    memcpy(Vals[Id].B, &D, sizeof(D));
 +  }
 +
 +  bool IsInline(OrderedNodeWrapper W) const {
@@ -1982,6 +2033,133 @@ index 000000000..e8baa08e6
 +        Val V {};
 +        memcpy(V.B, Src.B, ES);
 +        SetV(Id, V);
++        break;
++      }
++
++      // ---- x87: the softfloat fallbacks the JIT calls, with the FCW from the state ----
++#define F80_UNARY(OPU)                                                                                  \
++  case OP_##OPU: {                                                                                      \
++    SetX80(Id, OpHandlers<IR::OP_##OPU>::handle(Frame->State.FCW, X80(IROp->Args[0]), Frame));          \
++    break;                                                                                              \
++  }
++#define F80_BINARY(OPU)                                                                                 \
++  case OP_##OPU: {                                                                                      \
++    SetX80(Id, OpHandlers<IR::OP_##OPU>::handle(Frame->State.FCW, X80(IROp->Args[0]), X80(IROp->Args[1]), Frame)); \
++    break;                                                                                              \
++  }
++#define F64_UNARY(OPU)                                                                                  \
++  case OP_##OPU: {                                                                                      \
++    SetF64(Id, OpHandlers<IR::OP_##OPU>::handle(FBits<double>(G(IROp->Args[0])), Frame));                \
++    break;                                                                                              \
++  }
++#define F64_BINARY(OPU)                                                                                 \
++  case OP_##OPU: {                                                                                      \
++    SetF64(Id, OpHandlers<IR::OP_##OPU>::handle(FBits<double>(G(IROp->Args[0])), FBits<double>(G(IROp->Args[1])), Frame)); \
++    break;                                                                                              \
++  }
++      F80_BINARY(F80ADD)
++      F80_BINARY(F80SUB)
++      F80_BINARY(F80MUL)
++      F80_BINARY(F80DIV)
++      F80_BINARY(F80ATAN)
++      F80_BINARY(F80FPREM)
++      F80_BINARY(F80FPREM1)
++      F80_BINARY(F80SCALE)
++      F80_BINARY(F80FYL2X)
++      F80_BINARY(F80FYL2XP1)
++      F80_UNARY(F80ROUND)
++      F80_UNARY(F80F2XM1)
++      F80_UNARY(F80TAN)
++      F80_UNARY(F80SIN)
++      F80_UNARY(F80COS)
++      F80_UNARY(F80SQRT)
++      F80_UNARY(F80XTRACT_EXP)
++      F80_UNARY(F80XTRACT_SIG)
++      F80_UNARY(F80BCDLOAD)
++      F80_UNARY(F80BCDSTORE)
++      F64_UNARY(F64SIN)
++      F64_UNARY(F64COS)
++      F64_UNARY(F64TAN)
++      F64_UNARY(F64F2XM1)
++      F64_BINARY(F64ATAN)
++      F64_BINARY(F64FPREM)
++      F64_BINARY(F64FPREM1)
++      F64_BINARY(F64FYL2X)
++      F64_BINARY(F64FYL2XP1)
++      F64_BINARY(F64SCALE)
++#undef F80_UNARY
++#undef F80_BINARY
++#undef F64_UNARY
++#undef F64_BINARY
++      case OP_F80CMP: {
++        SetG(Id, OpHandlers<IR::OP_F80CMP>::handle(Frame->State.FCW, X80(IROp->Args[0]), X80(IROp->Args[1]), Frame));
++        break;
++      }
++      case OP_F80CVTTO: {
++        auto Op = IROp->C<IROp_F80CVTTo>();
++        if (Op->SrcSize == OpSize::i32Bit) {
++          SetX80(Id, OpHandlers<IR::OP_F80CVTTO>::handle4(Frame->State.FCW, FBits<float>(G(Op->X80Src)), Frame));
++        } else {
++          SetX80(Id, OpHandlers<IR::OP_F80CVTTO>::handle8(Frame->State.FCW, FBits<double>(G(Op->X80Src)), Frame));
++        }
++        break;
++      }
++      case OP_F80CVTTOINT: {
++        auto Op = IROp->C<IROp_F80CVTToInt>();
++        if (Op->SrcSize == OpSize::i16Bit) {
++          SetX80(Id, OpHandlers<IR::OP_F80CVTTOINT>::handle2(Frame->State.FCW, static_cast<int16_t>(G(Op->Src)), Frame));
++        } else {
++          SetX80(Id, OpHandlers<IR::OP_F80CVTTOINT>::handle4(Frame->State.FCW, static_cast<int32_t>(G(Op->Src)), Frame));
++        }
++        break;
++      }
++      case OP_F80CVT: {
++        auto Op = IROp->C<IROp_F80CVT>();
++        Val V {};
++        if (SZ == 4) {
++          SetEl<float>(V, 0, OpHandlers<IR::OP_F80CVT>::handle4(Frame->State.FCW, X80(Op->X80Src), Frame));
++        } else {
++          SetEl<double>(V, 0, OpHandlers<IR::OP_F80CVT>::handle8(Frame->State.FCW, X80(Op->X80Src), Frame));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_F80CVTINT: {
++        // The JIT moves the result's W register (or X for 8 bytes).
++        auto Op = IROp->C<IROp_F80CVTInt>();
++        const auto FCW = Frame->State.FCW;
++        const auto Src = X80(Op->X80Src);
++        uint64_t R;
++        if (SZ == 2) {
++          R = static_cast<uint32_t>(static_cast<int32_t>(Op->Truncate ? OpHandlers<IR::OP_F80CVTINT>::handle2t(FCW, Src, Frame) :
++                                                                        OpHandlers<IR::OP_F80CVTINT>::handle2(FCW, Src, Frame)));
++        } else if (SZ == 4) {
++          R = static_cast<uint32_t>(Op->Truncate ? OpHandlers<IR::OP_F80CVTINT>::handle4t(FCW, Src, Frame) :
++                                                   OpHandlers<IR::OP_F80CVTINT>::handle4(FCW, Src, Frame));
++        } else {
++          R = static_cast<uint64_t>(Op->Truncate ? OpHandlers<IR::OP_F80CVTINT>::handle8t(FCW, Src, Frame) :
++                                                   OpHandlers<IR::OP_F80CVTINT>::handle8(FCW, Src, Frame));
++        }
++        SetG(Id, R);
++        break;
++      }
++      case OP_F80SINCOS: {
++        auto Op = IROp->C<IROp_F80SINCOS>();
++        const VectorRegPairType P = OpHandlers<IR::OP_F80SINCOS>::handle(Frame->State.FCW, X80(Op->X80Src), Frame);
++        uint8_t B[32];
++        memcpy(B, &P, sizeof(B));
++        Val Sin {}, Cos {};
++        memcpy(Sin.B, B, 16);
++        memcpy(Cos.B, B + 16, 16);
++        SetV(ID(Op->OutSin), Sin);
++        SetV(ID(Op->OutCos), Cos);
++        break;
++      }
++      case OP_F64SINCOS: {
++        auto Op = IROp->C<IROp_F64SINCOS>();
++        const VectorScalarF64Pair P = OpHandlers<IR::OP_F64SINCOS>::handle(FBits<double>(G(Op->Src)), Frame);
++        SetF64(ID(Op->OutSin), P.val[0]);
++        SetF64(ID(Op->OutCos), P.val[1]);
 +        break;
 +      }
 +

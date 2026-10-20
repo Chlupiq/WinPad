@@ -13,11 +13,11 @@ Kódová mapa není deterministická: běh s `FEX_NOJIT=1` občas narazí na blo
 - Každý interpretovaný blok se poprvé zaloguje jako `[interp] learned block X` (prvních 64) a zapíše do kódové mapy, pokud se nějaká píše. Další `process-all` ho tak přidá do obrazu. Při `NtTerminateProcess` běh zaloguje `[interp] fallback ran N blocks (M distinct)`.
 - `FEX_INTERP_SURVEY=1` (v CI `WINEHOST_FEX_INTERP_SURVEY`) v offline kompilátoru spočítá, kolik bloků kódové mapy by interpret zvládl a které operace chybějí ostatním (`[interp-survey] ...`).
 
-CI z kódové mapy hello.exe vyhodí každý čtvrtý blok (`codemap.py drop --every 4`), postaví z ní cache a obraz a spustí hello.exe s NoJIT. Běh musí vypsat `Hello from x86`, skončit s 0, zalogovat interpretované bloky a zapsat je do nové kódové mapy.
+Okenní program v CI s NoJIT narazí na bloky, které žádný běh s JITem nevzal (v kernelbase, user32 kolem x87), a interpret je spustí. CI také z kódové mapy hello.exe vyhodí každý čtvrtý blok (`codemap.py drop --every 4`), postaví z ní cache a obraz a spustí hello.exe s NoJIT. Běh musí vypsat `Hello from x86`, skončit s 0, zalogovat interpretované bloky a zapsat je do nové kódové mapy.
 
 ## Co zbývá
 
-1. Operace, které interpret nezná: x87/F80 (zásobník i fallbacky), AES, SHA, CRC32, PCLMUL, `Thunk`, `CallbackReturn`, `ValidateCode`, `RDRAND`, maskované a gather loady a širší SSE/AVX operace (saturační zúžení, `VFCADD`, FMA, převody s `RoundMode`). Seznam pro konkrétní program dá survey. Fallbacky z `Interpreter/Fallbacks` jdou volat přímo.
+1. Operace, které interpret nezná: AES, SHA, CRC32, PCLMUL, `Thunk`, `CallbackReturn`, `ValidateCode`, `RDRAND`, maskované a gather loady a širší SSE/AVX operace (saturační zúžení, `VFCADD`, FMA, převody s `RoundMode`). Seznam pro konkrétní program dá survey. x87 už interpret umí: operace F80 a F64 volá přímo softfloat fallbacky z `Interpreter/Fallbacks` s FCW ze stavu, stejně jako JIT.
 2. Výpadky paměti uvnitř interpretu. Přístup hosta na neplatnou adresu teď spadne v C++ kódu interpretu a obsluha výjimek WoW64 ho nepozná jako kód FEXu. Je potřeba buď ověřovat přístupy, nebo PC interpretu přeložit na adresu hosta a doručit SEH jako z JITu.
 3. Cache IR. Blok se teď dekóduje při každé návštěvě znovu, takže smyčka v chybějícím bloku je pomalá. Stačí mapa adresa → kopie IR, zneplatňovaná spolu s lookup cache (SMC a uvolnění kódu).
 4. Vlákna a SMC. Interpretované bloky se neregistrují pro detekci samomodifikujícího kódu. S cache IR je to nutné.
