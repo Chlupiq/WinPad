@@ -1,4 +1,4 @@
-With NoJIT, blocks missing from the AOT image run in an IR interpreter (FEX 3bec2ac, on top of 0017)
+With NoJIT, blocks missing from the AOT image run in an IR interpreter (FEX 3bec2ac, on top of 0018)
 
 A NoJIT run used to stop at the first guest block the AOT image did not
 have ("NoJIT: guest block ... is not in the AOT image"). Code maps are
@@ -20,8 +20,9 @@ op writes, the guest window's 32-bit address wrap). Before a block runs,
 every op it uses is checked; an unknown one stops the process with
 "[interp] guest block X needs IR op Y, which the interpreter does not
 implement" for each, then "NoJIT: ... has no implementation of IR op Y".
-x87/F80, AES/SHA/CRC, thunks and most of the wider SSE ops are not
-implemented yet (docs/M4-interpreter.md).
+x87 runs through FEX's softfloat fallbacks, with the FCW from the state.
+AES/SHA/CRC, thunks and most of the wider SSE ops are not implemented
+yet (docs/M4-interpreter.md).
 
 Each interpreted block is logged once as "[interp] learned block X"
 (first 64) and appended to the code map when one is being written, so
@@ -68,7 +69,7 @@ index de8415b0a..e6aff993b 100644
  }
  
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
-index cc52fb771..bbcbc133c 100644
+index d8a191b60..3f3de986b 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
 +++ b/FEXCore/Source/Interface/Context/Context.h
 @@ -4,6 +4,7 @@
@@ -87,7 +88,7 @@ index cc52fb771..bbcbc133c 100644
  #include <FEXCore/Utils/SignalScopeGuards.h>
  #include <FEXCore/fextl/memory.h>
  #include <FEXCore/fextl/set.h>
-@@ -219,6 +221,11 @@ public:
+@@ -230,6 +232,11 @@ public:
    }
  
    void FlushAndCloseCodeMap() override {
@@ -99,7 +100,7 @@ index cc52fb771..bbcbc133c 100644
      if (CodeMapWriter) {
        CodeMapWriter.reset();
      }
-@@ -438,6 +445,15 @@ public:
+@@ -449,6 +456,15 @@ public:
    uintptr_t CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP, uint64_t MaxInst = 0);
    uintptr_t CompileSingleStep(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP);
  
@@ -116,7 +117,7 @@ index cc52fb771..bbcbc133c 100644
  
    FEXCore::Utils::PooledAllocatorVirtual OpDispatcherAllocator {"FEXMem_OpDispatcher"};
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
-index aa40f8fdd..4368322bd 100644
+index cdafec3c2..83aeea496 100644
 --- a/FEXCore/Source/Interface/Core/Core.cpp
 +++ b/FEXCore/Source/Interface/Core/Core.cpp
 @@ -2153,7 +2153,29 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
@@ -150,7 +151,7 @@ index aa40f8fdd..4368322bd 100644
    }
  
    // iOS-Madeira: cache miss reached — count as true compile.
-@@ -2297,6 +2319,50 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+@@ -2307,6 +2329,50 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
    return (uintptr_t)CodePtr;
  }
  

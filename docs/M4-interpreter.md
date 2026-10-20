@@ -1,6 +1,6 @@
 # M4: Interpret pro bloky mimo AOT obraz
 
-Kódová mapa není deterministická: běh s `FEX_NOJIT=1` občas narazí na blok, který nahrávací běhy nezaznamenaly, a v AOT obrazu tedy chybí. FEX se dřív na takovém bloku zastavil. Teď ho spustí interpret (patch `patches/fex-wow64/0018-nojit-ir-interpreter.patch`) a nic nemapuje jako spustitelné.
+Kódová mapa není deterministická: běh s `FEX_NOJIT=1` občas narazí na blok, který nahrávací běhy nezaznamenaly, a v AOT obrazu tedy chybí. FEX se dřív na takovém bloku zastavil. Teď ho spustí interpret (patch `patches/fex-wow64/0019-nojit-ir-interpreter.patch`) a nic nemapuje jako spustitelné.
 
 ## Jak to funguje
 
