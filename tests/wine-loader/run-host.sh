@@ -154,7 +154,9 @@ done
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001);
 # an x86 program stays a PE file.
-[ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log"
+case "$1" in */i386-windows/*) ;; *)
+    [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log" ;;
+esac
 # Every DLL comes from its dylib too (load_builtin). cmd.exe runs to its end:
 # it prints the line and exits with 0. Any other program draws a window
 # through win32u's winios driver.
