@@ -7,9 +7,10 @@
 # iphoneos; for another SDK it runs as a copy with the SDK and target
 # replaced, and with sim-metalfx/MetalFX/MetalFX.h for the MetalFX the
 # simulator SDK lacks (the host answers that it is not supported,
-# tests/wine-loader/host/metal-display.m). It does not generate airconv's
-# shader headers (Madeira keeps them from an earlier meson build), so they
-# are made here the way dxmt/src/airconv/meson.build makes them.
+# tests/wine-loader/host/metal-display.m). DXMT gets patches/dxmt/0001 for
+# the simulator's Metal. It does not generate airconv's shader headers
+# (Madeira keeps them from an earlier meson build), so they are made here
+# the way dxmt/src/airconv/meson.build makes them.
 #
 # Usage: build-dxmt-unix.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
 # WORK_DIR must hold the Madeira checkout tests/wine-loader/build.sh made.
@@ -29,6 +30,10 @@ esac
 
 sh "$here/fetch-dxmt.sh" "$r"
 sh "$here/build-llvm.sh" "$r" "$sdk_name"
+# WinPad's change to DXMT for the simulator's Metal, see the patch header.
+# The tree may already have it from an earlier run.
+p="$here/../../patches/dxmt/0001-simulator-no-raster-pipelines.patch"
+git -C "$r/dxmt" apply -R --check "$p" 2>/dev/null || git -C "$r/dxmt" apply "$p"
 
 b="$r/build/dxmt-ios"
 rm -rf "$b"
