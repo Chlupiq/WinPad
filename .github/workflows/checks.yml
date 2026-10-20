@@ -338,6 +338,18 @@ jobs:
           WINEHOST_FEX_CODEMAP: 1
           WINEHOST_FEX_ALL_CACHED: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+      - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.
+          WINEHOST_CLICK: 50,50
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
+      - name: Window content of the x86 program
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-window-x86
+          path: ${{ runner.temp }}/wine-loader/host-window/frames
+          if-no-files-found: ignore
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         run: |
           sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos
