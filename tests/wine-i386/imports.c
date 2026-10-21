@@ -3,7 +3,8 @@
  * TAPI, netapi32, shell32 and shfolder next to user32, advapi32, gdi32 and
  * kernel32. The loader has to resolve all of it, and the DLLs these import in
  * turn, before the program runs at all (a missing one is c0000135). Then it
- * calls the cheap ones, prints what they return and exits with 0. No d3d9:
+ * calls the cheap ones, prints what they return and exits with 0;
+ * DirectSoundCreate has to succeed (exit code 1 otherwise). No d3d9:
  * that has a track of its own. No headers: what it uses is declared here. */
 typedef void* HANDLE;
 typedef HANDLE HINSTANCE, HWND, HKEY, HGDIOBJ;
@@ -134,11 +135,16 @@ void start(void) {
   line_dec("imports: timeBeginPeriod(1) = ", timeBeginPeriod(1));
   line_dec("imports: timeEndPeriod(1) = ", timeEndPeriod(1));
 
-  /* Without an audio device this may fail; the call has to come back. */
+  /* dsound opens the default render device through mmdevapi's
+     MMDeviceEnumerator; Madeira's ntdll gives mmdevapi its iOS audio driver. */
   COMOBJ* ds = 0;
   HRESULT hr = DirectSoundCreate(0, (void**)&ds, 0);
   line_hr("imports: DirectSoundCreate = ", hr);
-  if (hr >= 0 && ds) ds->vtbl->Release(ds);
+  if (hr != 0 || !ds) {
+    put("imports: DirectSoundCreate has to return S_OK and an object\n");
+    ExitProcess(1);
+  }
+  ds->vtbl->Release(ds);
 
   COMOBJ* di = 0;
   hr = DirectInput8Create(GetModuleHandleA(0), 0x0800, &IID_IDirectInput8A, (void**)&di, 0);
