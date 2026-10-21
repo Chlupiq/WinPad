@@ -108,6 +108,11 @@ cp -R "$here/Settings.bundle" "$proj/"
             echo '        WinPadWine: all'
             echo '    run:'
             echo '      config: Debug'
+            # The JIT programs run under Xcode's debugger, which would stop on
+            # every signal Wine uses (thread suspend, faults it handles).
+            case ${s#*:} in d3d9-cube|game)
+                echo '      customLLDBInit: $(SRCROOT)/lldbinit' ;;
+            esac
             [ -z "${s#*:}" ] || {
                 echo '      environmentVariables:'
                 echo "        WINPAD_PROGRAM: ${s#*:}"
@@ -115,6 +120,7 @@ cp -R "$here/Settings.bundle" "$proj/"
         done
     fi
 } >"$proj/project.yml"
+echo 'process handle SIGUSR1 SIGUSR2 SIGSEGV SIGBUS SIGILL -n false -p true -s false' >"$proj/lldbinit"
 (cd "$proj" && xcodegen generate --spec project.yml)
 
 # build SDK: builds the project with xcodebuild and checks the product;
