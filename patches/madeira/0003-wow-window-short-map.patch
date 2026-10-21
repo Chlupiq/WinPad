@@ -1,0 +1,242 @@
+From: WinPad
+Subject: [PATCH] ntdll: Find a guest window on an iPad whose address map ends below the band's first slot.
+
+An iPad on iPadOS 27 without the extended-virtual-addressing entitlement
+reports TASK_VM_INFO.max_address = 0x7180000000. That is above the floor
+of the guest-window band (0x7038000000), so ios_wow_band() does not take
+its small-map path, but below the end of the band's first 4 GB-aligned
+slot (0x7100000000..0x7200000000). Every candidate the band, the [cage]
+holdback and the Chromium spill offer then lies at or across the end of
+the map, and a 32-bit process cannot start:
+
+  [wow-window] no free 4GB-aligned slot in [0x7038000000,0x73ffff0000)
+
+ios_wow_band() now caps the band at the end of the map. When no slot of
+the band fits below it, candidates come from [16 GB, end of map), highest
+first, so the window is the 4 GB slot that ends at or just below the end
+of the map (0x7000000000 there) and the low part of the map, where fixed
+probes at 32-63 GB were refused, is tried last. Unadopted placeholders
+are adopted before new slots are tried. ios_wow_window_try() refuses a
+window that would end past the end of the map, and a window that ends
+exactly at the end of the map has the end of the map as its guard.
+
+MADEIRA_WOW_MAP_END=ADDR has this policy take the map to end at ADDR, so
+a simulator takes the iPad's path; it only ever narrows the kernel's
+answer.
+
+Applies to willfaust/Madeira at 48f9764, after 0001 and 0002.
+---
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index de21e57..a59d25e 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -7977,6 +7977,22 @@ static ULONG_PTR ios_wow_map_end(void)
+         if (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt ) == KERN_SUCCESS &&
+             vmi.max_address >= 0x100000000ULL)
+             kern_max = (ULONG_PTR)vmi.max_address;
++
++        /* WinPad: MADEIRA_WOW_MAP_END=ADDR has the guest-window policy treat
++         * the map as ending at ADDR, so a simulator (a Mac process with a
++         * large map) takes the path of an iPad whose map is smaller.  It only
++         * narrows: an ADDR at or above the kernel's answer is ignored. */
++        {
++            const char *e = getenv( "MADEIRA_WOW_MAP_END" );
++            unsigned long long v = (e && *e) ? strtoull( e, NULL, 0 ) : 0;
++
++            if (kern_max > 1 && v >= 0x100000000ULL && v < kern_max)
++            {
++                dprintf( 2, "[wow-window] MADEIRA_WOW_MAP_END: the map is taken to end at %p "
++                            "(the kernel says %p)\n", (void *)(ULONG_PTR)v, (void *)kern_max );
++                kern_max = (ULONG_PTR)v;
++            }
++        }
+     }
+     return kern_max > 1 ? kern_max : 0;
+ }
+@@ -8008,14 +8024,47 @@ static unsigned long ios_wow_env_ulong( const char *name, unsigned long dflt )
+  * when a 32-bit process starts, never ahead of time.  0 on a large map.
+  */
+ static unsigned ios_wow_small_va_slots;
++/* WinPad: candidates are taken highest first (see ios_wow_band). */
++static int ios_wow_band_topdown;
+ static void ios_wow_band( ULONG_PTR *floor, ULONG_PTR *ceil )
+ {
+-    static int announced;
++    static int announced, announced_short;
+     ULONG_PTR kern_max = ios_wow_map_end();
+ 
+     *floor = ios_usable_va_floor;
+     *ceil  = ios_furniture_ceiling ? ios_furniture_ceiling : (ULONG_PTR)user_space_limit;
+     if (*ceil > IOS_WOW_CEF_POOLS_START) *ceil = IOS_WOW_CEF_POOLS_START;
++    ios_wow_band_topdown = 0;
++
++    /* WinPad: a SHORT map.  An iPad on iPadOS 27 without the extended-
++     * virtual-addressing entitlement reports TASK_VM_INFO.max_address =
++     * 0x7180000000: the map ends inside the furniture band, above its floor
++     * (so this is not the small map below) but below the end of its first
++     * 4 GB-aligned slot, 0x7100000000..0x7200000000.  Every candidate the band
++     * and the Chromium spill offer then lies at or across the end of the map
++     * and none can be reserved.  Candidates come instead from [16 GB, end of
++     * map), highest first: the slot that ends at or just below the end of the
++     * map comes first (0x7000000000 there), then lower ones, so the lowest
++     * part of the map, where the probes at 32-63 GB were refused, is tried
++     * last. */
++    if (kern_max && kern_max >= *floor + IOS_WOW_WINDOW_SIZE && *ceil > kern_max)
++    {
++        *ceil = kern_max;
++        if (((*floor + IOS_WOW_WINDOW_SIZE - 1) & ~(IOS_WOW_WINDOW_SIZE - 1)) +
++            IOS_WOW_WINDOW_SIZE > *ceil)
++        {
++            *floor = (ULONG_PTR)0x400000000ULL;                         /* 16 GB */
++            ios_wow_band_topdown = 1;
++            if (!announced_short)
++            {
++                announced_short = 1;
++                dprintf( 2, "[wow-window] short address map: it ends at %p, inside the guest-window "
++                            "band and below the end of its first 4GB slot -- candidates come from "
++                            "[%p,%p), highest first\n", (void *)kern_max, (void *)*floor,
++                         (void *)*ceil );
++            }
++        }
++    }
+ 
+     if (kern_max && kern_max < *floor + IOS_WOW_WINDOW_SIZE)
+     {
+@@ -8104,6 +8153,31 @@ static int ios_wow_map_allows_window(void)
+     return 1;
+ }
+ 
++/* WinPad: the 4 GB-aligned candidates of [floor, ceil) that fit whole, lowest
++ * first, or highest first when ios_wow_band() says so.  0 ends the walk (no
++ * band starts below 16 GB, so 0 is never a candidate). */
++static ULONG_PTR ios_wow_band_first( ULONG_PTR floor, ULONG_PTR ceil )
++{
++    ULONG_PTR cand;
++
++    if (ceil <= floor || ceil - floor < IOS_WOW_WINDOW_SIZE) return 0;
++    if (ios_wow_band_topdown)
++    {
++        cand = (ceil - IOS_WOW_WINDOW_SIZE) & ~(IOS_WOW_WINDOW_SIZE - 1);
++        return cand >= floor ? cand : 0;
++    }
++    cand = (floor + IOS_WOW_WINDOW_SIZE - 1) & ~(IOS_WOW_WINDOW_SIZE - 1);
++    return cand + IOS_WOW_WINDOW_SIZE <= ceil ? cand : 0;
++}
++
++static ULONG_PTR ios_wow_band_next( ULONG_PTR cand, ULONG_PTR floor, ULONG_PTR ceil )
++{
++    if (ios_wow_band_topdown)
++        return cand >= floor + IOS_WOW_WINDOW_SIZE ? cand - IOS_WOW_WINDOW_SIZE : 0;
++    cand += IOS_WOW_WINDOW_SIZE;
++    return cand + IOS_WOW_WINDOW_SIZE <= ceil ? cand : 0;
++}
++
+ /* One slot below the FEX band's start: the top of the spill range. */
+ static int ios_wow_spill_walk;
+ #define IOS_WOW_SPILL_TOP ((ULONG_PTR)0x7b00000000)
+@@ -8141,13 +8215,23 @@ static int ios_wow_guard_neighbour_blocked( ULONG_PTR addr, ULONG_PTR len )
+ static int ios_wow_window_try( ULONG_PTR base, unsigned *guard_owned )
+ {
+     ULONG_PTR guard = ios_wow_guard_size();
++    ULONG_PTR map_end = ios_wow_map_end();
+     struct ios_wow_placeholder *ph;
+     struct ios_wow_window *slot;
+     char what[256];
++    int end_guard;
+ 
+     *guard_owned = 0;
+     if (!ios_wow_band_ok( base, IOS_WOW_WINDOW_SIZE )) return 0;
+ 
++    /* WinPad: nothing can be mapped at or above the end of the map. */
++    if (map_end && base + IOS_WOW_WINDOW_SIZE > map_end)
++    {
++        dprintf( 2, "[wow-window] B=%p REJECTED: the window would end past the end of the "
++                    "address map (%p)\n", (void *)base, (void *)map_end );
++        return 0;
++    }
++
+     /* A slot still owned by a registry entry (live, dead-awaiting-teardown or
+      * leaked) may not be handed to a second process. */
+     if ((slot = ios_wow_slot_at_base( base )))
+@@ -8191,8 +8275,12 @@ static int ios_wow_window_try( ULONG_PTR base, unsigned *guard_owned )
+     }
+ 
+     /* an exactly-4GB gap: borrow the guard from the neighbour if — and only
+-     * if — the neighbour is already inaccessible */
+-    if (!ios_wow_guard_neighbour_blocked( base + IOS_WOW_WINDOW_SIZE, guard ))
++     * if — the neighbour is already inaccessible.  WinPad: a window that ends
++     * exactly at the end of the map has the end of the map as its guard:
++     * nothing can be mapped there, so no access past the window reaches
++     * memory. */
++    end_guard = map_end && base + IOS_WOW_WINDOW_SIZE == map_end;
++    if (!end_guard && !ios_wow_guard_neighbour_blocked( base + IOS_WOW_WINDOW_SIZE, guard ))
+     {
+         ios_va_describe_range( (void *)(base + IOS_WOW_WINDOW_SIZE), guard, what, sizeof(what) );
+         dprintf( 2, "[wow-window] B=%p REJECTED: 4GB+guard unavailable and the page at "
+@@ -8209,9 +8297,13 @@ static int ios_wow_window_try( ULONG_PTR base, unsigned *guard_owned )
+         return 0;
+     }
+     mmap_add_reserved_area( (void *)base, IOS_WOW_WINDOW_SIZE );
+-    dprintf( 2, "[wow-window] B=%p: reserved exactly 4GB; guard BORROWED from the "
+-                "pre-existing PROT_NONE region at %p\n",
+-             (void *)base, (void *)(base + IOS_WOW_WINDOW_SIZE) );
++    if (end_guard)
++        dprintf( 2, "[wow-window] B=%p: reserved exactly 4GB; the end of the address map at %p "
++                    "is its guard\n", (void *)base, (void *)map_end );
++    else
++        dprintf( 2, "[wow-window] B=%p: reserved exactly 4GB; guard BORROWED from the "
++                    "pre-existing PROT_NONE region at %p\n",
++                 (void *)base, (void *)(base + IOS_WOW_WINDOW_SIZE) );
+     return 1;
+ }
+ 
+@@ -8234,9 +8326,7 @@ static ULONG_PTR ios_wow_candidate_slot(void)
+     if (ceil <= floor || ceil - floor < IOS_WOW_WINDOW_SIZE) return 0;
+ 
+     n = ios_wow_window_count;
+-    for (cand = (floor + IOS_WOW_WINDOW_SIZE - 1) & ~(IOS_WOW_WINDOW_SIZE - 1);
+-         cand >= floor && cand + IOS_WOW_WINDOW_SIZE <= ceil;
+-         cand += IOS_WOW_WINDOW_SIZE)
++    for (cand = ios_wow_band_first( floor, ceil ); cand; cand = ios_wow_band_next( cand, floor, ceil ))
+     {
+         int taken = 0;
+         unsigned p;
+@@ -8433,13 +8523,23 @@ static ULONG_PTR ios_wow_window_pick( unsigned *guard_owned )
+     ios_wow_band( &floor, &ceil );
+     if (ceil <= floor || ceil - floor < IOS_WOW_WINDOW_SIZE) return 0;
+ 
+-    /* 4 GB-aligned only, lowest first.  B must be 4 GB-aligned: FEX forms host
++    /* 4 GB-aligned only, lowest first (highest first on a short map, see
++     * ios_wow_band).  B must be 4 GB-aligned: FEX forms host
+      * addresses as [Xbase, Wea, UXTW], i.e. B + zext32(EA), which is only safe
+      * against a 32-bit wrap at the top of the window when the low 32 bits of B
+      * are zero. */
+-    for (cand = (floor + IOS_WOW_WINDOW_SIZE - 1) & ~(IOS_WOW_WINDOW_SIZE - 1);
+-         cand >= floor && cand + IOS_WOW_WINDOW_SIZE <= ceil;
+-         cand += IOS_WOW_WINDOW_SIZE)
++    /* WinPad: walking down from the top would pass slots above an unadopted
++     * placeholder first; adopt the placeholders before trying new slots. */
++    if (ios_wow_band_topdown)
++    {
++        unsigned p;
++
++        for (p = 0; p < ios_wow_placeholder_count; p++)
++            if (!ios_wow_placeholders[p].adopted &&
++                ios_wow_window_try( (cand = ios_wow_placeholders[p].base), guard_owned ))
++                return cand;
++    }
++    for (cand = ios_wow_band_first( floor, ceil ); cand; cand = ios_wow_band_next( cand, floor, ceil ))
+         if (ios_wow_window_try( cand, guard_owned )) return cand;
+ 
+     /* the band is out of slots: a concurrent 32-bit process may trade the
+@@ -8492,9 +8592,7 @@ static void ios_wow_reserve_placeholders( unsigned max )
+     if (ios_wow_small_va_slots && max > ios_wow_small_va_slots) max = ios_wow_small_va_slots;
+ 
+     pthread_mutex_lock( &ios_wow_mutex );
+-    for (cand = (floor + IOS_WOW_WINDOW_SIZE - 1) & ~(IOS_WOW_WINDOW_SIZE - 1);
+-         cand >= floor && cand + IOS_WOW_WINDOW_SIZE <= ceil;
+-         cand += IOS_WOW_WINDOW_SIZE)
++    for (cand = ios_wow_band_first( floor, ceil ); cand; cand = ios_wow_band_next( cand, floor, ceil ))
+     {
+         unsigned guard_owned = 0;
+ 

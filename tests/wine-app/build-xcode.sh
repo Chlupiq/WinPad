@@ -97,7 +97,10 @@ udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcod
 xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
 xcrun simctl install "$udid" "$sim_app"
-xcrun simctl launch "$udid" "$bundle"
+# The map of an iPad without the extended virtual addressing entitlement ends at
+# 0x7180000000 (TASK_VM_INFO.max_address); ntdll places the 32-bit guest window
+# as if the simulator's did too (patches/madeira/0003).
+SIMCTL_CHILD_MADEIRA_WOW_MAP_END=0x7180000000 xcrun simctl launch "$udid" "$bundle"
 log="$(xcrun simctl get_app_container "$udid" "$bundle" data)/Documents/wine.log"
 for _ in $(seq 150); do
     grep -q '== finished' "$log" 2>/dev/null && break
@@ -110,7 +113,9 @@ grep -q '== finished, exit 0' "$log" ||
     { echo "the app did not run the x86 program in Wine on the simulator" >&2; exit 1; }
 for expect in 'Hello from x86' 'winehost: NoJIT, so no JIT pool' \
     '[nojit] no JIT pool: nothing is written to executable memory' \
-    '[aot-dispatcher] static code from the AOT image' 'xtajit.dll.dylib" at'; do
+    '[aot-dispatcher] static code from the AOT image' 'xtajit.dll.dylib" at' \
+    '[wow-window] MADEIRA_WOW_MAP_END: the map is taken to end at 0x7180000000' \
+    '[wow-window] short address map: it ends at 0x7180000000'; do
     grep -qF "$expect" "$log" || { echo "missing in the app's log: $expect" >&2; exit 1; }
 done
 echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT image with NoJIT"
