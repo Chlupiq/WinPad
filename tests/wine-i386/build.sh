@@ -6,14 +6,15 @@
 # compiles it with LLVM clang for i686-windows and links it with lld.
 # Also builds tests/wine-i386/hello.c, a 32-bit console program that only
 # imports kernel32, tests/wine-i386/window.c, one with a window (user32,
-# gdi32), and tests/wine-i386/imports.c, which imports what a game imports.
+# gdi32), tests/wine-i386/imports.c, which imports what a game imports, and
+# tests/wine-i386/guard.c, stack growth and guard pages.
 #
 # Usage: build.sh WORK_DIR [MODULE...]
 # (default: ntdll kernelbase kernel32, what a program with a window needs and
 # the import closure of tests/wine-i386/imports.c)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
-# Output: WORK_DIR/i386-windows/*.dll, hello.exe, window.exe, imports.exe and
+# Output: WORK_DIR/i386-windows/*.dll, hello.exe, guard.exe, window.exe, imports.exe and
 # casetest.dll (imports.exe's own DLL).
 set -eu
 
@@ -87,6 +88,11 @@ kernel32=$(implib kernel32)
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console \
     "$here/hello.c" "$kernel32" -o "$out/hello.exe" -fuse-ld=lld
+# Stack growth and guard pages (kernel32 only); the image asks for an 8 MB
+# stack, as a game's does.
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console -Wl,-stack:8388608 \
+    "$here/guard.c" "$kernel32" -o "$out/guard.exe" -fuse-ld=lld
 # The program with a window, if this build has its modules.
 if [ -f "$out/user32.dll" ] && [ -f "$out/gdi32.dll" ]; then
     user32=$(implib user32)

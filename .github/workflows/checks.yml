@@ -405,6 +405,15 @@ jobs:
           # FEX runs the program and those 32-bit DLLs with its JIT. Its last line:
           WINEHOST_EXPECT_OUTPUT: "imports: done"
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe"
+      - name: A 32-bit x86 program grows its stacks (an 8 MB main thread and an 8 MB CreateThread thread, through _chkstk, down to a stack overflow) and takes guard pages from VirtualAlloc, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # Every check prints "guard: ok" or "guard: FAIL"; the last line only when all passed.
+          WINEHOST_EXPECT_OUTPUT: "guard: all passed"
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/guard.exe" || status=$?
+          grep -E '^guard:|\[fault-rgn\]|mach-deliver|stack overflow|Unhandled' "$RUNNER_TEMP/wine-loader/host-guard/run.log" | head -120 || true
+          exit $status
       - name: The same program in a game's folder of its own on a case-sensitive volume, as on an iPad, finds the DLLs it names in capitals (USER32.dll in syswow64, its CASETEST.dll next to it)
         env:
           WINEHOST_EXPECT_OUTPUT: "imports: done"
