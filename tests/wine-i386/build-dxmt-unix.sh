@@ -7,8 +7,8 @@
 # iphoneos; for another SDK it runs as a copy with the SDK and target
 # replaced, and with sim-metalfx/MetalFX/MetalFX.h for the MetalFX the
 # simulator SDK lacks (the host answers that it is not supported,
-# tests/wine-loader/host/metal-display.m). DXMT gets patches/dxmt/0001 for
-# the simulator's Metal. It does not generate airconv's shader headers
+# tests/wine-loader/host/metal-display.m). DXMT gets patches/dxmt: 0001 for
+# the simulator's Metal, 0002 for Xcode 27's Metal compiler. It does not generate airconv's shader headers
 # (Madeira keeps them from an earlier meson build), so they are made here
 # the way dxmt/src/airconv/meson.build makes them.
 #
@@ -33,10 +33,11 @@ sh "$here/build-llvm.sh" "$r" "$sdk_name"
 # Madeira's script takes LLVM from toolchains/llvm-ios-build: this SDK's.
 [ ! -L "$r/toolchains" ] || rm "$r/toolchains"
 ln -s "toolchains-$sdk_name" "$r/toolchains"
-# WinPad's change to DXMT for the simulator's Metal, see the patch header.
-# The tree may already have it from an earlier run.
-p="$here/../../patches/dxmt/0001-simulator-no-raster-pipelines.patch"
-git -C "$r/dxmt" apply -R --check "$p" 2>/dev/null || git -C "$r/dxmt" apply "$p"
+# WinPad's changes to DXMT, see the patch headers. The tree may already
+# have them from an earlier run.
+for p in "$here"/../../patches/dxmt/*.patch; do
+    git -C "$r/dxmt" apply -R --check "$p" 2>/dev/null || git -C "$r/dxmt" apply "$p"
+done
 
 b="$r/build/dxmt-ios"
 rm -rf "$b"
