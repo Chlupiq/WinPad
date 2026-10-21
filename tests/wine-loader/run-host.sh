@@ -52,7 +52,16 @@ ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
 # WINEHOST_SYSWOW64=1 makes the same prefix for a 64-bit program that reads
 # the 32-bit DLLs by their C:\windows\syswow64 paths (FEX's offline compiler).
 wow64=${WINEHOST_SYSWOW64:-}
-case "$1" in */i386-windows/*) wow64=1 ;; esac
+# A 32-bit x86 program (PE Machine 0x14c, wherever it lies) runs under WoW64.
+pe_machine() {  # FILE: the Machine field of its PE header, as 4 hex digits
+    [ -f "$1" ] && [ "$(od -An -c -N2 "$1" | tr -d ' ')" = MZ ] || return 0
+    pe=$(od -An -tu4 -j60 -N4 "$1" | tr -d ' ')
+    [ "$(od -An -c -j"$pe" -N2 "$1" | tr -d ' ')" = PE ] || return 0
+    od -An -tx1 -j$((pe + 4)) -N2 "$1" | awk '{ print $2 $1 }'
+}
+x86_32=
+[ "$(pe_machine "$1")" = 014c ] && x86_32=1
+[ -n "$x86_32" ] && wow64=1
 if [ "$wow64" = 1 ]; then
     # A 32-bit process's system32 is C:\windows\syswow64; Madeira's app links
     # the i386 set there (madeira_link_syswow64 in WineProcessBridge.m).
@@ -157,9 +166,7 @@ done
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001);
 # an x86 program stays a PE file.
-case "$1" in */i386-windows/*) ;; *)
-    [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log" ;;
-esac
+[ -n "$x86_32" ] || [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log"
 # Every DLL comes from its dylib too (load_builtin). cmd.exe runs to its end:
 # it prints the line and exits with 0. Any other program draws a window
 # through win32u's winios driver.

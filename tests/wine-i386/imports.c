@@ -4,6 +4,8 @@
  * kernel32. The loader has to resolve all of it, and the DLLs these import in
  * turn, before the program runs at all (a missing one is c0000135). Then it
  * calls the cheap ones, prints what they return and exits with 0;
+ * USER32, ADVAPI32, GDI32, DINPUT8 and its own CASETEST.dll it names in
+ * capitals, as games do, while the files are lowercase;
  * DirectSoundCreate has to succeed (exit code 1 otherwise). No d3d9:
  * that has a track of its own. No headers: what it uses is declared here. */
 typedef void* HANDLE;
@@ -57,6 +59,8 @@ __declspec(dllimport) DWORD __stdcall timeGetTime(void);
 /* DirectX */
 __declspec(dllimport) HRESULT __stdcall DirectInput8Create(HINSTANCE, DWORD, const GUID*, void**, void*);
 __declspec(dllimport) HRESULT __stdcall DirectSoundCreate(const GUID*, void**, void*);
+/* casetest.dll, the program's own DLL (casetest.c), imported as CASETEST.dll. */
+__declspec(dllimport) int casetest_value(void);
 __declspec(dllimport) HRESULT __stdcall DirectDrawCreate(GUID*, void**, void*);
 /* ws2_32, shfolder, shell32, tapi32, netapi32 */
 __declspec(dllimport) int __stdcall WSAStartup(WORD, WSADATA*);
@@ -119,6 +123,7 @@ void start(void) {
   out = GetStdHandle(STD_OUTPUT_HANDLE);
   put("imports: kernel32, user32, advapi32, gdi32, winmm, dinput8, dsound, ddraw, ws2_32, "
       "shfolder, shell32, tapi32 and netapi32 resolved\n");
+  line_dec("imports: casetest_value() of CASETEST.dll = ", (unsigned long)casetest_value());
   line_dec("imports: GetSystemMetrics(SM_CXSCREEN) = ", (unsigned long)GetSystemMetrics(0));
   line_dec("imports: GetStockObject(BLACK_BRUSH) != 0: ", GetStockObject(4) != 0);
 
