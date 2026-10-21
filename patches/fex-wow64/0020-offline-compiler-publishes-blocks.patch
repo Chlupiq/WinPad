@@ -1,0 +1,40 @@
+The offline compiler publishes every block it compiles (FEX 3bec2ac, on top of 0019)
+
+The window program's code map had 91 blocks of ucrtbase. The offline
+compiler compiled all of them, but its cache held only 74. The other 17
+were exactly the blocks it logged as "[fexlock] UNPUB-COMPILE". In
+CompileBlock, a nonzero emission-lock depth or CodeBufferWriteMutex
+stamp in the TEB is read as a guest exception delivered under the
+compiler's own locks (ml455). Such a block is compiled for one run
+and never entered into the lookup cache, so the cache written from it
+lacks the block. Every run then compiles the block at run time, and
+converge-cache.sh finds the ready code maps already hold it.
+
+The offline compiler delivers no guest exceptions and compiles on one
+thread, so while a cache is being generated CompileBlock now compiles
+and publishes as usual, with "[aot-gen] X: emission locks look held
+while generating a cache; compiled and published as usual" (first 8).
+
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 83aeea496..78d173c9a 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -2124,7 +2124,17 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+    * and hand the block back for a one-shot execute.  It is re-compiled and
+    * published normally on the next synchronous miss.  CompileSingleStep
+    * proves the dispatcher happily consumes an unpublished pointer. */
+-  const bool IosUnpublished = FEXCore::Utils::WritePriorityMutex::IosEmissionLocksHeldBySelf();
++  bool IosUnpublished = FEXCore::Utils::WritePriorityMutex::IosEmissionLocksHeldBySelf();
++  // WinPad: the offline compiler delivers no guest exceptions, so a lock depth its thread's TEB
++  // shows is not a delivery. A block compiled unpublished never reaches the lookup cache, and
++  // the cache written from it would lack the block.
++  if (IosUnpublished && CodeCache.IsGeneratingCache) {
++    static std::atomic<int> GenLogCount {0};
++    if (GenLogCount.fetch_add(1, std::memory_order_relaxed) < 8) {
++      LogMan::Msg::EFmt("[aot-gen] {:#x}: emission locks look held while generating a cache; compiled and published as usual", GuestRIP);
++    }
++    IosUnpublished = false;
++  }
+   std::shared_lock<std::remove_reference_t<decltype(CodeInvalidationMutex)>> lk;
+   if (IosUnpublished) {
+     static std::atomic<int> UnpubLogCount {0};
