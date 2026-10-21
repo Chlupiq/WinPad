@@ -1,0 +1,46 @@
+From: WinPad
+Subject: [PATCH] ntdll: Log mprotect_exec only now and then.
+
+mprotect_exec logs an ERR line for every protection change it makes
+(ml374). FEX's host heap commits its pages through it, so a run of an x86
+program logs thousands of
+
+  err:virtual:mprotect_exec mprotect_exec(0x71..., ..., rw-)
+
+that say nothing new after the first few and push the rest of the run out
+of the log. It now logs the first 32 calls, then the 64th, 128th, 256th
+and so on, each with the running count as "(#N)", so the log still shows
+how many there were (tests/fex-wow64/heap-churn.py reads it).
+
+Applies to willfaust/Madeira at 48f9764, after 0001 to 0004. Numbered
+0006 because 0005 is taken on another branch (x86-case-lookup, 0005 there
+changes dlls/ntdll/unix/file.c only).
+---
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -12399,10 +12399,20 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+      * Apply only on the PROT_WRITE-add path; non-write protect changes go
+      * through the regular mprotect below. */
+     if (!ios_in_mach_exc)                       /* ml374: see ios_in_mach_exc */
+-        ERR("mprotect_exec(%p, 0x%lx, %c%c%c)\n", base, (unsigned long)size,
+-            (unix_prot & PROT_READ)  ? 'r' : '-',
+-            (unix_prot & PROT_WRITE) ? 'w' : '-',
+-            (unix_prot & PROT_EXEC)  ? 'x' : '-');
++    {
++        /* WinPad: the first 32 calls, then every power of two, with the
++         * running count. Every protection change of a process comes through
++         * here (each commit of FEX's host heap pages too), and an ERR line
++         * each is thousands of lines of a run. */
++        static unsigned int mprotect_exec_calls;
++        unsigned int n = ++mprotect_exec_calls;
++
++        if (n <= 32 || !(n & (n - 1)))
++            ERR("mprotect_exec(%p, 0x%lx, %c%c%c) (#%u)\n", base, (unsigned long)size,
++                (unix_prot & PROT_READ)  ? 'r' : '-',
++                (unix_prot & PROT_WRITE) ? 'w' : '-',
++                (unix_prot & PROT_EXEC)  ? 'x' : '-', n);
++    }
+     if ((unix_prot & PROT_WRITE) && !(unix_prot & PROT_EXEC))
+     {
+         /* ml391 (task #60): try WITHOUT VM_PROT_COPY first.  COPY forcibly

@@ -371,6 +371,8 @@ jobs:
           sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
             "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
             "$RUNNER_TEMP/fexcache"
+          # Kept for the host heap check at the end of the job (later runs of hello.exe replace it).
+          cp "$RUNNER_TEMP/wine-loader/host-hello/run.log" "$RUNNER_TEMP/hello-nojit-ipad-map.log"
       - name: The same AOT image, with the blocks the interpreter learned, links for an iPad
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" iphoneos
       - name: Code caches without every fourth block of that code map, as a run that took other paths would leave them
@@ -504,6 +506,14 @@ jobs:
           name: fex-cache-hello
           path: ${{ runner.temp }}/fexcache
           if-no-files-found: ignore
+      - name: FEX's host heap keeps its free pages committed in the NoJIT run of the x86 program on an iPad's address map
+        # patches/fex-wow64/0022: before it, rpmalloc decommitted every page it freed and
+        # committed it again at the next allocation of its size. This run then decommitted 9
+        # host heap pages and logged 58 rw- commits of them (CI run 39584998095); with free
+        # pages kept committed it decommits none, so 3 leaves room for a run that frees more.
+        run: |
+          echo "before patches/fex-wow64/0022: 9 decommits, 58 rw- commits of host heap pages"
+          python3 -I tests/fex-wow64/heap-churn.py "$RUNNER_TEMP/hello-nojit-ipad-map.log" --max-decommits 3
 
   fexcore-ios:
     runs-on: macos-15
