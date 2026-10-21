@@ -563,6 +563,11 @@ jobs:
             argument buffers tier 1, Metal 3 family: no
         run: |
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d9-cube.exe"
+          # Shaders that fail to compile on the simulator hand back an NSError;
+          # released once too often, it faulted in the pool pop (patches/dxmt/0003).
+          if grep -m3 'objc_autoreleasePoolPop' "$RUNNER_TEMP/wine-loader/host-d3d9-cube/run.log"; then
+            echo "::error::an autorelease pool released a freed object"; exit 1
+          fi
           echo "::notice::D3D9 cube on the simulator: device, Presents and drawables checked; GPU completion of its frames is not, the simulator lacks Metal 3 bindless (tier 2 argument buffers)"
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 program in Wine in an iPad app (Xcode project), run on an iPad simulator
