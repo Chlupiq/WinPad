@@ -351,6 +351,8 @@ jobs:
             [aot-link] first block link through the data area
             [wow-window] short address map: it ends at 0x7180000000
             page0: MADEIRA_PAGE0=0: page 0 taken to be unavailable
+            as an iPad's map refuses it
+            [va-profile] ml787 FEX host arena = [0x7100100000, 0x717fffffff]
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-image
           WINEHOST_FEX_CODEMAP: 1
           WINEHOST_FEX_ALL_CACHED: 1
@@ -359,6 +361,10 @@ jobs:
           WINEHOST_WOW_MAP_END: "0x7180000000"
           # As on an iPad, which maps nothing at address 0: no TEB copy at page 0.
           WINEHOST_PAGE0: "0"
+          # As on that iPad, whose kernel refuses mappings at 32-63 GB and past the end
+          # of the map: FEX's host band is then the rest of the map above the guest
+          # window (patches/fex-wow64/0019), not 0x7c00000000 as on a simulator.
+          WINEHOST_VA_HOLES: "0x800000000-0x1000000000,0x7180000000-0x8000000000"
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         run: |

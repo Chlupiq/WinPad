@@ -1,0 +1,168 @@
+FEX's host band for a 32-bit process on an iPad whose address map ends at 0x7180000000 (FEX 3bec2ac, on top of 0018)
+
+On an iPad on iPadOS 27 without the extended-virtual-addressing
+entitlement, hello.exe died in xtajit before its first x86 instruction:
+
+  [mach_exc] UNHANDLED pc=xtajit+... addr=0x7f0
+  insn: str xzr, [x20, #0x7f0]   (x20 = 0)
+
+That store is rpmalloc's heap_allocate_new zeroing the heap_t that
+memory_map() just returned (get_thread_heap_allocate, the first malloc
+of the thread): memory_map() returned NULL. On iOS every rpmalloc and
+FEX host mapping is pinned to a band chosen at the first mapping
+(ios_fex_band_select), with no unconstrained fallback. Its candidates
+are [0x7c00000000, 0x7fffffffff], which lies wholly above the end of
+that iPad's map (TASK_VM_INFO.max_address = 0x7180000000), and
+[48 GB, 60 GB) plus a sweep of [32 GB, 64 GB), where the kernel there
+refuses every probe. So there was no band and every host allocation
+failed. An iPad simulator has a large map: it takes 0x7c00000000 and
+the run goes on, page 0 or not.
+
+When those all fail, the WoW64 build now walks 2 GB windows from
+0x8000000000 down to 64 GB with the same real placement probes (64 KB,
+then 256 MB), never inside the 4 GB guest window ntdll placed
+(ProcessWineIosWowGuestBase) or the 1 MB above it. On that iPad the
+guest window is at 0x7000000000 (patches/madeira/0003), and the band
+is [0x7100100000, 0x717fffffff], the rest of the map above it. The
+ARM64EC build and every map where a fixed candidate fits keep their
+band. The walk is reported in the [va-profile] log BTCpuProcessInit
+prints.
+
+diff --git a/External/rpmalloc/rpmalloc/rpmalloc.c b/External/rpmalloc/rpmalloc/rpmalloc.c
+index 3cbb74e..26ccd82 100644
+--- a/External/rpmalloc/rpmalloc/rpmalloc.c
++++ b/External/rpmalloc/rpmalloc/rpmalloc.c
+@@ -957,6 +957,120 @@ ios_va_hex(char* buf, int i, uintptr_t v) {
+ 	return i;
+ }
+ 
++#if !(defined(__arm64ec__) || defined(_M_ARM64EC))
++/* WinPad: a band for a WoW64 process on a SHORT address map.
++ *
++ * An iPad on iPadOS 27 without the extended-virtual-addressing entitlement has
++ * a map that ends at 0x7180000000 (TASK_VM_INFO.max_address). Both fixed
++ * candidates fail there: cand0 [0x7c00000000, 0x7fffffffff] lies wholly above
++ * the end of the map, and the kernel refuses every probe at 32-63 GB, so cand1
++ * and the ml753 sweep find nothing either. With no band every FEX host
++ * allocation returns NULL, and the first one, rpmalloc's heap_t, is zeroed
++ * through that NULL: `str xzr, [x20, #0x7f0]` in get_thread_heap_allocate,
++ * before BTCpuProcessInit can name the cause.
++ *
++ * ntdll has by then put this process's 4 GB guest window just below the end
++ * of the map (0x7000000000 there, patches/madeira/0003), and left the rest of
++ * the map above it free. So walk 2 GB windows from 0x8000000000 down to
++ * 64 GB, the same real placement probes as above (64 KB, then 256 MB), and
++ * never inside the guest window [B, B + 4 GB) or the 1 MB above it: a host
++ * structure there would be guest-writable (the ml465/ml706 hazard), and a
++ * guest access that runs off the top of the window must still fault.
++ * On that iPad the first window that takes the probes is the one just above
++ * the guest window, [0x7100100000, 0x717fffffff].
++ *
++ * The guest window base comes from ntdll (ProcessWineIosWowGuestBase, 1010,
++ * as BTCpuProcessInit reads it). Without it nothing is tried: a band that
++ * might overlap the guest window is worse than none. */
++typedef LONG(WINAPI* ios_nqip_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
++
++static void
++ios_fex_band_select_short_map(ios_valloc2_t valloc2) {
++	const uintptr_t step = 0x80000000ULL, top_end = 0x8000000000ULL, floor = 0x1000000000ULL;
++	const uintptr_t guard = 0x100000ULL;
++	HMODULE nt = GetModuleHandleW(L"ntdll.dll");
++	ios_nqip_t nqip = nt ? (ios_nqip_t)(void*)GetProcAddress(nt, "NtQueryInformationProcess") : 0;
++	ULONG_PTR wow_base = 0;
++	uintptr_t top, win_lo, win_end;
++	char buf[192];
++	int i, refused = 0;
++
++	if (!nqip || nqip(GetCurrentProcess(), 1010 /* ProcessWineIosWowGuestBase */, &wow_base, sizeof(wow_base), 0) != 0)
++		wow_base = 0;
++	i = ios_va_cat(buf, 0, "[va-profile] winpad short-map sweep: guest window B=");
++	i = ios_va_hex(buf, i, (uintptr_t)wow_base);
++	if (!wow_base) {
++		i = ios_va_cat(buf, i, " unknown -- not trying (a band could overlap it)\n");
++		ios_va_emit(buf, i);
++		return;
++	}
++	i = ios_va_cat(buf, i, "\n");
++	ios_va_emit(buf, i);
++	win_lo = (uintptr_t)wow_base;
++	win_end = (uintptr_t)wow_base + 0x100000000ULL + guard; /* exclusive */
++
++	for (top = top_end; top > floor; top -= step) {
++		MEM_ADDRESS_REQUIREMENTS req;
++		MEM_EXTENDED_PARAMETER param;
++		uintptr_t lo = top - step, hi = top - 1;
++		void* small;
++		void* big;
++
++		if (lo < win_end && hi >= win_lo) {
++			if (lo >= win_lo && hi < win_end)
++				continue; /* inside the guest window */
++			if (lo < win_lo)
++				hi = win_lo - 1;
++			else
++				lo = win_end;
++		}
++		if (hi - lo + 1 < 0x10000000ULL)
++			continue;
++
++		memset(&req, 0, sizeof(req));
++		memset(&param, 0, sizeof(param));
++		req.Alignment = 0x10000;
++		req.LowestStartingAddress = (PVOID)lo;
++		req.HighestEndingAddress = (PVOID)hi;
++		param.Type = MemExtendedParameterAddressRequirements;
++		param.Pointer = &req;
++		small = valloc2(GetCurrentProcess(), 0, 0x10000, MEM_RESERVE, PAGE_NOACCESS, &param, 1);
++		if (!small) {
++			++refused;
++			continue;
++		}
++		VirtualFree(small, 0, MEM_RELEASE);
++
++		memset(&req, 0, sizeof(req));
++		memset(&param, 0, sizeof(param));
++		req.Alignment = 0x10000;
++		req.LowestStartingAddress = (PVOID)lo;
++		req.HighestEndingAddress = (PVOID)hi;
++		param.Type = MemExtendedParameterAddressRequirements;
++		param.Pointer = &req;
++		big = valloc2(GetCurrentProcess(), 0, 0x10000000 /* 256MB */, MEM_RESERVE, PAGE_NOACCESS, &param, 1);
++		i = ios_va_cat(buf, 0, "[va-profile] winpad short-map window base=");
++		i = ios_va_hex(buf, i, lo);
++		i = ios_va_cat(buf, i, " end=");
++		i = ios_va_hex(buf, i, hi);
++		i = ios_va_cat(buf, i, big ? " 64KB+256MB OK -- TAKING\n" : " 64KB ok but 256MB FAIL -- skipping\n");
++		ios_va_emit(buf, i);
++		if (big) {
++			VirtualFree(big, 0, MEM_RELEASE);
++			ios_fex_band_base = lo;
++			ios_fex_band_end = hi;
++			break;
++		}
++	}
++	if (refused) {
++		i = ios_va_cat(buf, 0, "[va-profile] winpad short-map sweep: windows that refused 64KB: ");
++		i = ios_va_hex(buf, i, (uintptr_t)refused);
++		i = ios_va_cat(buf, i, "\n");
++		ios_va_emit(buf, i);
++	}
++}
++#endif
++
+ static void
+ ios_fex_band_select(ios_valloc2_t valloc2) {
+ 	/* MADEIRA ml1600/ml1630: in the WOW64 (32-bit guest) build, cand[1] is
+@@ -1170,6 +1284,12 @@ ios_fex_band_select(ios_valloc2_t valloc2) {
+ 		}
+ 	}
+ 
++#if !(defined(__arm64ec__) || defined(_M_ARM64EC))
++	/* WinPad: see ios_fex_band_select_short_map. */
++	if (!ios_fex_band_base)
++		ios_fex_band_select_short_map(valloc2);
++#endif
++
+ 	if (ios_fex_band_base) {
+ 		i = ios_va_cat(buf, 0, "[va-profile] ml706 SELECTED base=");
+ 		i = ios_va_hex(buf, i, ios_fex_band_base);
