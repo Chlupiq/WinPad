@@ -26,6 +26,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -433,6 +434,32 @@ static int finish(void) {
   _exit(0);
 }
 
+// A game opens its data by paths relative to the current directory, as it
+// does when started from its own folder on Windows. Wine takes the initial
+// current directory from the Unix one, which the in-process wineserver has
+// changed to its own directory by now, so set it through Madeira's
+// MADEIRA_INITIAL_CWD instead: the folder of a program given by an absolute
+// Unix path (as Z:\...), or WINEHOST_CWD (a Windows path) when set.
+static void set_initial_directory(const char* program) {
+  const char* cwd = getenv("WINEHOST_CWD");
+  if (cwd && *cwd) {
+    setenv("MADEIRA_INITIAL_CWD", cwd, 1);
+  } else if (program[0] == '/' && !getenv("MADEIRA_INITIAL_CWD")) {
+    static char dir[PATH_MAX + 4];
+    const char* slash = strrchr(program, '/');
+    size_t len = (size_t)(slash - program);
+    if (len == 0 || len + 3 > sizeof(dir)) return;
+    dir[0] = 'Z';
+    dir[1] = ':';
+    for (size_t i = 0; i < len; i++) dir[2 + i] = program[i] == '/' ? '\\' : program[i];
+    dir[2 + len] = 0;
+    setenv("MADEIRA_INITIAL_CWD", dir, 1);
+  } else {
+    return;
+  }
+  printf("winehost: current directory %s\n", getenv("MADEIRA_INITIAL_CWD"));
+}
+
 int winehost_main(int argc, char* argv[]) {
   setvbuf(stdout, NULL, _IONBF, 0);
   if (argc < 3) {
@@ -501,6 +528,7 @@ int winehost_main(int argc, char* argv[]) {
     publish_host_probe();
     if (publish_jit_pool(512 << 20)) return 1;
   }
+  set_initial_directory(argv[2]);
   printf("winehost: starting %s\n", argv[2]);
   if (start(wine_thread, 8 << 20)) return 1;
 

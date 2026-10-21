@@ -435,6 +435,18 @@ jobs:
           cp "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe" "$RUNNER_TEMP/wine-loader/i386-windows/casetest.dll" "$cs/game/"
           # The program is not under i386-windows: run-host.sh knows it is 32-bit from its PE header.
           sh tests/wine-loader/run-host.sh "$cs/work" "$cs/game/imports.exe"
+      - name: A 32-bit x86 program in a game's folder reads its data by a relative path (the current directory is the program's folder, not the Wine prefix)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "cwd: done"
+        run: |
+          game="$RUNNER_TEMP/cwd-game"
+          mkdir -p "$game/DATA"
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/cwd.exe" "$game/"
+          echo "game data found" > "$game/DATA/CWD.TXT"
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$game/cwd.exe" || status=$?
+          grep -E '^cwd:|current directory' "$RUNNER_TEMP/wine-loader/host-cwd/run.log" || true
+          exit $status
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         run: |
           sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos
