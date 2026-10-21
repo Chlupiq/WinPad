@@ -1,0 +1,58 @@
+From: WinPad
+Subject: [PATCH] ntdll: Ask a debugger to map page 0 only when told to.
+
+init_syscall_frame() maps a copy of the first thread's TEB at address 0,
+so code that reads the TEB through x18 after iOS zeroed x18 reads a TEB
+and not zeroes. An iPad refuses every mapping at 0 (M1-M7), and the last
+attempt, M8, executes BRK #0xf00d for StikDebug to write the page. Under
+any other debugger, such as Xcode's lldb, the process stops there with
+EXC_BREAKPOINT, before ntdll claims the exception ports; with no debugger
+trap_handler skips the BRK, so a simulator runs on.
+
+MADEIRA_PAGE0 now picks how far the chain goes: unset or "1" tries M1-M7
+and stops, "debugger" goes on to M8, and "0" tries nothing, page 0 being
+taken to be unavailable as on an iPad, so a simulator takes the device's
+path. Without page 0 the Mach exception handler restores x18, as it
+already did whenever every attempt failed.
+
+Applies to willfaust/Madeira at 48f9764, after 0001, 0002 and 0003.
+---
+diff --git a/build/ntdll-unix/signal_arm64_ios.c b/build/ntdll-unix/signal_arm64_ios.c
+index 5ecf4e5..faef7b7 100644
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -13567,8 +13567,22 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, BOOL suspend,
+      * address → undispatchable BUS → NtTerminateProcess. Observed killing
+      * Thumper's worker-thread spawn at ~2:30 (thread 0054, splash wall). */
+     static int ios_page0_attempted = 0;
++    /* MADEIRA_PAGE0 picks how far the chain goes:
++     *   unset or "1"  M1-M7 only (default),
++     *   "debugger"    M1-M7, then the M8 BRK #0xf00d, for StikDebug, which
++     *                 answers it,
++     *   "0"           none: page 0 is taken to be unavailable, as on an iPad,
++     *                 so a simulator takes the device's path.
++     * Any other debugger (Xcode's lldb) stops the process on the M8 BRK, and
++     * with no debugger trap_handler skips it, so M8 is opt-in. */
++    const char *page0_env = getenv( "MADEIRA_PAGE0" );
++    int page0_skip = page0_env && !strcmp( page0_env, "0" );
++    int page0_debugger = page0_env && !strcmp( page0_env, "debugger" );
+     if (ios_page0_attempted) {
+         ERR("page0: already attempted by first thread — skipping (Mach handler covers x18=0)\n");
++    } else if (page0_skip) {
++        ios_page0_attempted = 1;
++        ERR("page0: MADEIRA_PAGE0=0: page 0 taken to be unavailable, not mapped — relying on Mach handler only\n");
+     } else {
+         ios_page0_attempted = 1;
+         kern_return_t kr;
+@@ -13716,7 +13730,10 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, BOOL suspend,
+         /* M8: Ask the debugger to write TEB data to page 0 via BRK #0xf00d cmd 3.
+          * The debugger may have kernel privileges that the app doesn't.
+          * Uses GDB M (memory write) command to write TEB data at address 0. */
+-        if (!mapped) {
++        if (!mapped && !page0_debugger) {
++            ERR("page0: M8 debugger BRK skipped (MADEIRA_PAGE0=debugger asks for it)\n");
++        }
++        if (!mapped && page0_debugger) {
+             ERR("page0: trying debugger (BRK #0xf00d, x16=3)...\n");
+             register uintptr_t x0_val __asm__("x0") = (uintptr_t)teb;
+             register size_t x1_val __asm__("x1") = 0x4000;

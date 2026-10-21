@@ -11,8 +11,10 @@
 // the executable, where Madeira's ntdll looks for them.
 //
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
-// while it runs. If the run stops the app (FEX aborts on an x86 block
-// missing from the image), the next launch shows the log of that run.
+// while it runs. An x86 block missing from the image runs in FEX's IR
+// interpreter (patches/fex-wow64/0019) and is written to the code map in
+// Documents/fexcache/codemap/new, so a later image can have it. If the run
+// stops the app, the next launch shows the log of that run.
 #import <UIKit/UIKit.h>
 
 #include <stdio.h>
@@ -127,6 +129,10 @@ static NSString* MakePrefix(NSString* bundle) {
   setenv("WINEDEBUG", "+loaddll", 1);
   setenv("MADEIRA_WIN32U", "1", 1);
   setenv("MADEIRA_DESKTOP", "1", 1);
+  // An app without the extended virtual addressing entitlement gets about 8 GB of address
+  // space on an iPad. The 32-bit program's 4 GB guest window fits, but not with the 8 GB
+  // Madeira wants left over by default.
+  setenv("MADEIRA_WOW_MIN_FREE_GB", "2", 1);
   setenv("WINEHOST_RETURN", "1", 1);
   setenv("WINEHOST_AOT_IMAGE",
          [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"fexaot.dylib"].fileSystemRepresentation, 1);

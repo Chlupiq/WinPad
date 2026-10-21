@@ -22,6 +22,13 @@ jobs:
       - name: Syscall stubs have no code relocations
         run: sh tests/syscall-stubs/run.sh
 
+  wow-window:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Madeira's guest-window placement, with patches/madeira, on the address map of an iPad
+        run: sh tests/wine-loader/check-wow-window.sh "$RUNNER_TEMP/wow-window"
+
   fxcc-inspect:
     runs-on: ubuntu-24.04
     steps:
@@ -319,9 +326,7 @@ jobs:
             "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
       - name: The code caches and FEX's dispatcher are linked into a dylib, as they would be into the app
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot/fexaot.dylib"
-      - name: The same AOT image links for an iPad
-        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" iphoneos
-      - name: The x86 program runs from the code linked into that dylib with NoJIT, in Wine on an iPad simulator
+      - name: The x86 program runs from the code linked into that dylib with NoJIT, the blocks it lacked compiled in until none is left, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
           # FEX finds every cache in the image's index and runs its code where dyld
@@ -343,10 +348,31 @@ jobs:
             [wow-bop] system calls go through ntdll's __wine_wow64_bop
             [aot-cache] enabled
             [aot-link] first block link through the data area
+            [wow-window] short address map: it ends at 0x7180000000
+            page0: MADEIRA_PAGE0=0: page 0 taken to be unavailable
+            as an iPad's map refuses it
+            [va-profile] ml787 FEX host arena = [0x7100100000, 0x717fffffff]
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-image
           WINEHOST_FEX_CODEMAP: 1
           WINEHOST_FEX_ALL_CACHED: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+          # As on an iPad without the extended virtual addressing entitlement, whose
+          # address map ends at 0x7180000000: the guest window goes below that end.
+          WINEHOST_WOW_MAP_END: "0x7180000000"
+          # As on an iPad, which maps nothing at address 0: no TEB copy at page 0.
+          WINEHOST_PAGE0: "0"
+          # As on that iPad, whose kernel refuses mappings at 32-63 GB and past the end
+          # of the map: FEX's host band is then the rest of the map above the guest
+          # window (patches/fex-wow64/0021), not 0x7c00000000 as on a simulator.
+          WINEHOST_VA_HOLES: "0x800000000-0x1000000000,0x7180000000-0x8000000000"
+        # As for the program with a window: blocks no JIT run took run in FEX's
+        # interpreter and are compiled into the image (patches/fex-wow64/0019, 0020),
+        # so the image the app ships (tests/wine-app) has them too.
+        run: |
+          sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
+            "$RUNNER_TEMP/fexcache"
+      - name: The same AOT image, with the blocks the interpreter learned, links for an iPad
+        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" iphoneos
       - name: Code caches without every fourth block of that code map, as a run that took other paths would leave them
         env:
           WINEHOST_EXPECT_OUTPUT: Successfully populated cache
