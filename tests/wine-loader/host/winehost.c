@@ -11,6 +11,7 @@
 // types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
 // first window, 2 s after that window first showed (see winios_pProcessEvents);
 // WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead.
+// WINEHOST_VA_HOLES holds address ranges an iPad cannot map (hold_va_holes).
 // WINEHOST_AOT_IMAGE names a dylib with FEX AOT code caches linked in
 // (tools/cache2macho); its index goes to FEX as WINE_IOS_AOT_INDEX.
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
@@ -367,6 +368,58 @@ static int publish_jit_pool(size_t size) {
   return 0;
 }
 
+// An iPad without the extended virtual addressing entitlement cannot map
+// everything a simulator (a Mac process) can: its map ends at 0x7180000000 and
+// the kernel refuses mappings at 32-63 GB. WINEHOST_VA_HOLES=LO-HI[,LO-HI...]
+// holds those ranges ([LO, HI), hex) as inaccessible memory before Wine
+// starts, so nothing in the process (Wine, FEX's host band) can map there,
+// as on that iPad. Parts already mapped stay as they are.
+static void hold_va_holes(void) {
+  const char* spec = getenv("WINEHOST_VA_HOLES");
+  if (!spec || !*spec) return;
+  const char* p = spec;
+  while (*p) {
+    char* end;
+    unsigned long long lo = strtoull(p, &end, 16), hi = 0;
+    if (*end == '-') hi = strtoull(end + 1, &end, 16);
+    if (hi <= lo) {
+      printf("winehost: WINEHOST_VA_HOLES: cannot read %s\n", p);
+      return;
+    }
+    unsigned long long held = 0;
+    for (unsigned long long a = lo; a < hi;) {
+      // 64 MB at a time; where that fails (something is mapped there), 16 KB.
+      unsigned long long step = (a % (64 << 20) == 0 && hi - a >= (64 << 20)) ? (64 << 20) : 0x4000;
+      vm_address_t at = (vm_address_t)a;
+      kern_return_t kr = vm_map(mach_task_self(), &at, (vm_size_t)step, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0,
+                                FALSE, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_NONE);
+      if (kr == KERN_SUCCESS) {
+        held += step;
+        a += step;
+      } else if (step > 0x4000) {
+        // Retry this 64 MB page by page.
+        unsigned long long stop = a + step;
+        for (; a < stop; a += 0x4000) {
+          at = (vm_address_t)a;
+          if (vm_map(mach_task_self(), &at, 0x4000, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_NONE,
+                     VM_PROT_NONE, VM_INHERIT_NONE) == KERN_SUCCESS)
+            held += 0x4000;
+        }
+      } else {
+        a += step;
+      }
+    }
+    printf("winehost: address range [%#llx, %#llx) held, %llu of %llu MB, as an iPad's map refuses it\n", lo, hi,
+           held >> 20, (hi - lo) >> 20);
+    p = end;
+    if (*p == ',') p++;
+    else if (*p) {
+      printf("winehost: WINEHOST_VA_HOLES: cannot read %s\n", p);
+      return;
+    }
+  }
+}
+
 static void* server_thread(void* arg) {
   (void)arg;
   foreground = 1;
@@ -454,6 +507,7 @@ int winehost_main(int argc, char* argv[]) {
   if (frames_dir) mkdir(frames_dir, 0700);
 
   printf("winehost: pid %d\n", (int)getpid());
+  hold_va_holes();
   printf("winehost: starting wineserver, prefix %s\n", prefix);
   if (start(server_thread, 0)) return 1;
   for (int i = 0; i < 200 && !__atomic_load_n(&wineserver_ready, __ATOMIC_ACQUIRE); i++)

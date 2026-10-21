@@ -65,6 +65,13 @@ if [ "$wow64" = 1 ]; then
         ln -s "$f" "$out/prefix/drive_c/windows/system32/"
     done
 fi
+# WINEHOST_WOW_MAP_END=ADDR has ntdll place the 32-bit guest window as if the
+# address map ended at ADDR (MADEIRA_WOW_MAP_END, patches/madeira/0003), as an
+# iPad's smaller map does; it only narrows the simulator's map.
+# WINEHOST_PAGE0=0 has ntdll take page 0 to be unavailable, as on an iPad, and
+# not map the first thread's TEB there (MADEIRA_PAGE0, patches/madeira/0004).
+# WINEHOST_VA_HOLES=LO-HI[,...] has the host hold address ranges such an iPad
+# cannot map before Wine starts (hold_va_holes in host/winehost.c).
 # WINEHOST_FEX_CACHE=DIR is FEX's cache directory (code maps, caches), shared
 # by runs. With WINEHOST_FEX_CODEMAP=1, FEX records there which blocks of the
 # x86 code it compiled (a code map, the input of its offline compiler).
@@ -103,6 +110,9 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_FEX_DUMPDISPATCHER="$fex_dump_dispatcher" SIMCTL_CHILD_FEX_NOJIT="${WINEHOST_FEX_NOJIT:-0}" \
     SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
     SIMCTL_CHILD_FEX_INTERP_SURVEY="${WINEHOST_FEX_INTERP_SURVEY:-0}" \
+    SIMCTL_CHILD_MADEIRA_WOW_MAP_END="${WINEHOST_WOW_MAP_END:-}" \
+    SIMCTL_CHILD_MADEIRA_PAGE0="${WINEHOST_PAGE0:-}" \
+    SIMCTL_CHILD_WINEHOST_VA_HOLES="${WINEHOST_VA_HOLES:-}" \
     perl -e 'alarm shift; exec @ARGV' 120 \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!

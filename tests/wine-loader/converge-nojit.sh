@@ -48,6 +48,7 @@ while :; do
     echo "=== round $round: compiling the blocks the interpreter ran into the image's code caches"
     env -u WINEHOST_CLICK -u WINEHOST_EXPECT_LOG -u WINEHOST_EXPECT_OUTPUT -u WINEHOST_FEX_CODEMAP \
         -u WINEHOST_FEX_ALL_CACHED -u WINEHOST_FEX_DUMP_DISPATCHER -u WINEHOST_FEX_NOJIT -u WINEHOST_AOT_IMAGE \
+        -u WINEHOST_WOW_MAP_END -u WINEHOST_PAGE0 -u WINEHOST_VA_HOLES \
         WINEHOST_FEX_CACHE="$cache_dir" \
         WINEHOST_EXPECT_OUTPUT="Successfully populated cache" WINEHOST_EXPECT_FEX_CACHE=1 \
         WINEHOST_SYSWOW64=1 WINEHOST_JIT=1 WINEHOST_JIT_POOL_MB=2048 \
