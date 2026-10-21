@@ -1,0 +1,24 @@
+WinPad: air_tessellation.metal builds with the Metal compiler of Xcode 27 too.
+
+Its Metal compiler (metalfe-32023) takes a fifth argument, the memory flags,
+for the atomic builtins, and stops on DXMT's four-argument
+__metal_atomic_fetch_add_explicit. Xcode 26 defines __METAL_MEMORY_FLAGS_NONE__
+too but still takes four, so no macro tells them apart. The call now goes
+through metal_stdlib's atomic_fetch_add_explicit, which each SDK writes for its
+own compiler: the same relaxed, threadgroup-scoped add on both.
+
+Applies to willfaust/dxmt at db546ee (Madeira's dxmt submodule).
+---
+diff --git a/src/airconv/shaders/air_tessellation.metal b/src/airconv/shaders/air_tessellation.metal
+--- a/src/airconv/shaders/air_tessellation.metal
++++ b/src/airconv/shaders/air_tessellation.metal
+@@ -150,7 +150,8 @@
+ 
+ int
+ get_next_index(threadgroup int *out_count) {
+-  return __metal_atomic_fetch_add_explicit(out_count, 1, int(memory_order_relaxed), __METAL_MEMORY_SCOPE_THREADGROUP__);
++  /* metal_stdlib's atomic call matches whichever builtin the compiler has. */
++  return atomic_fetch_add_explicit((threadgroup atomic_int *)out_count, 1, memory_order_relaxed);
+ }
+ 
+ template <partitioning partition>

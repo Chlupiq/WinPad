@@ -1,0 +1,85 @@
+From: WinPad
+Subject: [PATCH] ntdll: Leave the breakpoints to a debugger that holds them.
+
+ios_install_task_exception_port() takes EXC_MASK_BREAKPOINT from the
+debugger (ml523), so FEX's brk #0xCAFE no longer waits on StikDebug. Under
+Xcode's lldb that also takes the brk #0 lldb puts in dyld to hear about
+every dlopen: the handler declines it, Wine gets a SIGTRAP it cannot
+handle, and the game dies loading its first builtin dylib after ntdll
+("[task-exc] BREAKPOINT #1 ... insn=0xd4200000 ... other").
+
+Passing such a breakpoint on to the debugger's port does not work on an
+iPad: the message has to carry the thread's control port, and iOS kills
+the task for that (EXC_GUARD, kGUARD_EXC_IMMOVABLE, on wine-x18-exc).
+
+So when a debugger holds EXC_BREAKPOINT the task port now takes only bad
+access and bad instruction. WoW64 FEX emits no brk #0xCAFE (that is
+ARM64EC only), and StikDebug's brk #0xf00d is not used under lldb.
+MADEIRA_DEBUGGER_BRK=0 claims the breakpoints anyway.
+
+Applies to willfaust/Madeira at 48f9764, after 0001-0005 and 0007.
+---
+diff --git a/build/ntdll-unix/signal_arm64_ios.c b/build/ntdll-unix/signal_arm64_ios.c
+index faef7b7..35c4ebf 100644
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -6090,6 +6090,7 @@ static void ios_install_task_exception_port(void)
+     mach_msg_type_number_t old_count = EXC_TYPES_COUNT, i;
+     const char *gate;
+     kern_return_t kr;
++    exception_mask_t mask = EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION | EXC_MASK_BREAKPOINT;
+ 
+     if (done || ios_exc_port == MACH_PORT_NULL) return;
+     done = 1;
+@@ -6114,9 +6115,37 @@ static void ios_install_task_exception_port(void)
+      * jit26_prepare_region already ran (Swift side, pre-wine) so the pool is
+      * unaffected; jit26_detach()'s BRK now lands in trap_handler's 0xf00d case
+      * instead of the debugger, which is harmless. */
+-    kr = task_swap_exception_ports( mach_task_self(),
+-                                    EXC_MASK_BAD_ACCESS | EXC_MASK_BAD_INSTRUCTION |
+-                                    EXC_MASK_BREAKPOINT,
++    /* WinPad: leave the breakpoints with a debugger that holds them, such as
++     * Xcode's lldb. Its own brk #0 in dyld, hit on every dlopen, would
++     * otherwise become a SIGTRAP Wine cannot handle, and it cannot be passed
++     * back: iOS kills a task that puts a thread's control port in a message
++     * (EXC_GUARD, kGUARD_EXC_IMMOVABLE). WoW64 FEX emits no brk #0xCAFE (that
++     * is ARM64EC only), and StikDebug's brk #0xf00d is not used under lldb.
++     * MADEIRA_DEBUGGER_BRK=0 claims them anyway. */
++    {
++        exception_mask_t      cur_masks[EXC_TYPES_COUNT];
++        mach_port_t           cur_ports[EXC_TYPES_COUNT];
++        exception_behavior_t  cur_behav[EXC_TYPES_COUNT];
++        thread_state_flavor_t cur_flav[EXC_TYPES_COUNT];
++        mach_msg_type_number_t cur_count = EXC_TYPES_COUNT, j;
++        int held = 0;
++
++        if (task_get_exception_ports( mach_task_self(), EXC_MASK_BREAKPOINT, cur_masks, &cur_count,
++                                      cur_ports, cur_behav, cur_flav ) == KERN_SUCCESS)
++            for (j = 0; j < cur_count; j++)
++                if (cur_ports[j] != MACH_PORT_NULL)
++                {
++                    held = 1;
++                    mach_port_deallocate( mach_task_self(), cur_ports[j] );
++                }
++        if (held && !((gate = getenv( "MADEIRA_DEBUGGER_BRK" )) && gate[0] == '0'))
++        {
++            mask &= ~EXC_MASK_BREAKPOINT;
++            ERR("[task-exc] a debugger holds EXC_BREAKPOINT: leaving it the breakpoints\n");
++        }
++    }
++
++    kr = task_swap_exception_ports( mach_task_self(), mask,
+                                     ios_exc_port,
+                                     (exception_behavior_t)(EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES),
+                                     ARM_THREAD_STATE64,
+@@ -6131,8 +6160,8 @@ static void ios_install_task_exception_port(void)
+     /* Log what we displaced. A non-null previous port is the debugger's, and is
+      * precisely the name that would have gone dead underneath us. Release the
+      * send rights the swap handed us — we never send to them. */
+-    ERR("[task-exc] INSTALLED ours=0x%x mask=ba+bi+brk displaced=%u rev=ml523\n",
+-        ios_exc_port, (unsigned)old_count);
++    ERR("[task-exc] INSTALLED ours=0x%x mask=ba+bi%s displaced=%u rev=ml523\n",
++        ios_exc_port, (mask & EXC_MASK_BREAKPOINT) ? "+brk" : "", (unsigned)old_count);
+     for (i = 0; i < old_count; i++)
+     {
+         ERR("[task-exc]   prev[%u] mask=0x%x port=0x%x behavior=0x%x flavor=%d%s\n",

@@ -14,7 +14,10 @@
 # first menu, which has to open (a new window); with WINEHOST_CLICK=X,Y it
 # taps at X %, Y % of the window's client area, which has to change what the
 # window shows. WINEHOST_WINEDEBUG replaces
-# WINEDEBUG=+loaddll.
+# WINEDEBUG=+loaddll. A console program has to exit with
+# WINEHOST_EXPECT_EXIT (default 0), or with WINEHOST_EXPECT_EXIT=running
+# still run when the host stops; WINEHOST_SECONDS (default 30) is how
+# long the host waits for the program.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -52,7 +55,16 @@ ln -s "$work/modules-iphonesimulator/aarch64-windows" "$out/aarch64-windows"
 # WINEHOST_SYSWOW64=1 makes the same prefix for a 64-bit program that reads
 # the 32-bit DLLs by their C:\windows\syswow64 paths (FEX's offline compiler).
 wow64=${WINEHOST_SYSWOW64:-}
-case "$1" in */i386-windows/*) wow64=1 ;; esac
+# A 32-bit x86 program (PE Machine 0x14c, wherever it lies) runs under WoW64.
+pe_machine() {  # FILE: the Machine field of its PE header, as 4 hex digits
+    [ -f "$1" ] && [ "$(od -An -c -N2 "$1" | tr -d ' ')" = MZ ] || return 0
+    pe=$(od -An -tu4 -j60 -N4 "$1" | tr -d ' ')
+    [ "$(od -An -c -j"$pe" -N2 "$1" | tr -d ' ')" = PE ] || return 0
+    od -An -tx1 -j$((pe + 4)) -N2 "$1" | awk '{ print $2 $1 }'
+}
+x86_32=
+[ "$(pe_machine "$1")" = 014c ] && x86_32=1
+[ -n "$x86_32" ] && wow64=1
 if [ "$wow64" = 1 ]; then
     # A 32-bit process's system32 is C:\windows\syswow64; Madeira's app links
     # the i386 set there (madeira_link_syswow64 in WineProcessBridge.m).
@@ -64,6 +76,9 @@ if [ "$wow64" = 1 ]; then
     for f in "$work/modules-iphonesimulator/aarch64-windows"/*; do
         ln -s "$f" "$out/prefix/drive_c/windows/system32/"
     done
+    # The COM classes the 32-bit DLLs create (dsound: mmdevapi's device
+    # enumerator), as wineboot would have registered them (prefix/system.reg).
+    cp "$here/prefix/system.reg" "$out/prefix/system.reg"
 fi
 # WINEHOST_WOW_MAP_END=ADDR has ntdll place the 32-bit guest window as if the
 # address map ended at ADDR (MADEIRA_WOW_MAP_END, patches/madeira/0003), as an
@@ -97,7 +112,7 @@ udid=$(xcrun simctl list devices available -j | python3 -I "$root/tests/ios/xcod
 echo "iPad simulator $udid"
 xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
-seconds=30
+seconds=${WINEHOST_SECONDS:-30}
 SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
     SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG="${WINEHOST_WINEDEBUG:-+loaddll}" \
     SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
@@ -167,9 +182,7 @@ done
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001);
 # an x86 program stays a PE file.
-case "$1" in */i386-windows/*) ;; *)
-    [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log" ;;
-esac
+[ -n "$x86_32" ] || [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log"
 # Every DLL comes from its dylib too (load_builtin). cmd.exe runs to its end:
 # it prints the line and exits with 0. Any other program draws a window
 # through win32u's winios driver.
@@ -177,7 +190,11 @@ if [ -n "$default_program" ]; then
     grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
     grep -q '^Hello from Wine' "$out/run.log"
 elif [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ]; then
-    grep -q '^winehost: Wine process exited with code 0$' "$out/run.log"
+    if [ "${WINEHOST_EXPECT_EXIT:-0}" = running ]; then
+        grep -q '^winehost: [0-9]* s passed, exiting$' "$out/run.log"
+    else
+        grep -q "^winehost: Wine process exited with code ${WINEHOST_EXPECT_EXIT:-0}\$" "$out/run.log"
+    fi
     grep -qF "$WINEHOST_EXPECT_OUTPUT" "$out/run.log"
 else
     grep -q '^winehost: frame of window' "$out/run.log"

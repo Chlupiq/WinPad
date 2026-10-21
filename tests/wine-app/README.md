@@ -45,5 +45,34 @@ Jak ho vybrat, bez nového překladu:
   spusť znovu (z plochy nebo z Xcode). Zpátky: `hello.exe`.
 - Nebo v Xcode schéma `WinPadWine Window` (nahoře vedle cíle) a Run (⌘R).
 
- (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
+
+## Direct3D 9 kostka (schéma „WinPadWine D3D9“)
+
+Když CI přeložilo i DXMT, má projekt i schéma `WinPadWine D3D9`.
+Vyber ho nahoře vedle cíle a dej Run (⌘R). Aplikace pak místo `hello.exe`
+spustí 32bitový Direct3D 9 program (`d3d9-cube.exe`, kostka z Madeiry):
+přes DXMT a Metal kreslí do okna v aplikaci, 8 sekund, a na konci ukáže OK,
+když všechny snímky předal Metalu. Běží s JITem FEXu, ne z AOT obrazu,
+takže potřebuje připojený debugger: spouštěj ho z Xcode, ne z plochy.
+Na simulátoru kostka nedoběhne: jeho Metal nemá argument buffery tier 2
+(Metal 3), na kterých DXMT kreslí.
+
+## Hra (schéma „WinPadWine Game“)
+
+S DXMT má projekt i schéma `WinPadWine Game` pro hru, kterou si do
+aplikace nakopíruješ sám (herní soubory nikdy nejdou do repa ani do CI):
+
+1. iPad připoj k Macu, ve Finderu ho vyber → Soubory → přetáhni složku
+   hry (např. `NFSU2`) na „WinPad Wine“. Je pak v Soubory → WinPad Wine.
+2. V Xcode vyber schéma `WinPadWine Game` a dej Run (⌘R).
+
+Aplikace spustí `NFSU2/SPEED2.EXE` z Dokumentů aplikace, s pracovní
+složkou ve složce hry. Jinou hru vybereš v Nastavení → WinPad Wine → Game
+(cesta v Dokumentech, např. `NFSU2/SPEED2.EXE`). Hra běží s JITem FEXu
+jako kostka, takže jen z Xcode s debuggerem; okno hry se ukáže v aplikaci,
+dokud ji neukončíš. Ovládá se hardwarovou klávesnicí (Magic Keyboard, Bluetooth
+nebo USB): šipky, Enter, Esc a další klávesy jdou přímo do hry. `dinput8.dll` ze složky hry (ASI Loader) má přednost
+před Wine (`WINEDLLOVERRIDES=dinput8=n,b`).
+
+Projekt vzniká v CI (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
 Nic v něm neupravuj ručně, při další verzi se přegeneruje.

@@ -252,7 +252,9 @@ def write_asm(pe, prefix, out):
                         {rva for rva in labels if start <= rva < end})
         for pos, cut in zip(points, points[1:]):
             for label in labels.get(pos, []):
-                lines += [f"\t.globl {label}", f"{label}:"]
+                # C++ exports (concrt140's ?...@@...) need quoting in the assembler.
+                q = label if re.fullmatch(r"[A-Za-z0-9_$.]+", label) else f'"{label}"'
+                lines += [f"\t.globl {q}", f"{q}:"]
             if pos in reloc_set:
                 lines.append(f"\t.quad _{prefix}_image + {pe.pointer_target(pos):#x}")
                 continue

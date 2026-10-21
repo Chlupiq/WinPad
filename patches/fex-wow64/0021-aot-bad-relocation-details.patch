@@ -1,0 +1,45 @@
+Say which relocation makes a block not cacheable (FEX 3bec2ac, on top of 0020)
+
+The offline compiler left a block of the 32-bit ntdll out of its cache
+("[aot-gen] ... left out: not cacheable"): the decoder found a guest
+relocation where it read a field that is not a whole 32/64-bit one.
+That line names the block, not the instruction. When it builds a cache,
+the decoder now logs the first such read of a block: "[aot-gen] bad
+relocation: block <entry>, instruction at <guest> (+<image offset>),
+relocation at +<offset> of type <type> read as <n> bytes at offset <k>
+of the instruction; bytes: <16 bytes from the instruction start>".
+
+diff --git a/FEXCore/Source/Interface/Core/Frontend.cpp b/FEXCore/Source/Interface/Core/Frontend.cpp
+index 8311d56..9ccc172 100644
+--- a/FEXCore/Source/Interface/Core/Frontend.cpp
++++ b/FEXCore/Source/Interface/Core/Frontend.cpp
+@@ -23,7 +23,9 @@ $end_info$
+ #include <FEXCore/Utils/Telemetry.h>
+ #include <FEXCore/Utils/TypeDefines.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
++#include <FEXCore/fextl/fmt.h>
+ #include <FEXCore/fextl/set.h>
++#include <FEXCore/fextl/string.h>
+ 
+ namespace FEXCore::Frontend {
+ #include "Interface/Core/VSyscall/VSyscall.inc"
+@@ -162,6 +164,19 @@ std::pair<uint64_t, bool> Decoder::ReadData(uint8_t Size) {
+       } else if (It->second == GuestRelocationType::Rel64 && Size == 8) {
+         return {static_cast<int64_t>(Res) - static_cast<int64_t>(EntryPoint), true};
+       } else {
++        // WinPad: say which relocation and which read, so that a block the
++        // offline compiler leaves out ([aot-gen]) can be traced to its instruction.
++        if (!HitBadRelocation && CTX->GetCodeCache().IsGeneratingCache) {
++          const uint64_t InstAddress = reinterpret_cast<uint64_t>(InstStream.InstStream);
++          fextl::string Bytes;
++          for (size_t i = 0; i < 16; ++i) {
++            Bytes += fextl::fmt::format(" {:02x}", InstStream.AdjustedInstStream[i]);
++          }
++          LogMan::Msg::EFmt("[aot-gen] bad relocation: block {:#x}, instruction at {:#x} (+{:#x} in the image), "
++                            "relocation at +{:#x} of type {} read as {} bytes at offset {} of the instruction; bytes:{}",
++                            EntryPoint, InstAddress, InstAddress - SectionMinAddress, SectionOffset,
++                            static_cast<uint32_t>(It->second), Size, Address - InstAddress, Bytes);
++        }
+         HitBadRelocation = true;
+         Res = 0;
+       }

@@ -10,7 +10,8 @@
 // that gets the newest content of each window as HWND.bmp). WINEHOST_TYPE
 // types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
 // first window, 2 s after that window first showed (see winios_pProcessEvents);
-// WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead.
+// WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead. An app
+// hands in keys of its own with winehost_post_key.
 // WINEHOST_VA_HOLES holds address ranges an iPad cannot map (hold_va_holes).
 // WINEHOST_AOT_IMAGE names a dylib with FEX AOT code caches linked in
 // (tools/cache2macho); its index goes to FEX as WINE_IOS_AOT_INDEX.
@@ -21,6 +22,7 @@
 // instead of ending the process. An app shows the program's window through
 // winehost_frame_hook. WINEHOST_WAIT_EXIT=1 waits for the Wine process to
 // exit even after everything the run checks has shown up.
+#include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
@@ -29,6 +31,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -256,8 +259,49 @@ static int advance(int from, int to) {
                                      __ATOMIC_ACQUIRE);
 }
 
+// Keys an app around the host (tests/wine-app) hands in with
+// winehost_post_key, from its own threads; Wine threads send them on from
+// winios_pProcessEvents, as Madeira's Winios.m does with its ring.
+static struct {
+  unsigned short vk[256];
+  unsigned char up[256];
+  unsigned head, tail;
+  pthread_mutex_t lock;
+} keys = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+__attribute__((visibility("default"))) void winehost_post_key(unsigned short vk, int down) {
+  pthread_mutex_lock(&keys.lock);
+  unsigned next = (keys.head + 1) % 256;
+  if (next != keys.tail) {  // full: the key is dropped rather than block the app
+    keys.vk[keys.head] = vk;
+    keys.up[keys.head] = !down;
+    keys.head = next;
+  }
+  pthread_mutex_unlock(&keys.lock);
+}
+
+static int send_posted_keys(void) {
+  int sent = 0;
+  for (;;) {
+    pthread_mutex_lock(&keys.lock);
+    if (keys.tail == keys.head) {
+      pthread_mutex_unlock(&keys.lock);
+      return sent;
+    }
+    unsigned short vk = keys.vk[keys.tail];
+    int up = keys.up[keys.tail];
+    keys.tail = (keys.tail + 1) % 256;
+    pthread_mutex_unlock(&keys.lock);
+    winios_drv_post_key(vk, up ? KEYUP : 0);
+    static int logged;
+    if (logged++ < 8) fprintf(stderr, "winehost: key 0x%x %s\n", vk, up ? "up" : "down");
+    sent = 1;
+  }
+}
+
 int winios_pProcessEvents(unsigned int mask) {
   (void)mask;
+  if (send_posted_keys()) return 1;
   int state = __atomic_load_n(&input_state, __ATOMIC_ACQUIRE);
   if ((state != 1 && state != 3) || now() < state_time + 2) return 0;
   if (state == 1 && advance(1, 2)) {
@@ -494,6 +538,32 @@ static int finish(void) {
   _exit(0);
 }
 
+// A game opens its data by paths relative to the current directory, as it
+// does when started from its own folder on Windows. Wine takes the initial
+// current directory from the Unix one, which the in-process wineserver has
+// changed to its own directory by now, so set it through Madeira's
+// MADEIRA_INITIAL_CWD instead: the folder of a program given by an absolute
+// Unix path (as Z:\...), or WINEHOST_CWD (a Windows path) when set.
+static void set_initial_directory(const char* program) {
+  const char* cwd = getenv("WINEHOST_CWD");
+  if (cwd && *cwd) {
+    setenv("MADEIRA_INITIAL_CWD", cwd, 1);
+  } else if (program[0] == '/' && !getenv("MADEIRA_INITIAL_CWD")) {
+    static char dir[PATH_MAX + 4];
+    const char* slash = strrchr(program, '/');
+    size_t len = (size_t)(slash - program);
+    if (len == 0 || len + 3 > sizeof(dir)) return;
+    dir[0] = 'Z';
+    dir[1] = ':';
+    for (size_t i = 0; i < len; i++) dir[2 + i] = program[i] == '/' ? '\\' : program[i];
+    dir[2 + len] = 0;
+    setenv("MADEIRA_INITIAL_CWD", dir, 1);
+  } else {
+    return;
+  }
+  printf("winehost: current directory %s\n", getenv("MADEIRA_INITIAL_CWD"));
+}
+
 int winehost_main(int argc, char* argv[]) {
   setvbuf(stdout, NULL, _IONBF, 0);
   if (argc < 3) {
@@ -563,6 +633,7 @@ int winehost_main(int argc, char* argv[]) {
     publish_host_probe();
     if (publish_jit_pool(512 << 20)) return 1;
   }
+  set_initial_directory(argv[2]);
   printf("winehost: starting %s\n", argv[2]);
   if (start(wine_thread, 8 << 20)) return 1;
 
@@ -576,7 +647,12 @@ int winehost_main(int argc, char* argv[]) {
   const int wait_exit = (env = getenv("WINEHOST_WAIT_EXIT")) && !strcmp(env, "1");
   double begin = now(), done_at = 0;
   while (now() - begin < seconds) {
-    usleep(100000);
+    // The main thread waits in its run loop, which also runs what Wine's
+    // threads give the main queue: DXMT sets up and presents Metal layers
+    // there (execute_on_main in winemetal_unix.c, dispatch_sync), as in the
+    // app, whose main thread is UIKit's.
+    if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false) == kCFRunLoopRunFinished)
+      usleep(100000);
     int met_all = (__atomic_load_n(&goals_met, __ATOMIC_ACQUIRE) & goals_needed) == goals_needed;
     if (__atomic_load_n(&wine_exited, __ATOMIC_ACQUIRE) || (goals_needed && met_all && !wait_exit)) {
       if (!done_at) done_at = now();

@@ -31,8 +31,17 @@ while :; do
     # same caches again and fail the same way; say which blocks and stop.
     # shellcheck disable=SC2046 # one argument per code map file
     python3 -I "$here/../fex-wow64/codemap-new-blocks.py" "$WINEHOST_FEX_CACHE" \
-        $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin' -size +0) ||
-        { echo "round $round added no new blocks to the code maps; the caches had them already" >&2; exit 1; }
+        $(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin' -size +0) || {
+        # Why the offline compiler left blocks out, and how the run came to
+        # compile them, from the last compile and this run.
+        echo "--- [aot-gen] lines of the last offline compiler run ---"
+        grep -F '[aot-gen]' "$work/host-fexofflinecompiler/run.log" 2>/dev/null | head -100 || true
+        name=$(basename "$program" | tr 'A-Z' 'a-z')
+        echo "--- [aot-miss] lines of this run ---"
+        grep -F '[aot-miss]' "$work/host-${name%.*}/run.log" 2>/dev/null | head -40 || true
+        echo "round $round added no new blocks to the code maps; the caches had them already" >&2
+        exit 1
+    }
     env -u WINEHOST_CLICK -u WINEHOST_EXPECT_LOG -u WINEHOST_EXPECT_OUTPUT -u WINEHOST_FEX_CODEMAP \
         -u WINEHOST_FEX_ALL_CACHED -u WINEHOST_FEX_DUMP_DISPATCHER \
         WINEHOST_EXPECT_OUTPUT="Successfully populated cache" WINEHOST_EXPECT_FEX_CACHE=1 \

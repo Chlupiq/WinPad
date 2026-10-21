@@ -19,6 +19,8 @@ if [ ! -d "$madeira/.git" ]; then
     git -C "$madeira" fetch -q --depth 1 --filter=blob:none "$MADEIRA_REPO" "$MADEIRA_COMMIT"
 fi
 git -C "$madeira" checkout -q -f "$MADEIRA_COMMIT"
-git -C "$madeira" apply "$root"/patches/madeira/*.patch
+# Only Madeira's own sources are checked out, not its Wine tree
+# (patches/madeira/0005 changes wine/dlls/ntdll/unix/file.c).
+git -C "$madeira" apply --exclude='wine/*' "$root"/patches/madeira/*.patch
 python3 -I "$madeira/tests/host/check-lazy-windows.py"
 python3 -I "$here/check-wow-window.py" "$madeira"

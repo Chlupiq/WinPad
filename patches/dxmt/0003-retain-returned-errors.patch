@@ -1,0 +1,91 @@
+WinPad: the errors winemetal's unix side hands back are retained.
+
+The Metal calls take an NSError out-parameter (error:&err), and the error
+they give is autoreleased. winemetal's unix side passed it on as it was,
+but the PE side keeps it in a WMT::Reference<WMT::Error>, which releases
+it when it goes. Then the autorelease pool released it once more and
+objc_release read a freed object. The D3D9 cube hit this on the
+simulator every time a shader failed to compile (Presenter::
+buildRenderPipelineState): SEGVs in objc_autoreleasePoolPop at the end
+of the pool's unix call, sometimes followed by a dead SimMetalHost and
+exit 0x80000101. The unix side now retains the error, so the reference
+holds its own count.
+
+Applies to willfaust/dxmt at db546ee (Madeira's dxmt submodule).
+---
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index db46cda..eeca482 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1312,7 +1312,7 @@ _MTLDevice_newLibrary(void *obj) {
+   id<MTLDevice> device = (id<MTLDevice>)params->device;
+   NSError *err = NULL;
+   params->ret_library = (obj_handle_t)[device newLibraryWithData:(dispatch_data_t)params->data error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+   return STATUS_SUCCESS;
+ }
+ 
+@@ -1388,7 +1388,7 @@ _MTLDevice_newComputePipelineState(void *obj) {
+       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
+   params->ret_pso =
+       (obj_handle_t)[device newComputePipelineStateWithDescriptor:descriptor options:options reflection:nil error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+   if (!err && info->binary_archive_for_serialization) {
+     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addComputePipelineFunctionsWithDescriptor:descriptor
+                                                                                                       error:&err];
+@@ -1643,7 +1643,7 @@ _MTLDevice_newRenderPipelineState(void *obj) {
+                                                                                               options:options
+                                                                                            reflection:nil
+                                                                                                 error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+   if (!err && info->binary_archive_for_serialization) {
+     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addRenderPipelineFunctionsWithDescriptor:descriptor
+                                                                                                      error:&err];
+@@ -1742,7 +1742,7 @@ _MTLDevice_newRenderPipelineStateVD(void *obj) {
+                                                                                               options:options
+                                                                                            reflection:nil
+                                                                                                 error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+   if (!err && info->binary_archive_for_serialization) {
+     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addRenderPipelineFunctionsWithDescriptor:descriptor
+                                                                                                      error:&err];
+@@ -1828,7 +1828,7 @@ _MTLDevice_newMeshRenderPipelineState(void *obj) {
+                                                                                                   options:options
+                                                                                                reflection:nil
+                                                                                                     error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+ #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+   if (@available(macOS 15, *)) {
+     if (!err && info->binary_archive_for_serialization) {
+@@ -5108,7 +5108,7 @@ _MTLLibrary_newFunctionWithConstants(void *obj) {
+     [values setConstantValue:constants[i].data.ptr type:(MTLDataType)constants[i].type atIndex:constants[i].index];
+ 
+   params->ret = (obj_handle_t)[library newFunctionWithName:name constantValues:values error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+   [name release];
+   [values release];
+   return STATUS_SUCCESS;
+@@ -5425,7 +5425,7 @@ _MTLDevice_newBinaryArchive(void *obj) {
+   }
+   NSError *err = NULL;
+   params->ret_archive = (obj_handle_t)[(id<MTLDevice>)params->device newBinaryArchiveWithDescriptor:desc error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+   [desc release];
+   if (url)
+     [url release];
+@@ -5441,7 +5441,7 @@ _MTLBinaryArchive_serialize(void *obj) {
+   NSURL *url = [[NSURL alloc] initFileURLWithPath:path_str];
+   NSError *err = NULL;
+   [(id<MTLBinaryArchive>)params->archive serializeToURL:url error:&err];
+-  params->ret_error = (obj_handle_t)err;
++  params->ret_error = (obj_handle_t)[err retain];   /* WinPad: the caller owns it */
+   [url release];
+   [path_str release];
+   return STATUS_SUCCESS;

@@ -17,6 +17,11 @@
 # With the AOT images of the x86 program with a window (window.exe) too, the
 # app can run that one instead (the "program" setting, main.m): the simulator
 # build then runs once with each, and the window has to show and take the tap.
+# When DXMT's unix side was built for both (WORK_DIR/dxmt-SDK) and the i386
+# set has the D3D9 cube (tests/wine-i386/build-d3d9.sh), the app links DXMT
+# and host/metal-display.m too, with a scheme "WinPadWine D3D9" for the cube
+# and one, "WinPadWine Game", for a game copied into the app's Documents
+# (main.m). Neither runs here.
 #
 # Usage: build-xcode.sh WORK_DIR SIM_AOT_DYLIB DEVICE_AOT_DYLIB OUT_DIR [SIM_WINDOW_AOT DEVICE_WINDOW_AOT]
 # WORK_DIR: tests/wine-loader's work directory, with Wine's unix side and
@@ -37,6 +42,9 @@ bundle=com.chlupiq.winpad.wine
 proj="$out/WinPadWine-xcode"
 rm -rf "${proj:?}"
 mkdir -p "$proj"
+d3d9=
+[ -f "$work/dxmt-iphoneos/libdxmt_combined.a" ] && [ -f "$work/dxmt-iphonesimulator/libdxmt_combined.a" ] &&
+    [ -f "$work/i386-windows/d3d9-cube.exe" ] && d3d9=1
 
 for sdk in iphoneos iphonesimulator; do
     test -f "$work/modules-$sdk/aarch64-windows/xtajit.dll.dylib" ||
@@ -46,6 +54,7 @@ for sdk in iphoneos iphonesimulator; do
     cp "$out/host-$sdk/winehost-lib.o" "$proj/lib/$sdk/winehost.o"
     cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$sdk/"
+    [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$sdk/"
     cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$sdk/"
 done
 # One list of flags serves both platforms through $(PLATFORM_NAME).
@@ -70,31 +79,48 @@ cp "$here/main.m" "$here/Info.plist" "$here/README.md" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
-    for f in winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a; do
+    libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
+    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox GameController"
+    if [ -n "$d3d9" ]; then
+        libs="$libs metal-display.o libdxmt_combined.a"
+        frameworks="$frameworks Metal QuartzCore IOSurface"
+    fi
+    for f in $libs; do
         echo "          - \"\$(PROJECT_DIR)/lib/\$(PLATFORM_NAME)/$f\""
     done
     for f in $(cat "$out/host-iphoneos/weak-flags"); do echo "          - \"$f\""; done
-    for f in Foundation CoreFoundation CoreText CoreGraphics AudioToolbox; do
+    for f in $frameworks; do
         echo "          - \"-framework\""
         echo "          - \"$f\""
     done
     echo '          - "-lc++"'
     echo '          - "-lz"'
-    # Both schemes run the same app; the second one picks the program with a window.
-    if [ -n "$sim_window_aot" ]; then
+    # Every scheme runs the same app; all but the first pick a program.
+    schemes="WinPadWine:"
+    [ -z "$sim_window_aot" ] || schemes="$schemes WinPadWine_Window:window"
+    [ -z "$d3d9" ] || schemes="$schemes WinPadWine_D3D9:d3d9-cube WinPadWine_Game:game"
+    if [ "$schemes" != "WinPadWine:" ]; then
         echo 'schemes:'
-        for scheme in WinPadWine 'WinPadWine Window'; do
-            echo "  $scheme:"
+        for s in $schemes; do
+            echo "  $(echo "${s%%:*}" | tr _ ' '):"
             echo '    build:'
             echo '      targets:'
             echo '        WinPadWine: all'
             echo '    run:'
             echo '      config: Debug'
+            # The JIT programs run under Xcode's debugger, which would stop on
+            # every signal Wine uses (thread suspend, faults it handles).
+            case ${s#*:} in d3d9-cube|game)
+                echo '      customLLDBInit: $(SRCROOT)/lldbinit' ;;
+            esac
+            [ -z "${s#*:}" ] || {
+                echo '      environmentVariables:'
+                echo "        WINPAD_PROGRAM: ${s#*:}"
+            }
         done
-        echo '      environmentVariables:'
-        echo '        WINPAD_PROGRAM: window'
     fi
 } >"$proj/project.yml"
+echo 'process handle SIGUSR1 SIGUSR2 SIGSEGV SIGBUS SIGILL -n false -p true -s false' >"$proj/lldbinit"
 (cd "$proj" && xcodegen generate --spec project.yml)
 
 # build SDK: builds the project with xcodebuild and checks the product;
@@ -119,6 +145,13 @@ build() {
     fi
     nm "$product/WinPadWine" | grep -q ' T _winehost_main$' ||
         { echo "the $1 build did not link the Wine host" >&2; exit 1; }
+    if [ -n "$d3d9" ]; then
+        test -f "$product/i386-windows/d3d9-cube.exe" || { echo "the $1 build lacks the D3D9 cube" >&2; exit 1; }
+        for sym in _macdrv_functions _winehost_show_metal_layer _dxmt_winemetal_unix_call_wow64_funcs; do
+            nm "$product/WinPadWine" | grep -q " [TDS] $sym\$" ||
+                { echo "the $1 build lacks $sym" >&2; exit 1; }
+        done
+    fi
     echo "$product"
 }
 build iphoneos >/dev/null
@@ -144,7 +177,7 @@ run_app() {
     # address 0, so ntdll maps no copy of the TEB there either (patches/madeira/0004).
     # Its kernel refuses mappings at 32-63 GB and past the end of the map, so the
     # host holds those ranges (WINEHOST_VA_HOLES), and FEX's host band is the rest
-    # of the map above the guest window (patches/fex-wow64/0021).
+    # of the map above the guest window (patches/fex-wow64/0024).
     SIMCTL_CHILD_MADEIRA_WOW_MAP_END=0x7180000000 SIMCTL_CHILD_MADEIRA_PAGE0=0 \
         SIMCTL_CHILD_WINEHOST_VA_HOLES=0x800000000-0x1000000000,0x7180000000-0x8000000000 \
         xcrun simctl launch "$udid" "$bundle" "$@"

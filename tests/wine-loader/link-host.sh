@@ -9,6 +9,9 @@
 # where a stub returning 0 would fail the call (pCreateWindow kills every
 # window).
 # The stub list says what a Wine host has to bring along.
+# When WORK_DIR/dxmt-SDK/libdxmt_combined.a is there (DXMT's unix side,
+# tests/wine-i386/build-dxmt-unix.sh), it is linked too, with
+# host/metal-display.m, which gives DXMT a CAMetalLayer for each window.
 #
 # Usage: link-host.sh SDK WORK_DIR OUT_DIR   (SDK: iphoneos or iphonesimulator)
 # Writes OUT_DIR/winehost (the command-line host), OUT_DIR/stubs.o, the
@@ -30,6 +33,15 @@ sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
 cc="xcrun -sdk $sdk_name clang -target $target -isysroot $sdk"
 libs="$work/ntdll-$sdk_name/libntdll_unix.a $work/win32u-$sdk_name/libwin32u_unix.a
     $work/wineserver-$sdk_name/libwineserver.a"
+objs="$out/winehost.o"
+frameworks=
+if [ -f "$work/dxmt-$sdk_name/libdxmt_combined.a" ]; then
+    libs="$libs $work/dxmt-$sdk_name/libdxmt_combined.a"
+    frameworks="-framework Metal -framework QuartzCore -framework IOSurface"
+    # shellcheck disable=SC2086
+    $cc -O1 -g -Wall -fobjc-arc -c "$here/host/metal-display.m" -o "$out/metal-display.o"
+    objs="$objs $out/metal-display.o"
+fi
 
 # shellcheck disable=SC2086 # $cc and $libs are lists
 $cc -O1 -g -Wall -c "$here/host/winehost.c" -o "$out/winehost.o"
@@ -37,7 +49,7 @@ $cc -O1 -g -Wall -c "$here/host/winehost.c" -o "$out/winehost.o"
 $cc -O1 -g -Wall -DWINEHOST_LIBRARY -c "$here/host/winehost.c" -o "$out/winehost-lib.o"
 link() {
     # shellcheck disable=SC2086
-    $cc -o "$out/winehost" "$out/winehost.o" "$@" $libs \
+    $cc -o "$out/winehost" $objs "$@" $libs $frameworks \
         -framework Foundation -framework CoreFoundation -framework CoreText -framework CoreGraphics -framework AudioToolbox -lc++ -lz
 }
 
