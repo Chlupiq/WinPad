@@ -25,6 +25,10 @@
 // The game starts in its own folder (winehost.c) and runs until it ends or
 // the app is stopped. Their frames show on screen through a Metal layer,
 // and a hardware keyboard's keys go to the game (HardwareKeyboard).
+// An iPad with TXM runs no JIT code even under the debugger, so the game
+// runs with NoJIT from Frameworks/fexaot-game.dylib when the project has one
+// (game-aot.sh builds it on the Mac with the game), FEX's interpreter running
+// the blocks it lacks.
 //
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
@@ -293,7 +297,10 @@ static NSString* MakePrefix(NSString* bundle) {
     // The Ultimate ASI Loader many games carry is a dinput8.dll of their own.
     setenv("WINEDLLOVERRIDES", "dinput8=n,b", 1);
   }
-  if (!cube && !game) {
+  // The game has an AOT image only where game-aot.sh put one into the
+  // project on the Mac it was built on; without it the game runs with the JIT.
+  NSString* game_image = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"fexaot-game.dylib"];
+  if (!cube && (!game || [NSFileManager.defaultManager fileExistsAtPath:game_image])) {
     // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
     image = [name isEqualToString:@"hello"] ? @"fexaot.dylib" : [NSString stringWithFormat:@"fexaot-%@.dylib", name];
     setenv("WINEHOST_AOT_IMAGE",
