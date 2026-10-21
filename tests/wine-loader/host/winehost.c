@@ -11,10 +11,14 @@
 // types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
 // first window, 2 s after that window first showed (see winios_pProcessEvents);
 // WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead.
+// WINEHOST_VA_HOLES holds address ranges an iPad cannot map (hold_va_holes).
 // WINEHOST_AOT_IMAGE names a dylib with FEX AOT code caches linked in
 // (tools/cache2macho); its index goes to FEX as WINE_IOS_AOT_INDEX.
 // Prints what it starts, then waits SECONDS and exits with 0 if the server
 // came up. Whatever Wine does in the meantime goes to stderr.
+// Built with -DWINEHOST_LIBRARY it has no main: an app calls winehost_main
+// (tests/wine-app), and with WINEHOST_RETURN=1 that returns at the end
+// instead of ending the process.
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
@@ -330,6 +334,10 @@ static void publish_host_probe(void) {
 // executable view from a debugger). The simulator lets a process map it
 // itself. WINE_IOS_JIT_RX/RW/SIZE hand it to Wine, as ContentView.swift does.
 static int publish_jit_pool(size_t size) {
+  // WINEHOST_JIT_POOL_MB overrides the size: FEX's offline compiler compiling
+  // many modules in one process needs more than a program does.
+  const char* mb = getenv("WINEHOST_JIT_POOL_MB");
+  if (mb && atoi(mb) > 0) size = (size_t)atoi(mb) << 20;
   mach_port_t task = mach_task_self(), entry = MACH_PORT_NULL;
   memory_object_size_t entry_size = size;
   kern_return_t kr = mach_make_memory_entry_64(
@@ -358,6 +366,58 @@ static int publish_jit_pool(size_t size) {
   setenv("WINE_IOS_JIT_SIZE", buf, 1);
   printf("winehost: JIT pool RX %#lx RW %#lx, %zu MB\n", (unsigned long)rx, (unsigned long)rw, size >> 20);
   return 0;
+}
+
+// An iPad without the extended virtual addressing entitlement cannot map
+// everything a simulator (a Mac process) can: its map ends at 0x7180000000 and
+// the kernel refuses mappings at 32-63 GB. WINEHOST_VA_HOLES=LO-HI[,LO-HI...]
+// holds those ranges ([LO, HI), hex) as inaccessible memory before Wine
+// starts, so nothing in the process (Wine, FEX's host band) can map there,
+// as on that iPad. Parts already mapped stay as they are.
+static void hold_va_holes(void) {
+  const char* spec = getenv("WINEHOST_VA_HOLES");
+  if (!spec || !*spec) return;
+  const char* p = spec;
+  while (*p) {
+    char* end;
+    unsigned long long lo = strtoull(p, &end, 16), hi = 0;
+    if (*end == '-') hi = strtoull(end + 1, &end, 16);
+    if (hi <= lo) {
+      printf("winehost: WINEHOST_VA_HOLES: cannot read %s\n", p);
+      return;
+    }
+    unsigned long long held = 0;
+    for (unsigned long long a = lo; a < hi;) {
+      // 64 MB at a time; where that fails (something is mapped there), 16 KB.
+      unsigned long long step = (a % (64 << 20) == 0 && hi - a >= (64 << 20)) ? (64 << 20) : 0x4000;
+      vm_address_t at = (vm_address_t)a;
+      kern_return_t kr = vm_map(mach_task_self(), &at, (vm_size_t)step, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0,
+                                FALSE, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_NONE);
+      if (kr == KERN_SUCCESS) {
+        held += step;
+        a += step;
+      } else if (step > 0x4000) {
+        // Retry this 64 MB page by page.
+        unsigned long long stop = a + step;
+        for (; a < stop; a += 0x4000) {
+          at = (vm_address_t)a;
+          if (vm_map(mach_task_self(), &at, 0x4000, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_NONE,
+                     VM_PROT_NONE, VM_INHERIT_NONE) == KERN_SUCCESS)
+            held += 0x4000;
+        }
+      } else {
+        a += step;
+      }
+    }
+    printf("winehost: address range [%#llx, %#llx) held, %llu of %llu MB, as an iPad's map refuses it\n", lo, hi,
+           held >> 20, (hi - lo) >> 20);
+    p = end;
+    if (*p == ',') p++;
+    else if (*p) {
+      printf("winehost: WINEHOST_VA_HOLES: cannot read %s\n", p);
+      return;
+    }
+  }
 }
 
 static void* server_thread(void* arg) {
@@ -417,7 +477,16 @@ static int start(void* (*fn)(void*), size_t stack) {
   return ret;
 }
 
-int main(int argc, char* argv[]) {
+// The end of a run: the command-line host ends the process (Wine's threads
+// would keep it alive), an app keeps running.
+static int finish(void) {
+  fflush(stderr);
+  const char* ret = getenv("WINEHOST_RETURN");
+  if (ret && !strcmp(ret, "1")) return 0;
+  _exit(0);
+}
+
+int winehost_main(int argc, char* argv[]) {
   setvbuf(stdout, NULL, _IONBF, 0);
   if (argc < 3) {
     fprintf(stderr, "usage: winehost SECONDS PROGRAM [ARGS...]\n");
@@ -438,6 +507,7 @@ int main(int argc, char* argv[]) {
   if (frames_dir) mkdir(frames_dir, 0700);
 
   printf("winehost: pid %d\n", (int)getpid());
+  hold_va_holes();
   printf("winehost: starting wineserver, prefix %s\n", prefix);
   if (start(server_thread, 0)) return 1;
   for (int i = 0; i < 200 && !__atomic_load_n(&wineserver_ready, __ATOMIC_ACQUIRE); i++)
@@ -503,12 +573,14 @@ int main(int argc, char* argv[]) {
       if (!done_at) done_at = now();
       if (now() - done_at >= 2) {
         printf("winehost: done after %.0f s, exiting\n", now() - begin);
-        fflush(stderr);
-        _exit(0);
+        return finish();
       }
     }
   }
   printf("winehost: %d s passed, exiting\n", seconds);
-  fflush(stderr);
-  _exit(0);
+  return finish();
 }
+
+#ifndef WINEHOST_LIBRARY
+int main(int argc, char* argv[]) { return winehost_main(argc, argv); }
+#endif

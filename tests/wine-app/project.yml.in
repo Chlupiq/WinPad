@@ -1,0 +1,52 @@
+name: WinPadWine
+options:
+  deploymentTarget:
+    iOS: "@MIN_IOS@"
+targets:
+  WinPadWine:
+    type: application
+    platform: iOS
+    sources:
+      - main.m
+    postBuildScripts:
+      # Wine's files for the platform being built, laid out next to the
+      # executable as in Madeira's app, and the AOT image in Frameworks/.
+      # Every dylib gets signed; none is linked, Wine and the host load them
+      # with dlopen.
+      - name: Embed Wine and the AOT image
+        inputFiles:
+          - $(PROJECT_DIR)/wine/$(PLATFORM_NAME)/aarch64-windows
+          - $(PROJECT_DIR)/wine/i386-windows
+          - $(PROJECT_DIR)/Frameworks/$(PLATFORM_NAME)/fexaot.dylib
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/aarch64-windows/ntdll.dll
+          - $(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/fexaot.dylib
+        script: |
+          set -e
+          app="$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          rm -rf "$app/aarch64-windows" "$app/i386-windows" "$app/nls" "$app/fonts"
+          cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/"
+          cp -R "$PROJECT_DIR/wine/i386-windows" "$PROJECT_DIR/wine/nls" "$PROJECT_DIR/wine/fonts" "$app/"
+          mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME/fexaot.dylib" "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+            for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/fexaot.dylib"; do
+              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
+            done
+          fi
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        ARCHS: arm64
+        CLANG_ENABLE_OBJC_ARC: YES
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        # The host defines symbols Wine's libraries refer to (thread-locals,
+        # the winios hooks); keep them in the executable itself.
+        ENABLE_DEBUG_DYLIB: NO
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
+        # Wine for the platform being built: lib/iphoneos or lib/iphonesimulator.
+        OTHER_LDFLAGS:

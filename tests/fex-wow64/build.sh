@@ -36,6 +36,10 @@ git -C "$src" clean -q -fd
 for m in $(git -C "$src" config -f .gitmodules --get-regexp 'submodule\..*\.path' | awk '{print $2}'); do
     case "$m" in External/fex-*-bins) continue ;; esac
     git -C "$src" submodule update -q --init --depth 1 "$m"
+    # A patch may change a submodule (patches/fex-wow64/0019: rpmalloc), and
+    # submodule update leaves the changes in a restored tree in place.
+    git -C "$src/$m" checkout -q -f HEAD -- .
+    git -C "$src/$m" clean -q -fd
 done
 # WinPad changes to the WoW64 module, see the header of each patch.
 for p in "$(cd "$(dirname "$0")" && pwd)"/../../patches/fex-wow64/*.patch; do
