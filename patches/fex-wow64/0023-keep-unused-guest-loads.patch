@@ -1,0 +1,35 @@
+Keep guest loads whose value is not used (FEX 3bec2ac, on top of 0021)
+
+An x86 load can fault, and programs load only for that: MSVC's _chkstk
+touches each 4 KB page of a large frame with `test [ecx], eax`, flags
+dead before the next instruction, so that the stack's guard page is hit
+in order. In FEX's IR, LoadMem and LoadMemTSO had no side effects, and
+dead flag elimination removed the flag computation and then the load
+feeding it. The probes were gone: the stack pointer moved past the guard
+page without a fault, and the first real store hit the uncommitted page
+below it, an access violation on the lowest page of the stack instead of
+STATUS_STACK_OVERFLOW. Both loads now count as having side effects, so
+the pass keeps them.
+
+diff --git a/FEXCore/Source/Interface/IR/IR.json b/FEXCore/Source/Interface/IR/IR.json
+index f978166..0eca9ec 100644
+--- a/FEXCore/Source/Interface/IR/IR.json
++++ b/FEXCore/Source/Interface/IR/IR.json
+@@ -537,6 +537,7 @@
+                 ],
+         "Inline": ["", "Mem"],
+         "DestSize": "Size",
++        "HasSideEffects": true,
+         "Features": {
+           "GuestWindow": {
+             "Args": ", i1:$HostAddr{false}",
+@@ -596,7 +597,8 @@
+         "Desc": ["Does a x86 TSO compatible load from memory. Offset must be Invalid()."
+                 ],
+         "Inline": ["", "Memtso"],
+-        "DestSize": "Size"
++        "DestSize": "Size",
++        "HasSideEffects": true
+       },
+ 
+       "StoreMemTSO RegisterClass:$Class, OpSize:#Size, SSA:$Value, GPR:$Addr, GPR:$Offset, OpSize:$Align, MemOffsetType:$OffsetType, u8:$OffsetScale": {
