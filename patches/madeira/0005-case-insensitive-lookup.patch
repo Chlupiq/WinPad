@@ -1,0 +1,68 @@
+From: WinPad
+Subject: [PATCH] ntdll: Look through the directory for a name in another case on iOS.
+
+A game imports USER32.dll, ADVAPI32.dll and GDI32.dll; the prefix has
+user32.dll, advapi32.dll and gdi32.dll. When the stat() of the name as
+given fails, find_file_in_dir reads the directory and compares without
+case, but skips that when get_dir_case_sensitivity() says the volume is
+case-insensitive. On iOS the game then failed every import (c0000135)
+and its own DINPUT8.dll (c0000034) with the files there. Under WINE_IOS
+the directory is now always read; a volume that really compares names
+without case has found the name with the stat() already. The first 16
+names found that way are logged as "[case-lookup] <path> found by
+reading its directory; the volume reports ...".
+
+Applies to willfaust/Madeira at 48f9764 (its wine submodule, 257f271).
+---
+diff --git a/wine/dlls/ntdll/unix/file.c b/wine/dlls/ntdll/unix/file.c
+index b2f445e..bfc7ce0 100644
+--- a/wine/dlls/ntdll/unix/file.c
++++ b/wine/dlls/ntdll/unix/file.c
+@@ -2998,6 +2998,9 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
+     struct dirent *de;
+     struct stat st;
+     int fd, ret;
++#ifdef WINE_IOS
++    int ios_case_scan_reason = 0;
++#endif
+ 
+     /* try a shortcut for this directory */
+ 
+@@ -3020,7 +3023,18 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
+     is_name_8_dot_3 = is_name_8_dot_3 && length >= 8 && name[4] == '~';
+ #endif
+ 
++#ifdef WINE_IOS
++    /* WinPad: a name in another case than the file's (a game imports USER32.dll,
++     * the prefix has user32.dll) is found only by reading the directory. Wine
++     * skips that when the volume reports itself case-insensitive; on iOS a game
++     * then misses every import it names in another case (c0000135, c0000034 for
++     * a DLL next to it) with the files there. A volume that really compares names
++     * without case has found the name with the stat() above already, so reading
++     * the directory costs time only for names that do not exist. */
++    if (!is_name_8_dot_3 && !get_dir_case_sensitivity( root_fd, unix_name )) ios_case_scan_reason = 1;
++#else
+     if (!is_name_8_dot_3 && !get_dir_case_sensitivity( root_fd, unix_name )) goto not_found;
++#endif
+ 
+     /* now look for it through the directory */
+ 
+@@ -3087,6 +3101,18 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
+         {
+             strcpy( unix_name + pos, de->d_name );
+             closedir( dir );
++#ifdef WINE_IOS
++            {
++                static int logged;
++                if (logged < 16)
++                {
++                    logged++;
++                    dprintf( 2, "[case-lookup] %s found by reading its directory; the volume reports %s\n",
++                             unix_name, ios_case_scan_reason ? "case-insensitive (Wine would have stopped)"
++                                                             : "case-sensitive" );
++                }
++            }
++#endif
+             return STATUS_SUCCESS;
+         }
+ 

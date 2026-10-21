@@ -405,6 +405,27 @@ jobs:
           # FEX runs the program and those 32-bit DLLs with its JIT. Its last line:
           WINEHOST_EXPECT_OUTPUT: "imports: done"
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe"
+      - name: The same program in a game's folder of its own on a case-sensitive volume, as on an iPad, finds the DLLs it names in capitals (USER32.dll in syswow64, its CASETEST.dll next to it)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "imports: done"
+          # Both found by reading their directory (patches/madeira/0005), its own DLL in its folder.
+          WINEHOST_EXPECT_LOG: |
+            /syswow64/user32.dll found by reading its directory
+            /cs/game/casetest.dll found by reading its directory
+        run: |
+          # The runner's volume compares names without case, the iPad's does not.
+          cs="$RUNNER_TEMP/cs"
+          hdiutil create -quiet -size 256m -fs "Case-sensitive APFS" -volname winpad-cs -type SPARSE "$RUNNER_TEMP/cs.sparseimage"
+          hdiutil attach -quiet -nobrowse -mountpoint "$cs" "$RUNNER_TEMP/cs.sparseimage"
+          # The Wine prefix (with its syswow64) is made under the work directory, so that goes there too.
+          mkdir -p "$cs/work" "$cs/game"
+          for e in "$RUNNER_TEMP/wine-loader"/*; do
+            case "${e##*/}" in host-*) continue ;; esac
+            ln -s "$e" "$cs/work/"
+          done
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe" "$RUNNER_TEMP/wine-loader/i386-windows/casetest.dll" "$cs/game/"
+          # The program is not under i386-windows: run-host.sh knows it is 32-bit from its PE header.
+          sh tests/wine-loader/run-host.sh "$cs/work" "$cs/game/imports.exe"
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         run: |
           sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos

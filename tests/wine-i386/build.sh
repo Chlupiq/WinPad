@@ -13,7 +13,8 @@
 # the import closure of tests/wine-i386/imports.c)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
-# Output: WORK_DIR/i386-windows/*.dll, hello.exe, window.exe and imports.exe.
+# Output: WORK_DIR/i386-windows/*.dll, hello.exe, window.exe, imports.exe and
+# casetest.dll (imports.exe's own DLL).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -103,15 +104,34 @@ if [ -n "$have" ]; then
     for m in $game_dlls; do libs="$libs $(implib "$m")"; done
     # Games import DirectSoundCreate by its ordinal, 1, not by name; Wine's
     # import library has it by name, so this one is made here.
-    printf 'LIBRARY dsound.dll\nEXPORTS\nDirectSoundCreate@12 @1 NONAME\n' >"$work/dsound-ordinal.def"
+    printf 'LIBRARY DSOUND.dll\nEXPORTS\nDirectSoundCreate@12 @1 NONAME\n' >"$work/dsound-ordinal.def"
     llvm-dlltool -m i386 -d "$work/dsound-ordinal.def" -l "$work/libdsound-ordinal.a"
     libs="$libs $work/libdsound-ordinal.a"
+    # The program's own DLL, next to it (no entry point, no imports).
+    clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding -shared \
+        -Wl,-noentry -Wl,-implib:"$work/libcasetest.a" \
+        "$here/casetest.c" -o "$out/casetest.dll" -fuse-ld=lld
+    libs="$libs $work/libcasetest.a"
     # kernel32 last: its import library has winmm's time* functions too,
     # and they have to come from winmm, as in the game.
     # shellcheck disable=SC2086 # a list of import libraries
     clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
         -Wl,-entry:start -Wl,-subsystem:console \
         "$here/imports.c" $libs "$kernel32" -o "$out/imports.exe" -fuse-ld=lld
+    # A game names some DLLs in capitals (USER32.dll, DINPUT8.dll) and the files
+    # are lowercase, so the loader has to find them without regard to case. The
+    # import table names are rewritten in place, same length.
+    python3 -I - "$out/imports.exe" <<'PY'
+import sys
+path = sys.argv[1]
+data = open(path, "rb").read()
+for name in (b"user32.dll", b"advapi32.dll", b"gdi32.dll", b"dinput8.dll", b"casetest.dll"):
+    old, new = b"\0" + name + b"\0", b"\0" + name[:-4].upper() + b".dll\0"
+    if data.count(old) != 1:
+        sys.exit(f"imports.exe: {name.decode()} is in it {data.count(old)} times, not once")
+    data = data.replace(old, new)
+open(path, "wb").write(data)
+PY
 fi
 ls -l "$out"
 for exe in "$out"/*.exe; do

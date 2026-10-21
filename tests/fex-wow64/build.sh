@@ -14,7 +14,7 @@ set -eu
 work=$1
 FEX_REPO=https://github.com/willfaust/FEX.git
 FEX_COMMIT=3bec2ac498bf78156ab47c0c194b0e8cb2849756  # Madeira's FEX submodule
-TOOLCHAIN=llvm-mingw-20260421-ucrt-ubuntu-22.04-aarch64
+TOOLCHAIN=${TOOLCHAIN:-llvm-mingw-20260421-ucrt-ubuntu-22.04-aarch64}  # macOS: llvm-mingw-20260421-ucrt-macos-universal
 mkdir -p "$work"
 
 if [ ! -x "$work/$TOOLCHAIN/bin/clang" ]; then
