@@ -1,0 +1,367 @@
+Say why a block is compiled at run time while code caches are loaded (FEX 3bec2ac, on top of 0017)
+
+A run with every code cache loaded still compiled 20 blocks of the
+32-bit ntdll that were in its ready code map. Nothing in the log said
+whether the cache lacked them or had them and lost them:
+
+- The offline compiler prints "[aot-gen] <image>+<offset> left out: not
+  cacheable" for each code map block CheckIfBlockIsCacheable refuses
+  (a guest relocation inside it that is not a whole 32/64-bit field),
+  and how many of the map's blocks it left out.
+- EnableLoadedSection remembers the guest address of every block it
+  registers. A block of an image compiled at run time while caches are
+  loaded gets "[aot-miss] <image>+<offset> (guest ...) compiled at run
+  time: no loaded code cache has it", or "...: a code cache had it,
+  and it was dropped since".
+- InvalidateCodeBuffersCodeRange returns how many blocks it dropped,
+  and the WoW64 invalidation tracker logs every invalidation that drops
+  any: "[code-inval] <why>: <guest range> dropped N blocks". Why names
+  the source: executable protection set or removed (alloc/protect),
+  memory freed, view unmapped, write to a code page,
+  NtFlushInstructionCache, cross-process flush or write, DEP setting
+  changed, untracked write (ReadFile), FEX dropped a guest code range.
+
+The first 64 of each kind are logged.
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index cc52fb7..d8a191b 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -79,6 +79,17 @@ public:
+   ~CodeCache();
+ 
+   ContextImpl& CTX;
++
++  // WinPad: guest addresses of the blocks EnableLoadedSection registered. A block compiled at run
++  // time while caches are loaded is then either missing from them or was dropped since.
++  std::mutex LoadedGuestBlocksLock;
++  fextl::set<uint64_t> LoadedGuestBlocks;
++  std::atomic<bool> HasLoadedGuestBlocks {false};
++  bool WasLoadedFromCache(uint64_t GuestRIP) {
++    std::scoped_lock lk(LoadedGuestBlocksLock);
++    return LoadedGuestBlocks.contains(GuestRIP);
++  }
++
+   fextl::unique_ptr<ContextImpl> ValidationCTX;
+   fextl::unique_ptr<Core::InternalThreadState> ValidationThread;
+   FEXCore::Core::CPUState::gdt_segment ValidationGDT[32] {};
+@@ -226,7 +237,7 @@ public:
+ 
+   void OnCodeBufferAllocated(const std::shared_ptr<CPU::CodeBuffer>&) override;
+   void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) override;
+-  void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
++  size_t InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
+   void InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
+   FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() override {
+     return CodeInvalidationMutex;
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index c520005..c2a600d 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -932,6 +932,13 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+       auto HostCode = &Code.CodeBuffer[Block.HostCode];
+       LookupCache.AddBlockMapping(Guest + BinarySection.FileStartVA, std::move(Block.CodePages), HostCode, WriteLock);
+     }
++    {
++      std::scoped_lock lk(LoadedGuestBlocksLock);
++      for (auto& [Guest, Block] : BlockList) {
++        LoadedGuestBlocks.insert(Guest + BinarySection.FileStartVA);
++      }
++    }
++    HasLoadedGuestBlocks.store(true, std::memory_order_relaxed);
+ 
+     // Guest code pages
+     auto* Cursor = Code.CodeBufferInFile.data() + Code.CodeBufferInFile.size_bytes();
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index aa40f8f..cdafec3 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -2278,6 +2278,16 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+     auto Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
+     if (Region && Region->FileStartVA != 0) {
+       CodeMapWriter->AppendBlock(*Region, GuestRIP);
++      // WinPad: with code caches loaded, say why this block of an image had to be compiled.
++      if (CodeCache.HasLoadedGuestBlocks.load(std::memory_order_relaxed)) {
++        static std::atomic<uint32_t> AOTMisses {0};
++        if (AOTMisses.fetch_add(1, std::memory_order_relaxed) < 64) {
++          LogMan::Msg::EFmt("[aot-miss] {}+{:#x} (guest {:#x}) compiled at run time: {}", Region->FileInfo.Filename,
++                            GuestRIP - Region->FileStartVA, GuestRIP,
++                            CodeCache.WasLoadedFromCache(GuestRIP) ? "a code cache had it, and it was dropped since (see [code-inval])" :
++                                                                     "no loaded code cache has it");
++        }
++      }
+     }
+   }
+ 
+@@ -2318,20 +2328,22 @@ uintptr_t ContextImpl::CompileSingleStep(FEXCore::Core::CpuStateFrame* Frame, ui
+   return (uintptr_t)CodePtr;
+ }
+ 
+-void ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) {
++size_t ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) {
+   FEXCORE_PROFILE_SCOPED("InvalidateCodeBuffersCodeRange");
+ 
+   LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
+   std::scoped_lock lk {CodeBufferListLock};
++  size_t Erased = 0;
+   auto it = CodeBufferList.begin();
+   while (it != CodeBufferList.end()) {
+     if (auto Strong = it->lock()) {
+-      Strong->LookupCache->InvalidateRange(Start, Length);
++      Erased += Strong->LookupCache->InvalidateRange(Start, Length);
+       it++;
+     } else {
+       it = CodeBufferList.erase(it);
+     }
+   }
++  return Erased;
+ }
+ 
+ void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {
+diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
+index ffa2709..2d80144 100644
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -146,18 +146,21 @@ struct GuestToHostMap {
+     return BlockList.erase(Address) != 0;
+   }
+ 
+-  void InvalidateRange(uint64_t Start, uint64_t Length) {
++  // Returns how many blocks were dropped.
++  size_t InvalidateRange(uint64_t Start, uint64_t Length) {
+     auto lk = AcquireWriteLock();
+ 
+     auto lower = CodePages.lower_bound(Start >> 12);
+     auto upper = CodePages.upper_bound((Start + Length - 1) >> 12);
+ 
++    size_t Erased = 0;
+     for (auto it = lower; it != upper; it++) {
+       for (const auto& Entry : it->second) {
+-        Erase(Entry, lk);
++        Erased += Erase(Entry, lk);
+       }
+     }
+     CodePages.erase(lower, upper);
++    return Erased;
+   }
+ 
+   void AddBlockLink(uint64_t GuestDestination, FEXCore::Context::ExitFunctionLinkData* HostLink,
+diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
+index ec61b90..25476a4 100644
+--- a/FEXCore/include/FEXCore/Core/Context.h
++++ b/FEXCore/include/FEXCore/Core/Context.h
+@@ -141,7 +141,8 @@ public:
+   virtual void FlushAndCloseCodeMap() = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) = 0;
+-  FEX_DEFAULT_VISIBILITY virtual void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
++  // Returns how many compiled blocks were dropped.
++  FEX_DEFAULT_VISIBILITY virtual size_t InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void
+   InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) = 0;
+   FEX_DEFAULT_VISIBILITY virtual FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() = 0;
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index d3de310..67f7d69 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -655,13 +655,21 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+     fmt::print(stderr, "Compiling code...\n");
+ 
+     FEX_CONFIG_OPT(MaxInst, MAXINST);
++    // WinPad: a code map block left out here is compiled at run time again, so name each one.
++    size_t Skipped = 0;
+     for (auto Addr : BlockList) {
+       if (!CTX->CheckIfBlockIsCacheable(*Thread, Addr + SyscallHandler->VAFileStart, MaxInst)) {
++        fmt::print("  [aot-gen] {}+{:#x} left out: not cacheable (a relocation in it is not a whole 32/64-bit field)\n",
++                   Binary.Filename, Addr);
++        ++Skipped;
+         continue;
+       }
+ 
+       CTX->CompileRIP(Thread, Addr + SyscallHandler->VAFileStart);
+     }
++    if (Skipped) {
++      fmt::print("  [aot-gen] {} of {} code map blocks of {} left out of the cache\n", Skipped, BlockList.size(), Binary.Filename);
++    }
+ 
+     auto Filename = fmt::format("{}{}-{:016x}", OutDir, FEXCore::CodeMap::GetBaseFilename(Binary, false), CodeCacheConfigId);
+     auto FilenameNew = Filename + ".new";
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 7f0ed3d..7901850 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -173,7 +173,8 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
+ 
+   if (NeedsInvalidate) {
+     // IntervalsLock cannot be held during invalidation
+-    InvalidateIntervalInternal(AlignedBase, AlignedSize);
++    InvalidateIntervalInternal(AlignedBase, AlignedSize,
++                               ProtHasExec(Prot) ? "executable protection set (alloc/protect)" : "execute access removed (alloc/protect)");
+   }
+ }
+ 
+@@ -247,7 +248,7 @@ void InvalidationTracker::HandleProcessExecuteFlagsChange(ULONG Flags) {
+ 
+   // Invalidate all cached code: previously-compiled blocks may contain NoExec stubs for addresses
+   // that are now executable (or reference regions whose executability just changed).
+-  InvalidateIntervalInternalLocked(0, std::numeric_limits<uint64_t>::max());
++  InvalidateIntervalInternalLocked(0, std::numeric_limits<uint64_t>::max(), "DEP setting changed");
+ }
+ 
+ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address) {
+@@ -458,7 +459,7 @@ InvalidationTracker::InvalidateContainingSectionResult InvalidationTracker::Inva
+     SectionSize += Info.RegionSize;
+   }
+ 
+-  InvalidateIntervalInternal(SectionBase, SectionSize);
++  InvalidateIntervalInternal(SectionBase, SectionSize, Free ? "view unmapped" : "containing section");
+ 
+   if (Free) {
+     std::unique_lock Lock(IntervalsLock);
+@@ -471,7 +472,7 @@ InvalidationTracker::InvalidateContainingSectionResult InvalidationTracker::Inva
+   return {SectionBase, SectionSize};
+ }
+ 
+-void InvalidationTracker::InvalidateAlignedInterval(uint64_t Address, uint64_t Size, bool Free) {
++void InvalidationTracker::InvalidateAlignedInterval(uint64_t Address, uint64_t Size, bool Free, const char* Why) {
+   if (IntervalsLock.HeldByThisThread()) {
+     // FEX's own heap, changed while this thread holds IntervalsLock: see OwnedSharedMutex.
+     NestedNotificationSkips.fetch_add(1, std::memory_order_relaxed);
+@@ -485,7 +486,7 @@ void InvalidationTracker::InvalidateAlignedInterval(uint64_t Address, uint64_t S
+   const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto AlignedSize = std::max(Size, (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK);
+ 
+-  InvalidateIntervalInternal(AlignedBase, AlignedSize);
++  InvalidateIntervalInternal(AlignedBase, AlignedSize, Why ? Why : Free ? "memory freed" : "code range");
+ 
+   if (Free) {
+     std::unique_lock Lock(IntervalsLock);
+@@ -523,7 +524,7 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+     {
+       std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
+ 
+-      InvalidateIntervalInternalLocked(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FEXCore::Utils::FEX_PAGE_SIZE);
++      InvalidateIntervalInternalLocked(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FEXCore::Utils::FEX_PAGE_SIZE, "write to a code page");
+ 
+       // Invalidate, then unprotect the faulting page with the compilation lock held to ensure that any racing invalidations are not dropped.
+       ULONG TmpProt;
+@@ -729,7 +730,7 @@ void InvalidationTracker::DetectMonoBackpatcherBlock(FEXCore::Core::InternalThre
+   }
+ #if !defined(ARCHITECTURE_arm64ec)
+   // InvalidateAlignedInterval takes host addresses like the rest of this class.
+-  InvalidateAlignedInterval(BlockEntry + GuestBase, FEXCore::Utils::FEX_PAGE_SIZE, false);
++  InvalidateAlignedInterval(BlockEntry + GuestBase, FEXCore::Utils::FEX_PAGE_SIZE, false, "mono backpatcher");
+ #else
+   InvalidateAlignedInterval(BlockEntry, FEXCore::Utils::FEX_PAGE_SIZE, false);
+ #endif
+@@ -768,12 +769,12 @@ ULONG InvalidationTracker::GetUntrapProt(uint64_t Address) const {
+   return PAGE_EXECUTE_READWRITE;
+ }
+ 
+-void InvalidationTracker::InvalidateIntervalInternal(uint64_t Address, uint64_t Size) {
++void InvalidationTracker::InvalidateIntervalInternal(uint64_t Address, uint64_t Size, const char* Why) {
+   std::scoped_lock CodeLock(CTX.GetCodeInvalidationMutex());
+-  InvalidateIntervalInternalLocked(Address, Size);
++  InvalidateIntervalInternalLocked(Address, Size, Why);
+ }
+ 
+-void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size) {
++void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size, const char* Why) {
+   // NOTE: This assumes CodeInvalidationMutex is locked by the caller
+ #if !defined(ARCHITECTURE_arm64ec)
+   // The boundary into FEXCore: Address is a host address, FEXCore's code buffers and lookup caches
+@@ -792,10 +793,19 @@ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uin
+     Size = End - Begin;
+   }
+ #endif
+-  CTX.InvalidateCodeBuffersCodeRange(Address, Size);
++  const size_t Dropped = CTX.InvalidateCodeBuffersCodeRange(Address, Size);
+   for (auto Thread : Threads) {
+     CTX.InvalidateThreadCachedCodeRange(Thread.second, Address, Size);
+   }
++  // WinPad: name every invalidation that drops compiled (or code cache) blocks, and why. A block
++  // a code cache held and that is then compiled at run time ([aot-miss]) was dropped here.
++  if (Dropped) {
++    static std::atomic<uint32_t> Reports {0};
++    if (Reports.fetch_add(1, std::memory_order_relaxed) < 64) {
++      const uint64_t End = Size > std::numeric_limits<uint64_t>::max() - Address ? std::numeric_limits<uint64_t>::max() : Address + Size;
++      LogMan::Msg::EFmt("[code-inval] {}: {:#x}-{:#x} dropped {} blocks", Why ? Why : "?", Address, End, Dropped);
++    }
++  }
+ #if defined(FEX_IOS_HOST) && defined(ARCHITECTURE_arm64ec)
+   /* iOS-Madeira ml1207: a sub-floor image (fixed base below 4GB, mapped high) has
+    * two names for every byte, and its code can be compiled under either: at its
+@@ -849,7 +859,7 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
+           // applied and the invalidation mutex must be locked throughout.
+           // Do this lazily only when an RWX region is actually hit.
+           // NOTE: This assumes CodeInvalidationMutex is locked by the caller
+-          InvalidateIntervalInternalLocked(Address, Size);
++          InvalidateIntervalInternalLocked(Address, Size, "untracked write (ReadFile)");
+         }
+         HitRWXInterval = true;
+       }
+diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
+index 41ca38d..4624a1c 100644
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -50,7 +50,8 @@ public:
+     uint64_t SectionSize;
+   };
+   InvalidateContainingSectionResult InvalidateContainingSection(uint64_t Address, bool Free);
+-  void InvalidateAlignedInterval(uint64_t Address, uint64_t Size, bool Free);
++  // Why: what asked for it, for the [code-inval] log line.
++  void InvalidateAlignedInterval(uint64_t Address, uint64_t Size, bool Free, const char* Why = nullptr);
+   void ReprotectRWXIntervals(uint64_t Address, uint64_t Size);
+   bool HandleRWXAccessViolation(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t FaultAddress);
+ 
+@@ -74,9 +75,9 @@ private:
+ 
+   void DetectMonoBackpatcherBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC);
+   void DisableSMCDetection();
+-  void InvalidateIntervalInternal(uint64_t Address, uint64_t Size);
++  void InvalidateIntervalInternal(uint64_t Address, uint64_t Size, const char* Why);
+   // NOTE: This assumed CodeInvalidationMutex is locked by the caller
+-  void InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size);
++  void InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size, const char* Why);
+ 
+   // NOTE: If ForWriteLocked is true then this assumes CodeInvalidationMutex is locked by the caller,
+   // and any code in the range will be invalidated before protection as RWX, otherwise protects as RX if false.
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 243196b..3220fdb 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -991,7 +991,7 @@ public:
+   }
+ 
+   void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override {
+-    InvalidationTracker->InvalidateAlignedInterval(GuestWindow::ToHost(Start), Length, false);
++    InvalidationTracker->InvalidateAlignedInterval(GuestWindow::ToHost(Start), Length, false, "FEX dropped a guest code range");
+   }
+ 
+   // ml1277: NOT guest addresses. The only caller is FEXCore's LookupCache, which marks its own
+@@ -2035,19 +2035,22 @@ NTSTATUS BTCpuResetToConsistentState(EXCEPTION_POINTERS* Ptrs) {
+ // cross-process path syscall.c:1610 passes entry->addr, the sender's host address in OUR window.
+ void BTCpuFlushInstructionCache2(const void* Address, SIZE_T Size) {
+   std::scoped_lock Lock(ThreadCreationMutex);
+-  InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false);
++  InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false,
++                                                 Address ? "NtFlushInstructionCache" : "NtFlushInstructionCache of everything");
+ }
+ 
+ // HOST: same as above; also called with (NULL, 0) from syscall.c:1576 as a flush-everything request.
+ void BTCpuFlushInstructionCacheHeavy(const void* Address, SIZE_T Size) {
+   std::scoped_lock Lock(ThreadCreationMutex);
+-  InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false);
++  InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false,
++                                                 Address ? "cross-process cache flush" : "cross-process flush of everything");
+ }
+ 
+ // HOST: only caller is wine/dlls/wow64/syscall.c:1618 (CrossProcessMemoryWrite), entry->addr.
+ void BTCpuNotifyMemoryDirty(void* Address, SIZE_T Size) {
+   std::scoped_lock Lock(ThreadCreationMutex);
+-  InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false);
++  InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), false,
++                                                 "cross-process memory write");
+ }
+ 
+ // HOST: wine/dlls/wow64/virtual.c:158/198 `addr = guest_ptr32_in( base, *addr32 )` before the call
