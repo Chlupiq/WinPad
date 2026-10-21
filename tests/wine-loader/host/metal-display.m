@@ -105,8 +105,28 @@ static id counting_next_drawable(id self, SEL sel) {
     fprintf(stderr, "winehost: drawable %ld of Metal layer %p: %lux%lu, pixel format %lu, device %s\n",
             n, (__bridge void*)self, (unsigned long)t.width, (unsigned long)t.height,
             (unsigned long)t.pixelFormat, [[((CAMetalLayer*)self).device name] UTF8String]);
+    [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+      fprintf(stderr, "winehost: drawable %ld presented at %.3f\n", n, d.presentedTime);
+    }];
   }
   return drawable;
+}
+
+// The first command buffers committed and how each one ends, to tell GPU
+// work that never completes from presents that never come back.
+static void (*commit_buffer)(id, SEL);
+static long commits;
+
+static void logging_commit(id self, SEL sel) {
+  long n = __atomic_add_fetch(&commits, 1, __ATOMIC_RELAXED);
+  if (n <= 8) {
+    fprintf(stderr, "winehost: command buffer %ld committed\n", n);
+    [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+      fprintf(stderr, "winehost: command buffer %ld completed, status %ld%s%s\n", n, (long)cb.status,
+              cb.error ? ", " : "", cb.error ? [[cb.error description] UTF8String] : "");
+    }];
+  }
+  commit_buffer(self, sel);
 }
 
 void madeira_set_vsync_locked(int mode);  // DXMT's winemetal_unix.c
@@ -123,6 +143,11 @@ __attribute__((constructor)) static void wrap_next_drawable(void) {
 #endif
   id<MTLDevice> device = MTLCreateSystemDefaultDevice();
   fprintf(stderr, "winehost: Metal device %s\n", device ? [[device name] UTF8String] : "none");
+  id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
+  if (cb) {
+    Method c = class_getInstanceMethod([cb class], @selector(commit));
+    commit_buffer = (void (*)(id, SEL))method_setImplementation(c, (IMP)logging_commit);
+  }
 }
 
 #if TARGET_OS_SIMULATOR
