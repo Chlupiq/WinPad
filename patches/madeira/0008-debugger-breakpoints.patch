@@ -11,14 +11,16 @@ handle, and the game dies loading its first builtin dylib after ntdll
 The displaced port is now kept when the debugger asked for our message
 format (EXCEPTION_DEFAULT with 64-bit codes, as debugserver does), and a
 breakpoint that is neither brk #0xCAFE nor brk #0xf00d is sent to it and
-answered with the debugger's reply. A debugger that went away fails the
-send at once, after which breakpoints are declined as before.
+answered with the debugger's reply. That happens before the handler
+logs the breakpoint: the thread stopped at lldb's brk holds dyld's
+loader lock, and the logging's dladdr() would wait on it for ever.
+A debugger that went away fails the send at once, after which breakpoints are declined as before.
 MADEIRA_DEBUGGER_BRK=0 keeps the old behaviour.
 
 Applies to willfaust/Madeira at 48f9764, after 0001-0005 and 0007.
 ---
 diff --git a/build/ntdll-unix/signal_arm64_ios.c b/build/ntdll-unix/signal_arm64_ios.c
-index faef7b7..f14219a 100644
+index faef7b7..8dc4572 100644
 --- a/build/ntdll-unix/signal_arm64_ios.c
 +++ b/build/ntdll-unix/signal_arm64_ios.c
 @@ -1166,6 +1166,49 @@ typedef struct {
@@ -71,7 +73,7 @@ index faef7b7..f14219a 100644
  #pragma pack()
  
  /* iOS-Madeira ml329 (#53 discriminator): ring of pages the reclaim-recovery path
-@@ -1947,6 +1990,32 @@ static void *ios_mach_exception_thread( void *arg )
+@@ -1534,6 +1577,34 @@ static void *ios_mach_exception_thread( void *arg )
              }
          }
  
@@ -79,7 +81,9 @@ index faef7b7..f14219a 100644
 +         * StikDebug protocol belongs to the debugger we displaced, such as the
 +         * brk #0 lldb puts in dyld to hear about every dlopen. Declining it
 +         * would turn it into a SIGTRAP Wine cannot handle, so the debugger
-+         * gets it, as it would have without our task port. */
++         * gets it, as it would have without our task port. This comes before
++         * the logging below: the thread at lldb's brk holds dyld's loader lock,
++         * so dladdr() there would wait on it for ever. Only Mach calls here. */
 +        if (req->exception == EXC_BREAKPOINT && ios_debugger_brk_port != MACH_PORT_NULL)
 +        {
 +            arm_thread_state64_t fs;
@@ -101,10 +105,10 @@ index faef7b7..f14219a 100644
 +            }
 +        }
 +
-         /* Look up per-thread TEB and trampoline for the faulting thread */
-         uintptr_t thread_teb = 0;
-         void *thread_trampoline = NULL;
-@@ -6030,6 +6099,7 @@ skip_reclaim_band: ;
+         /* ml523 (#67): count EXC_BREAKPOINT arrivals and name the BRK immediate.
+          *
+          * These used to go to StikDebug's task port. FEX's JIT emits
+@@ -6030,6 +6101,7 @@ skip_reclaim_band: ;
              }
          }
  
@@ -112,7 +116,7 @@ index faef7b7..f14219a 100644
          /* Build reply */
          ios_exc_reply_t reply;
          reply.head.msgh_bits = MACH_MSGH_BITS( MACH_MSGH_BITS_REMOTE(req->head.msgh_bits), 0 );
-@@ -6139,8 +6209,20 @@ static void ios_install_task_exception_port(void)
+@@ -6139,8 +6211,20 @@ static void ios_install_task_exception_port(void)
              (unsigned)i, (unsigned)old_masks[i], (unsigned)old_ports[i],
              (unsigned)old_behav[i], (int)old_flav[i],
              old_ports[i] == MACH_PORT_NULL ? " (none — no debugger held it)" : " (debugger)");
