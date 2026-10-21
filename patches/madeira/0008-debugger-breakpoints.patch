@@ -1,0 +1,137 @@
+From: WinPad
+Subject: [PATCH] ntdll: Give the debugger back the breakpoints that are its own.
+
+ios_install_task_exception_port() takes EXC_MASK_BREAKPOINT from the
+debugger (ml523), so FEX's brk #0xCAFE no longer waits on StikDebug. Under
+Xcode's lldb that also takes the brk #0 lldb puts in dyld to hear about
+every dlopen: the handler declines it, Wine gets a SIGTRAP it cannot
+handle, and the game dies loading its first builtin dylib after ntdll
+("[task-exc] BREAKPOINT #1 ... insn=0xd4200000 ... other").
+
+The displaced port is now kept when the debugger asked for our message
+format (EXCEPTION_DEFAULT with 64-bit codes, as debugserver does), and a
+breakpoint that is neither brk #0xCAFE nor brk #0xf00d is sent to it and
+answered with the debugger's reply. A debugger that went away fails the
+send at once, after which breakpoints are declined as before.
+MADEIRA_DEBUGGER_BRK=0 keeps the old behaviour.
+
+Applies to willfaust/Madeira at 48f9764, after 0001-0005 and 0007.
+---
+diff --git a/build/ntdll-unix/signal_arm64_ios.c b/build/ntdll-unix/signal_arm64_ios.c
+index faef7b7..f14219a 100644
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -1166,6 +1166,49 @@ typedef struct {
+     NDR_record_t ndr;
+     kern_return_t ret_code;
+ } ios_exc_reply_t;
++
++/* WinPad: the debugger's task port for EXC_BREAKPOINT, kept when
++ * ios_install_task_exception_port() takes the mask from it, and the
++ * breakpoints that are not ours are passed back to it. */
++static mach_port_t ios_debugger_brk_port = MACH_PORT_NULL;
++
++/* WinPad: sends a breakpoint on to the debugger and waits for its answer, as
++ * the kernel would have if we had not taken the port. Returns 1 when the
++ * debugger handled it. Our own send rights for the thread and the task are
++ * copied, so the caller still releases them. */
++static int ios_forward_breakpoint_to_debugger( const ios_exc_request_t *req )
++{
++    union {
++        ios_exc_request_t req;
++        struct { mach_msg_header_t head; NDR_record_t ndr; kern_return_t ret_code; } reply;
++        char buf[1024];
++    } msg;
++    mach_port_t reply_port;
++    kern_return_t kr;
++
++    if (mach_port_allocate( mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply_port ) != KERN_SUCCESS)
++        return 0;
++    msg.req = *req;
++    msg.req.head.msgh_bits = MACH_MSGH_BITS_COMPLEX |
++                             MACH_MSGH_BITS( MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE );
++    msg.req.head.msgh_size = sizeof(msg.req);
++    msg.req.head.msgh_remote_port = ios_debugger_brk_port;
++    msg.req.head.msgh_local_port = reply_port;
++    msg.req.thread.disposition = MACH_MSG_TYPE_COPY_SEND;
++    msg.req.task.disposition = MACH_MSG_TYPE_COPY_SEND;
++    kr = mach_msg( &msg.req.head, MACH_SEND_MSG | MACH_RCV_MSG, sizeof(msg.req), sizeof(msg),
++                   reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL );
++    mach_port_mod_refs( mach_task_self(), reply_port, MACH_PORT_RIGHT_RECEIVE, -1 );
++    if (kr != KERN_SUCCESS)
++    {
++        /* A debugger that went away leaves a dead name: stop sending to it. */
++        dprintf( STDERR_FILENO, "[task-exc] debugger did not take the breakpoint kr=0x%x, no longer forwarding\n", kr );
++        mach_port_deallocate( mach_task_self(), ios_debugger_brk_port );
++        ios_debugger_brk_port = MACH_PORT_NULL;
++        return 0;
++    }
++    return msg.reply.head.msgh_id == req->head.msgh_id + 100 && msg.reply.ret_code == KERN_SUCCESS;
++}
+ #pragma pack()
+ 
+ /* iOS-Madeira ml329 (#53 discriminator): ring of pages the reclaim-recovery path
+@@ -1947,6 +1990,32 @@ static void *ios_mach_exception_thread( void *arg )
+             }
+         }
+ 
++        /* WinPad: a breakpoint that is neither FEX's suspend check nor the
++         * StikDebug protocol belongs to the debugger we displaced, such as the
++         * brk #0 lldb puts in dyld to hear about every dlopen. Declining it
++         * would turn it into a SIGTRAP Wine cannot handle, so the debugger
++         * gets it, as it would have without our task port. */
++        if (req->exception == EXC_BREAKPOINT && ios_debugger_brk_port != MACH_PORT_NULL)
++        {
++            arm_thread_state64_t fs;
++            mach_msg_type_number_t fc = ARM_THREAD_STATE64_COUNT;
++            uint32_t finsn = 0;
++            vm_size_t fsz = sizeof(finsn);
++
++            if (thread_get_state( thread, ARM_THREAD_STATE64, (thread_state_t)&fs, &fc ) == KERN_SUCCESS)
++                vm_read_overwrite( mach_task_self(), arm_thread_state64_get_pc( fs ), sizeof(finsn),
++                                   (vm_address_t)&finsn, &fsz );
++            if (finsn != 0xd4395fc0 && finsn != 0xd43e01a0)
++            {
++                static volatile int fwd_count;
++                handled = ios_forward_breakpoint_to_debugger( req );
++                if (__sync_add_and_fetch( &fwd_count, 1 ) <= 12)
++                    dprintf( STDERR_FILENO, "[task-exc] breakpoint insn=0x%08x passed to the debugger, %s\n",
++                             finsn, handled ? "handled" : "declined" );
++                goto send_reply;
++            }
++        }
++
+         /* Look up per-thread TEB and trampoline for the faulting thread */
+         uintptr_t thread_teb = 0;
+         void *thread_trampoline = NULL;
+@@ -6030,6 +6099,7 @@ skip_reclaim_band: ;
+             }
+         }
+ 
++    send_reply:
+         /* Build reply */
+         ios_exc_reply_t reply;
+         reply.head.msgh_bits = MACH_MSGH_BITS( MACH_MSGH_BITS_REMOTE(req->head.msgh_bits), 0 );
+@@ -6139,8 +6209,20 @@ static void ios_install_task_exception_port(void)
+             (unsigned)i, (unsigned)old_masks[i], (unsigned)old_ports[i],
+             (unsigned)old_behav[i], (int)old_flav[i],
+             old_ports[i] == MACH_PORT_NULL ? " (none — no debugger held it)" : " (debugger)");
+-        if (old_ports[i] != MACH_PORT_NULL)
+-            mach_port_deallocate( mach_task_self(), old_ports[i] );
++        if (old_ports[i] == MACH_PORT_NULL) continue;
++        /* WinPad: keep the debugger's port for the breakpoints that are its own.
++         * Its messages have our format only with EXCEPTION_DEFAULT and 64-bit
++         * codes, which is what lldb's debugserver asks for. */
++        if ((old_masks[i] & EXC_MASK_BREAKPOINT) && ios_debugger_brk_port == MACH_PORT_NULL &&
++            old_behav[i] == (exception_behavior_t)(EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES) &&
++            !((gate = getenv( "MADEIRA_DEBUGGER_BRK" )) && gate[0] == '0'))
++        {
++            ios_debugger_brk_port = old_ports[i];
++            ERR("[task-exc]   breakpoints that are not FEX's or StikDebug's go back to port 0x%x\n",
++                (unsigned)old_ports[i]);
++            continue;
++        }
++        mach_port_deallocate( mach_task_self(), old_ports[i] );
+     }
+ }
+ 
