@@ -28,8 +28,14 @@ r="$work/dxmt-root"
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 TOOLCHAIN=llvm-mingw-20260421-ucrt-macos-universal
 
+# hello.exe stays the one built before: FEX's code caches and the AOT image
+# of the runs above are for that file, and a relinked one differs (its
+# time stamp), which the iPad app would run.
+hello=
+[ -f "$out/hello.exe" ] && hello=$(mktemp) && cp "$out/hello.exe" "$hello"
 sh "$here/build.sh" "$work" ntdll kernelbase kernel32 user32 gdi32 win32u advapi32 sechost \
     msvcrt ucrtbase imm32 dbghelp
+[ -z "$hello" ] || { cp "$hello" "$out/hello.exe"; rm "$hello"; }
 
 # What DXMT's meson build takes from the Wine tree (src/winemetal/meson.build).
 targets=

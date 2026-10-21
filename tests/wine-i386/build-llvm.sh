@@ -8,14 +8,15 @@
 # (dxmt/src/airconv/meson.build, llvm_deps).
 #
 # Usage: build-llvm.sh ROOT SDK   (SDK: iphoneos or iphonesimulator)
-# Output: ROOT/toolchains/llvm-project (the sources, llvm/include is needed)
-# and ROOT/toolchains/llvm-ios-build/{include,lib}, the layout Madeira's
-# build/dxmt-ios/build.sh expects. Needs cmake and ninja.
+# Output: ROOT/toolchains-SDK/llvm-project (the sources, llvm/include is
+# needed) and ROOT/toolchains-SDK/llvm-ios-build/{include,lib}, the layout
+# Madeira's build/dxmt-ios/build.sh expects in ROOT/toolchains
+# (build-dxmt-unix.sh links that to the SDK's). Needs cmake and ninja.
 set -eu
 
 root=$1
 sdk_name=$2
-tc="$root/toolchains"
+tc="$root/toolchains-$sdk_name"
 src="$tc/llvm-project"
 out="$tc/llvm-ios-build"
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)

@@ -30,6 +30,9 @@ esac
 
 sh "$here/fetch-dxmt.sh" "$r"
 sh "$here/build-llvm.sh" "$r" "$sdk_name"
+# Madeira's script takes LLVM from toolchains/llvm-ios-build: this SDK's.
+[ ! -L "$r/toolchains" ] || rm "$r/toolchains"
+ln -s "toolchains-$sdk_name" "$r/toolchains"
 # WinPad's change to DXMT for the simulator's Metal, see the patch header.
 # The tree may already have it from an earlier run.
 p="$here/../../patches/dxmt/0001-simulator-no-raster-pipelines.patch"

@@ -4,15 +4,18 @@
 // dlsym(RTLD_DEFAULT, "macdrv_functions"); Madeira's app answers with
 // app/Madeira/IOSDisplayShim.m, whose macdrv_functions this follows. There
 // the layer sits in the app's window; this host has no window on screen, so
-// every HWND gets a layer of its own that is never shown. Presenting into it
-// works the same: DXMT takes a drawable from it for each frame it presents,
-// and the host counts those (-[CAMetalLayer nextDrawable] is wrapped).
-// On the simulator it also stands in for MetalFX, which the simulator lacks.
-// Linked into winehost by link-host.sh when DXMT's unix side is there.
+// every HWND gets a layer of its own that is never shown, unless an app
+// around the host (tests/wine-app) defines winehost_show_metal_layer.
+// Presenting into it works the same: DXMT takes a drawable from it for each
+// frame it presents, and the host counts those (-[CAMetalLayer nextDrawable]
+// is wrapped). On the simulator it also stands in for MetalFX, which the
+// simulator lacks. Linked into winehost by link-host.sh when DXMT's unix
+// side is there.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <objc/runtime.h>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -68,6 +71,9 @@ static void* create_metal_view(macdrv_view v, void* d) {
   CAMetalLayer* layer = [CAMetalLayer layer];
   layer.frame = CGRectMake(0, 0, 640, 480);
   fprintf(stderr, "winehost: Metal layer %p for window %p\n", (__bridge void*)layer, v);
+  // An app around the host (tests/wine-app) shows the layer on screen.
+  void (*show)(CAMetalLayer*) = (void (*)(CAMetalLayer*))dlsym(RTLD_DEFAULT, "winehost_show_metal_layer");
+  if (show) show(layer);
   return (void*)CFBridgingRetain(layer);
 }
 
@@ -140,6 +146,13 @@ __attribute__((constructor)) static void wrap_next_drawable(void) {
 #endif
   id<MTLDevice> device = MTLCreateSystemDefaultDevice();
   fprintf(stderr, "winehost: Metal device %s\n", device ? [[device name] UTF8String] : "none");
+  // What DXMT's draws rely on: Metal 3 bindless resources, written into
+  // tier 2 argument buffers (GPU addresses and resource IDs).
+  if (device)
+    fprintf(stderr, "winehost: Metal device %s: argument buffers tier %d, Metal 3 family: %s, Apple 7: %s\n",
+            [[device name] UTF8String], device.argumentBuffersSupport == MTLArgumentBuffersTier2 ? 2 : 1,
+            [device supportsFamily:MTLGPUFamilyMetal3] ? "yes" : "no",
+            [device supportsFamily:MTLGPUFamilyApple7] ? "yes" : "no");
   id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
   if (cb) {
     Method c = class_getInstanceMethod([cb class], @selector(commit));

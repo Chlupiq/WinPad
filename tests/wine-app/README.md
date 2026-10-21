@@ -26,5 +26,16 @@ přímo z plochy iPadu. Log z posledního běhu je v aplikaci Soubory →
 Na mém iPadu → WinPad Wine (`wine.log`). Když běh aplikaci shodí, ukáže
 log toho běhu při dalším spuštění.
 
+## Direct3D 9 kostka (schéma „WinPadWine D3D9“)
+
+Když CI přeložilo i DXMT, má projekt druhé schéma, `WinPadWine D3D9`.
+Vyber ho nahoře vedle cíle a dej Run (⌘R). Aplikace pak místo `hello.exe`
+spustí 32bitový Direct3D 9 program (`d3d9-cube.exe`, kostka z Madeiry):
+přes DXMT a Metal kreslí do okna v aplikaci, 8 sekund, a na konci ukáže OK,
+když všechny snímky předal Metalu. Běží s JITem FEXu, ne z AOT obrazu,
+takže potřebuje připojený debugger: spouštěj ho z Xcode, ne z plochy.
+Na simulátoru kostka nedoběhne: jeho Metal nemá argument buffery tier 2
+(Metal 3), na kterých DXMT kreslí.
+
 Projekt vzniká v CI (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
 Nic v něm neupravuj ručně, při další verzi se přegeneruje.
