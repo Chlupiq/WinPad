@@ -21,6 +21,7 @@
 // instead of ending the process. An app shows the program's window through
 // winehost_frame_hook. WINEHOST_WAIT_EXIT=1 waits for the Wine process to
 // exit even after everything the run checks has shown up.
+#include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
@@ -576,7 +577,12 @@ int winehost_main(int argc, char* argv[]) {
   const int wait_exit = (env = getenv("WINEHOST_WAIT_EXIT")) && !strcmp(env, "1");
   double begin = now(), done_at = 0;
   while (now() - begin < seconds) {
-    usleep(100000);
+    // The main thread waits in its run loop, which also runs what Wine's
+    // threads give the main queue: DXMT sets up and presents Metal layers
+    // there (execute_on_main in winemetal_unix.c, dispatch_sync), as in the
+    // app, whose main thread is UIKit's.
+    if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false) == kCFRunLoopRunFinished)
+      usleep(100000);
     int met_all = (__atomic_load_n(&goals_met, __ATOMIC_ACQUIRE) & goals_needed) == goals_needed;
     if (__atomic_load_n(&wine_exited, __ATOMIC_ACQUIRE) || (goals_needed && met_all && !wait_exit)) {
       if (!done_at) done_at = now();

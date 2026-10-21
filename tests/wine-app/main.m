@@ -16,11 +16,21 @@
 // The window's frames show on screen; 2 s after it shows, the app taps it
 // (as CI does), it changes colour and the program exits.
 //
+// When the bundle has DXMT (CI built it for the app), two more run with
+// FEX's JIT, which needs a debugger attached (Run from Xcode): d3d9-cube
+// (tests/wine-i386/d3d9-cube.c, the "WinPadWine D3D9" scheme), a 32-bit
+// Direct3D 9 program drawing through DXMT and Metal, and game (the
+// "WinPadWine Game" scheme): a game the user copied into Documents, the
+// "game" setting naming its program there (NFSU2/SPEED2.EXE by default).
+// The game starts in its own folder (winehost.c) and runs until it ends or
+// the app is stopped. Their frames show on screen through a Metal layer.
+//
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
 // interpreter (patches/fex-wow64/0019) and is written to the code map in
 // Documents/fexcache/codemap/new, so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
+#import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 
 #include <stdio.h>
@@ -39,6 +49,19 @@ static NSString* DocumentsPath(NSString* name) {
 
 static NSString* ReadLog(void) {
   return [NSString stringWithContentsOfFile:DocumentsPath(@"wine.log") encoding:NSUTF8StringEncoding error:nil] ?: @"";
+}
+
+// The end of the log, for the screen: a game's log grows for as long as it runs.
+static NSString* ReadLogTail(void) {
+  NSFileHandle* f = [NSFileHandle fileHandleForReadingAtPath:DocumentsPath(@"wine.log")];
+  if (!f) return @"";
+  const unsigned long long size = [f seekToEndOfFile], keep = 64 * 1024;
+  [f seekToFileOffset:size > keep ? size - keep : 0];
+  NSData* data = [f readDataToEndOfFile];
+  [f closeFile];
+  NSString* tail = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?:
+                   [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+  return size > keep ? [@"…\n" stringByAppendingString:tail] : tail;
 }
 
 // The program to run: WINPAD_PROGRAM (set by an Xcode scheme), else the
@@ -71,6 +94,20 @@ static void ShowFrame(void* hwnd, int width, int height, int stride, const void*
   if (image) dispatch_async(dispatch_get_main_queue(), ^{
       frame_view.image = image;
     });
+}
+
+// The view DXMT's Metal layers go on (host/metal-display.m looks this up):
+// 640 wide at most for the cube, as large as fits for a game.
+static UIView* metal_view;
+static BOOL metal_fill;
+
+__attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALayer* layer) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    CGRect b = metal_view.bounds;
+    CGFloat w = MIN(b.size.width - 32, metal_fill ? (b.size.height - 96) * 4 / 3 : 640), h = w * 3 / 4;
+    layer.frame = CGRectMake((b.size.width - w) / 2, 64, w, h);
+    [metal_view.layer addSublayer:layer];
+  });
 }
 
 // Windows path of a directory for FEX: Z: is the root, with a trailing backslash.
@@ -129,14 +166,21 @@ static NSString* MakePrefix(NSString* bundle) {
     [self.view addSubview:frame_view];
     winehost_frame_hook = ShowFrame;
   }
+  metal_view = self.view;
+  metal_fill = [self.program isEqualToString:@"game"];
 
   NSString* previous = ReadLog();
   if (previous.length && ![previous containsString:FinishedMarker]) {
-    self.text.text = [@"WinPad Wine: the last run stopped before it finished. Its log:\n\n" stringByAppendingString:previous];
+    [NSFileManager.defaultManager removeItemAtPath:DocumentsPath(@"wine.log.crashed") error:nil];
     [NSFileManager.defaultManager moveItemAtPath:DocumentsPath(@"wine.log")
                                           toPath:DocumentsPath(@"wine.log.crashed")
                                            error:nil];
-    return;
+    // A game is usually ended by stopping the app, so it starts again; its
+    // last log stays in wine.log.crashed.
+    if (![self.program isEqualToString:@"game"]) {
+      self.text.text = [@"WinPad Wine: the last run stopped before it finished. Its log:\n\n" stringByAppendingString:previous];
+      return;
+    }
   }
   self.text.text = @"WinPad Wine: starting…";
   self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer* timer) {
@@ -159,13 +203,14 @@ static NSString* MakePrefix(NSString* bundle) {
 
 - (void)showLog {
   NSString* summary = self.summary;
-  self.text.text = [(summary ?: @"WinPad Wine: running…\n\n") stringByAppendingString:ReadLog()];
+  self.text.text = [(summary ?: @"WinPad Wine: running…\n\n") stringByAppendingString:ReadLogTail()];
   if (summary) [self.timer invalidate];
 }
 
 - (void)runWine {
   NSString* name = self.program;
   const BOOL window = [name isEqualToString:@"window"];
+  const BOOL cube = [name isEqualToString:@"d3d9-cube"], game = [name isEqualToString:@"game"];
   NSString* bundle = NSBundle.mainBundle.bundlePath;
   NSString* prefix = MakePrefix(bundle);
   NSString* cache = DocumentsPath(@"fexcache");
@@ -196,14 +241,24 @@ static NSString* MakePrefix(NSString* bundle) {
   // Madeira wants left over by default.
   setenv("MADEIRA_WOW_MIN_FREE_GB", "2", 1);
   setenv("WINEHOST_RETURN", "1", 1);
-  // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
-  NSString* image = [name isEqualToString:@"hello"] ? @"fexaot.dylib" : [NSString stringWithFormat:@"fexaot-%@.dylib", name];
-  setenv("WINEHOST_AOT_IMAGE",
-         [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:image].fileSystemRepresentation, 1);
-  setenv("FEX_NOJIT", "1", 1);
-  setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
-  setenv("FEX_ENABLECODECACHEVALIDATION", "0", 1);
-  setenv("FEX_APP_CACHE_LOCATION", WindowsDir(cache).UTF8String, 1);
+  NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
+  NSString* image = @"none (JIT)";
+  if (game) {
+    NSString* exe = [NSUserDefaults.standardUserDefaults stringForKey:@"game"];
+    program = DocumentsPath(exe.length ? exe : @"NFSU2/SPEED2.EXE");
+    // The Ultimate ASI Loader many games carry is a dinput8.dll of their own.
+    setenv("WINEDLLOVERRIDES", "dinput8=n,b", 1);
+  }
+  if (!cube && !game) {
+    // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
+    image = [name isEqualToString:@"hello"] ? @"fexaot.dylib" : [NSString stringWithFormat:@"fexaot-%@.dylib", name];
+    setenv("WINEHOST_AOT_IMAGE",
+           [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:image].fileSystemRepresentation, 1);
+    setenv("FEX_NOJIT", "1", 1);
+    setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
+    setenv("FEX_ENABLECODECACHEVALIDATION", "0", 1);
+    setenv("FEX_APP_CACHE_LOCATION", WindowsDir(cache).UTF8String, 1);
+  }
 
   if (window) {
     // As CI's runs of the program, which its AOT image was built from: a tap
@@ -217,18 +272,34 @@ static NSString* MakePrefix(NSString* bundle) {
   }
   printf("WinPad Wine: program %s, AOT image %s\n", name.UTF8String, image.UTF8String);
 
-  NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
-  char* args[] = {"winehost", "60", (char*)program.fileSystemRepresentation, NULL};
+  if (game && ![NSFileManager.defaultManager fileExistsAtPath:program]) {
+    printf("%s, exit 1\n", FinishedMarker.UTF8String);
+    self.summary = [NSString stringWithFormat:@"FAILED: no game at %@. Copy the game's folder into WinPad Wine's "
+                                              @"Documents (Finder → the iPad → Files), or name its program in "
+                                              @"Settings → WinPad Wine → Game.\n\n", program];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [self showLog];
+    });
+    return;
+  }
+  // The cube spins for 8 s, exits with 43 and says how many frames it presented;
+  // a game runs until it ends (a day at most).
+  char* args[] = {"winehost", game ? "86400" : "60", (char*)program.fileSystemRepresentation, NULL};
   const int status = winehost_main(3, args);
   NSString* log = ReadLog();
-  const BOOL ok = status == 0 && [log containsString:@"winehost: Wine process exited with code 0"] &&
-                  (window ? [log containsString:@"winehost: window content changed after the click"]
-                          : [log containsString:@"Hello from x86"]);
+  const BOOL ok = cube   ? [log containsString:@"MADEIRA-D3D9: done, frames presented = "] &&
+                             [log containsString:@"winehost: Wine process exited with code 43"]
+                  : game ? [log containsString:@"winehost: Wine process exited with code 0"]
+                         : status == 0 && [log containsString:@"winehost: Wine process exited with code 0"] &&
+                               (window ? [log containsString:@"winehost: window content changed after the click"]
+                                       : [log containsString:@"Hello from x86"]);
   printf("%s, exit %d\n", FinishedMarker.UTF8String, ok ? 0 : 1);
 
-  self.summary = ok && window ? @"OK: the x86 program drew its window and took a tap in Wine from the AOT image, without a JIT.\n\n"
-                 : ok ? @"OK: the x86 program ran in Wine from the AOT image, without a JIT.\n\n"
-                    : [NSString stringWithFormat:@"FAILED (winehost %d)\n\n", status];
+  self.summary = !ok    ? [NSString stringWithFormat:@"FAILED (winehost %d)\n\n", status]
+                 : cube ? @"OK: the 32-bit D3D9 cube presented its frames through DXMT and Metal.\n\n"
+                 : game ? @"OK: the game ended with exit code 0.\n\n"
+                 : window ? @"OK: the x86 program drew its window and took a tap in Wine from the AOT image, without a JIT.\n\n"
+                          : @"OK: the x86 program ran in Wine from the AOT image, without a JIT.\n\n";
   NSData* data = [[self.summary stringByAppendingString:ReadLog()] dataUsingEncoding:NSUTF8StringEncoding];
   write(console, data.bytes, data.length);
   dispatch_async(dispatch_get_main_queue(), ^{

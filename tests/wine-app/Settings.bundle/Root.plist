@@ -17,12 +17,30 @@
 			<array>
 				<string>hello.exe (text)</string>
 				<string>window.exe (Win32 window)</string>
+				<string>D3D9 cube (JIT, from Xcode)</string>
+				<string>Game (JIT, from Xcode)</string>
 			</array>
 			<key>Values</key>
 			<array>
 				<string>hello</string>
 				<string>window</string>
+				<string>d3d9-cube</string>
+				<string>game</string>
 			</array>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSTextFieldSpecifier</string>
+			<key>Title</key>
+			<string>Game</string>
+			<key>Key</key>
+			<string>game</string>
+			<key>DefaultValue</key>
+			<string>NFSU2/SPEED2.EXE</string>
+			<key>AutocapitalizationType</key>
+			<string>None</string>
+			<key>AutocorrectionType</key>
+			<string>No</string>
 		</dict>
 	</array>
 </dict>
