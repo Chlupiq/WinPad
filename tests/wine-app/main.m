@@ -23,13 +23,15 @@
 // "WinPadWine Game" scheme): a game the user copied into Documents, the
 // "game" setting naming its program there (NFSU2/SPEED2.EXE by default).
 // The game starts in its own folder (winehost.c) and runs until it ends or
-// the app is stopped. Their frames show on screen through a Metal layer.
+// the app is stopped. Their frames show on screen through a Metal layer,
+// and a hardware keyboard's keys go to the game (HardwareKeyboard).
 //
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
 // interpreter (patches/fex-wow64/0019) and is written to the code map in
 // Documents/fexcache/codemap/new, so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
+#import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 
@@ -38,6 +40,7 @@
 #include <unistd.h>
 
 int winehost_main(int argc, char* argv[]);
+void winehost_post_key(unsigned short vk, int down);
 extern void (*winehost_frame_hook)(void* hwnd, int width, int height, int stride, const void* bits);
 
 static NSString* const FinishedMarker = @"== finished";
@@ -110,6 +113,46 @@ __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALa
   });
 }
 
+// The Windows virtual key of a key's USB HID usage (what GCKeyCode is), or 0.
+// Modifiers keep their side; Wine's driver derives the scan code DirectInput
+// reads from the virtual key (Madeira's docs/KEYBOARD_MOUSE.md).
+static unsigned short VirtualKey(GCKeyCode code) {
+  const CFIndex u = code;
+  if (u >= 0x04 && u <= 0x1d) return 'A' + (u - 0x04);
+  if (u >= 0x1e && u <= 0x26) return '1' + (u - 0x1e);
+  if (u >= 0x3a && u <= 0x45) return 0x70 + (u - 0x3a);  // F1-F12
+  static const struct { CFIndex usage; unsigned short vk; } keys[] = {
+      {0x27, '0'},  {0x28, 0x0d}, {0x29, 0x1b}, {0x2a, 0x08}, {0x2b, 0x09}, {0x2c, 0x20},
+      {0x2d, 0xbd}, {0x2e, 0xbb}, {0x2f, 0xdb}, {0x30, 0xdd}, {0x31, 0xdc}, {0x33, 0xba},
+      {0x34, 0xde}, {0x35, 0xc0}, {0x36, 0xbc}, {0x37, 0xbe}, {0x38, 0xbf}, {0x39, 0x14},
+      {0x49, 0x2d}, {0x4a, 0x24}, {0x4b, 0x21}, {0x4c, 0x2e}, {0x4d, 0x23}, {0x4e, 0x22},
+      {0x4f, 0x27}, {0x50, 0x25}, {0x51, 0x28}, {0x52, 0x26}, {0xe0, 0xa2}, {0xe1, 0xa0},
+      {0xe2, 0xa4}, {0xe4, 0xa3}, {0xe5, 0xa1}, {0xe6, 0xa5},
+  };
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+    if (keys[i].usage == u) return keys[i].vk;
+  return 0;
+}
+
+// Sends every key of a hardware keyboard (Bluetooth, USB, Magic Keyboard) to
+// the program, down and up, as GameController reports them.
+static void HardwareKeyboard(void) {
+  void (^attach)(GCKeyboard*) = ^(GCKeyboard* keyboard) {
+    keyboard.keyboardInput.keyChangedHandler = ^(GCKeyboardInput* input, GCControllerButtonInput* key,
+                                                 GCKeyCode code, BOOL pressed) {
+      const unsigned short vk = VirtualKey(code);
+      if (vk) winehost_post_key(vk, pressed);
+    };
+  };
+  if (GCKeyboard.coalescedKeyboard) attach(GCKeyboard.coalescedKeyboard);
+  [NSNotificationCenter.defaultCenter addObserverForName:GCKeyboardDidConnectNotification
+                                                  object:nil
+                                                   queue:NSOperationQueue.mainQueue
+                                              usingBlock:^(NSNotification* note) {
+                                                attach(note.object);
+                                              }];
+}
+
 // Windows path of a directory for FEX: Z: is the root, with a trailing backslash.
 static NSString* WindowsDir(NSString* path) {
   return [NSString stringWithFormat:@"Z:%@\\", [path stringByReplacingOccurrencesOfString:@"/" withString:@"\\"]];
@@ -168,6 +211,7 @@ static NSString* MakePrefix(NSString* bundle) {
   }
   metal_view = self.view;
   metal_fill = [self.program isEqualToString:@"game"];
+  if (metal_fill) HardwareKeyboard();
 
   NSString* previous = ReadLog();
   if (previous.length && ![previous containsString:FinishedMarker]) {

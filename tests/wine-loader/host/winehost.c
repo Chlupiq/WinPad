@@ -10,7 +10,8 @@
 // that gets the newest content of each window as HWND.bmp). WINEHOST_TYPE
 // types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
 // first window, 2 s after that window first showed (see winios_pProcessEvents);
-// WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead.
+// WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead. An app
+// hands in keys of its own with winehost_post_key.
 // WINEHOST_VA_HOLES holds address ranges an iPad cannot map (hold_va_holes).
 // WINEHOST_AOT_IMAGE names a dylib with FEX AOT code caches linked in
 // (tools/cache2macho); its index goes to FEX as WINE_IOS_AOT_INDEX.
@@ -258,8 +259,49 @@ static int advance(int from, int to) {
                                      __ATOMIC_ACQUIRE);
 }
 
+// Keys an app around the host (tests/wine-app) hands in with
+// winehost_post_key, from its own threads; Wine threads send them on from
+// winios_pProcessEvents, as Madeira's Winios.m does with its ring.
+static struct {
+  unsigned short vk[256];
+  unsigned char up[256];
+  unsigned head, tail;
+  pthread_mutex_t lock;
+} keys = {.lock = PTHREAD_MUTEX_INITIALIZER};
+
+__attribute__((visibility("default"))) void winehost_post_key(unsigned short vk, int down) {
+  pthread_mutex_lock(&keys.lock);
+  unsigned next = (keys.head + 1) % 256;
+  if (next != keys.tail) {  // full: the key is dropped rather than block the app
+    keys.vk[keys.head] = vk;
+    keys.up[keys.head] = !down;
+    keys.head = next;
+  }
+  pthread_mutex_unlock(&keys.lock);
+}
+
+static int send_posted_keys(void) {
+  int sent = 0;
+  for (;;) {
+    pthread_mutex_lock(&keys.lock);
+    if (keys.tail == keys.head) {
+      pthread_mutex_unlock(&keys.lock);
+      return sent;
+    }
+    unsigned short vk = keys.vk[keys.tail];
+    int up = keys.up[keys.tail];
+    keys.tail = (keys.tail + 1) % 256;
+    pthread_mutex_unlock(&keys.lock);
+    winios_drv_post_key(vk, up ? KEYUP : 0);
+    static int logged;
+    if (logged++ < 8) fprintf(stderr, "winehost: key 0x%x %s\n", vk, up ? "up" : "down");
+    sent = 1;
+  }
+}
+
 int winios_pProcessEvents(unsigned int mask) {
   (void)mask;
+  if (send_posted_keys()) return 1;
   int state = __atomic_load_n(&input_state, __ATOMIC_ACQUIRE);
   if ((state != 1 && state != 3) || now() < state_time + 2) return 0;
   if (state == 1 && advance(1, 2)) {

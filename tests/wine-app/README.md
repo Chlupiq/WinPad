@@ -70,7 +70,8 @@ Aplikace spustí `NFSU2/SPEED2.EXE` z Dokumentů aplikace, s pracovní
 složkou ve složce hry. Jinou hru vybereš v Nastavení → WinPad Wine → Game
 (cesta v Dokumentech, např. `NFSU2/SPEED2.EXE`). Hra běží s JITem FEXu
 jako kostka, takže jen z Xcode s debuggerem; okno hry se ukáže v aplikaci,
-dokud ji neukončíš. `dinput8.dll` ze složky hry (ASI Loader) má přednost
+dokud ji neukončíš. Ovládá se hardwarovou klávesnicí (Magic Keyboard, Bluetooth
+nebo USB): šipky, Enter, Esc a další klávesy jdou přímo do hry. `dinput8.dll` ze složky hry (ASI Loader) má přednost
 před Wine (`WINEDLLOVERRIDES=dinput8=n,b`).
 
 Projekt vzniká v CI (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
