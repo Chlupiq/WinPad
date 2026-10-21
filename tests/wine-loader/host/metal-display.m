@@ -109,9 +109,18 @@ static id counting_next_drawable(id self, SEL sel) {
   return drawable;
 }
 
+void madeira_set_vsync_locked(int mode);  // DXMT's winemetal_unix.c
+
 __attribute__((constructor)) static void wrap_next_drawable(void) {
   Method m = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
   next_drawable = (id (*)(id, SEL))method_setImplementation(m, (IMP)counting_next_drawable);
+#if TARGET_OS_SIMULATOR
+  // DXMT caps presents at 60 per second by default with
+  // presentDrawable:afterMinimumDuration:, which the simulator's command
+  // buffers (MTLSimCommandBuffer) do not implement; mode 0 presents each
+  // frame with presentDrawable:.
+  madeira_set_vsync_locked(0);
+#endif
   id<MTLDevice> device = MTLCreateSystemDefaultDevice();
   fprintf(stderr, "winehost: Metal device %s\n", device ? [[device name] UTF8String] : "none");
 }
