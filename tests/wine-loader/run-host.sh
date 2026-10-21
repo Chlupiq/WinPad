@@ -64,6 +64,9 @@ if [ "$wow64" = 1 ]; then
     for f in "$work/modules-iphonesimulator/aarch64-windows"/*; do
         ln -s "$f" "$out/prefix/drive_c/windows/system32/"
     done
+    # The COM classes the 32-bit DLLs create (dsound: mmdevapi's device
+    # enumerator), as wineboot would have registered them (prefix/system.reg).
+    cp "$here/prefix/system.reg" "$out/prefix/system.reg"
 fi
 # WINEHOST_FEX_CACHE=DIR is FEX's cache directory (code maps, caches), shared
 # by runs. With WINEHOST_FEX_CODEMAP=1, FEX records there which blocks of the

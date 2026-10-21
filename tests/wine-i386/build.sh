@@ -23,10 +23,11 @@ shift
 # game imports (DirectInput, DirectSound, DirectDraw, winmm, Winsock, TAPI,
 # netapi32, shell32 and shfolder) import in turn: their whole import closure,
 # or the loader stops at the first missing one (c0000135). d3d9 is not here.
+# mmdevapi is no import but the COM class dsound creates for its device.
 [ $# -gt 0 ] || set -- ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32 \
     dinput8 dinput dsound ddraw winmm ws2_32 tapi32 netapi32 shfolder shell32 \
     comctl32 ole32 combase coml2 oleaut32 rpcrt4 hid setupapi cfgmgr32 wined3d opengl32 \
-    msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version
+    msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi
 wine="$work/madeira/wine"
 b="$wine/build-i386"
 out="$work/i386-windows"
