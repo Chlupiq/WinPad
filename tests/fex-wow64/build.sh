@@ -36,7 +36,7 @@ git -C "$src" clean -q -fd
 for m in $(git -C "$src" config -f .gitmodules --get-regexp 'submodule\..*\.path' | awk '{print $2}'); do
     case "$m" in External/fex-*-bins) continue ;; esac
     git -C "$src" submodule update -q --init --depth 1 "$m"
-    # A patch may change a submodule (patches/fex-wow64/0019: rpmalloc), and
+    # A patch may change a submodule (patches/fex-wow64/0021: rpmalloc), and
     # submodule update leaves the changes in a restored tree in place.
     git -C "$src/$m" checkout -q -f HEAD -- .
     git -C "$src/$m" clean -q -fd

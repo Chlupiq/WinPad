@@ -6,6 +6,10 @@ z předpřeloženého obrazu (`fexaot.dylib`) a každý modul Wine ze svého dyl
 Wine, jeho moduly i obraz jsou už přeložené, zvlášť pro iPad (`iphoneos`)
 a pro simulátor (`iphonesimulator`). Xcode překládá jen `main.m`.
 
+Blok x86 kódu, který v obrazu chybí, spustí interpret FEXu (nic nemapuje
+jako spustitelné) a zapíše ho do kódové mapy v `fexcache/codemap/new`
+v Dokumentech aplikace, takže ho další obraz může mít.
+
 ## Na simulátoru (Mac s Apple Silicon)
 
 1. Otevři `WinPadWine.xcodeproj`.

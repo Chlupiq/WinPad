@@ -358,6 +358,7 @@ def main():
     ap.add_argument("--elf-asm", action="store_true", help="write AArch64 ELF assembly for Linux instead")
     ap.add_argument("--dispatcher", action="store_true", help="input is a dispatcher dump; write assembly")
     ap.add_argument("--wow64", action="store_true", help="cache from FEX's WoW64 module (FEX 3bec2ac relocation types)")
+    ap.add_argument("--skip-empty", action="store_true", help="write nothing, and succeed, for a cache without blocks")
     args = ap.parse_args()
     if args.wow64:
         fi.RELOC_TYPES = fi.RELOC_TYPES_WOW64
@@ -384,6 +385,9 @@ def main():
         else:
             obj, stats = convert(data, prefix, args.min_ios)
     except (ConvertError, fi.FormatError) as e:
+        if args.skip_empty and str(e) == "empty cache":
+            print(f"{args.cache}: empty cache, left out")
+            return
         sys.exit(f"{args.cache}: {e}")
     with open(args.output, "wb") as fh:
         fh.write(obj)

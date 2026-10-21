@@ -8,6 +8,11 @@ compiler turns it into a code cache. Format: FEXCore/include/FEXCore/Core/CodeCa
 Usage: codemap.py FILE...   Exits with 1 if no file holds a block, or if a
 file does not parse cleanly (a block of an image the map never named, or
 bytes left over at the end).
+
+       codemap.py drop --every N FILE...   Rewrites each map without every
+N-th block entry (the N-th, 2N-th, ... of each file), keeping the image
+records. A cache built from it misses those blocks, which is how CI makes a
+NoJIT run meet code that is not in its AOT image.
 """
 import struct
 import sys
@@ -37,7 +42,42 @@ def parse(data):
     return names, blocks, main, len(data) - pos
 
 
+def drop(every, paths):
+    dropped_all = 0
+    for path in paths:
+        with open(path, "rb") as f:
+            data = f.read()
+        out, pos, seen, dropped = bytearray(), 0, 0, []
+        while pos + ENTRY.size <= len(data):
+            entry = ENTRY.unpack_from(data, pos)
+            if entry == LIBRARY:
+                end = data.index(b"\0", pos + ENTRY.size + 8)
+                nxt = (end + 1 + 3) & ~3
+            elif entry == SET_MAIN:
+                nxt = pos + ENTRY.size + 8
+            else:
+                nxt = pos + ENTRY.size
+                seen += 1
+                if seen % every == 0:
+                    dropped.append(entry[1])
+                    pos = nxt
+                    continue
+            out += data[pos:nxt]
+            pos = nxt
+        out += data[pos:]
+        with open(path, "wb") as f:
+            f.write(out)
+        print(f"{path}: dropped {len(dropped)} of {seen} blocks")
+        if dropped:
+            print("         at " + " ".join(f"{o:#x}" for o in dropped[:40]) + (" ..." if len(dropped) > 40 else ""))
+        dropped_all += len(dropped)
+    print(f"dropped blocks in all: {dropped_all}")
+    return 0 if dropped_all else 1
+
+
 def main():
+    if len(sys.argv) >= 4 and sys.argv[1] == "drop" and sys.argv[2] == "--every":
+        return drop(int(sys.argv[3]), sys.argv[4:])
     total = 0
     clean = True
     for path in sys.argv[1:]:

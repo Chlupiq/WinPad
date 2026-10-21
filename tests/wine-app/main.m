@@ -17,8 +17,10 @@
 // CI built DXMT for the app.
 //
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
-// while it runs. If the run stops the app (FEX aborts on an x86 block
-// missing from the image), the next launch shows the log of that run.
+// while it runs. An x86 block missing from the image runs in FEX's IR
+// interpreter (patches/fex-wow64/0019) and is written to the code map in
+// Documents/fexcache/codemap/new, so a later image can have it. If the run
+// stops the app, the next launch shows the log of that run.
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 

@@ -1,4 +1,4 @@
-FEX's host band for a 32-bit process on an iPad whose address map ends at 0x7180000000 (FEX 3bec2ac, on top of 0018)
+FEX's host band for a 32-bit process on an iPad whose address map ends at 0x7180000000 (FEX 3bec2ac, on top of 0020)
 
 On an iPad on iPadOS 27 without the extended-virtual-addressing
 entitlement, hello.exe died in xtajit before its first x86 instruction:

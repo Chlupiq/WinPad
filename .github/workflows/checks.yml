@@ -326,15 +326,14 @@ jobs:
             "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
       - name: The code caches and FEX's dispatcher are linked into a dylib, as they would be into the app
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot/fexaot.dylib"
-      - name: The same AOT image links for an iPad
-        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" iphoneos
-      - name: The x86 program runs from the code linked into that dylib with NoJIT, in Wine on an iPad simulator
+      - name: The x86 program runs from the code linked into that dylib with NoJIT, the blocks it lacked compiled in until none is left, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
           # FEX finds every cache in the image's index and runs its code where dyld
           # mapped it; there are no cache files in this cache directory. The dispatcher
           # it generates matches the image's copy, so that copy runs instead. With NoJIT
-          # FEX makes no memory executable and would stop on a block missing from the image.
+          # FEX makes no memory executable; it would interpret a block missing from the
+          # image and write it to the code map, which has to stay empty here.
           # The host then maps no JIT pool either, which a device without a debugger can't.
           WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot/fexaot.dylib
           WINEHOST_FEX_NOJIT: 1
@@ -363,9 +362,126 @@ jobs:
           WINEHOST_PAGE0: "0"
           # As on that iPad, whose kernel refuses mappings at 32-63 GB and past the end
           # of the map: FEX's host band is then the rest of the map above the guest
-          # window (patches/fex-wow64/0019), not 0x7c00000000 as on a simulator.
+          # window (patches/fex-wow64/0021), not 0x7c00000000 as on a simulator.
           WINEHOST_VA_HOLES: "0x800000000-0x1000000000,0x7180000000-0x8000000000"
+        # As for the program with a window: blocks no JIT run took run in FEX's
+        # interpreter and are compiled into the image (patches/fex-wow64/0019, 0020),
+        # so the image the app ships (tests/wine-app) has them too.
+        run: |
+          sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
+            "$RUNNER_TEMP/fexcache"
+      - name: The same AOT image, with the blocks the interpreter learned, links for an iPad
+        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" iphoneos
+      - name: Code caches without every fourth block of that code map, as a run that took other paths would leave them
+        env:
+          WINEHOST_EXPECT_OUTPUT: Successfully populated cache
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-partial
+          WINEHOST_EXPECT_FEX_CACHE: 1
+          WINEHOST_SYSWOW64: 1
+          WINEHOST_JIT: 1
+          # The offline compiler also reports how many of the remaining blocks FEX's
+          # NoJIT interpreter could run, and which IR ops the others need.
+          WINEHOST_FEX_INTERP_SURVEY: 1
+        run: |
+          mkdir -p "$RUNNER_TEMP/fexcache-partial/codemap"
+          cp -R "$RUNNER_TEMP/fexcache/codemap/ready" "$RUNNER_TEMP/fexcache-partial/codemap/"
+          cp "$RUNNER_TEMP/fexcache/dispatcher.bin" "$RUNNER_TEMP/fexcache-partial/"
+          python3 -I tests/fex-wow64/codemap.py drop --every 4 "$RUNNER_TEMP"/fexcache-partial/codemap/ready/*
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+      - name: Those code caches linked into a dylib
+        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-partial" "$RUNNER_TEMP/fexaot-partial/fexaot.dylib"
+      - name: The x86 program runs from that dylib with NoJIT, the blocks missing from it interpreted, in Wine on an iPad simulator
+        env:
+          WINEHOST_EXPECT_OUTPUT: Hello from x86
+          # FEX still makes no memory executable. Each block the image lacks runs in its IR
+          # interpreter and is written to the new code map, so the next AOT build has it.
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-partial/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          WINEHOST_EXPECT_LOG: |
+            [nojit] no JIT pool: nothing is written to executable memory
+            [aot-image] loaded linked cache for
+            [nojit] no code is generated to run
+            [interp] learned block
+            [interp] fallback ran
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-partial-image
+          # Without WINEHOST_FEX_ALL_CACHED the code map has to hold blocks: the learned ones.
+          WINEHOST_FEX_CODEMAP: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+      - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.
+          # It exits after the tap, and FEX writes the code map of the run.
+          WINEHOST_CLICK: 50,50
+          WINEHOST_EXPECT_LOG: |
+            [wow-exit] the code map is written at NtTerminateProcess
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
+          WINEHOST_FEX_CODEMAP: 1
+        # As for hello.exe, the code map is the union of three runs.
+        run: |
+          for run in 1 2 3; do
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
+          done
+      - name: FEX's offline compiler turns that code map into code caches (x86 program with a window)
+        env:
+          WINEHOST_EXPECT_OUTPUT: Successfully populated cache
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
+          WINEHOST_EXPECT_FEX_CACHE: 1
+          WINEHOST_SYSWOW64: 1
+          WINEHOST_JIT: 1
+          # It compiles user32, gdi32 and the rest in one process, which outgrows 512 MB of JIT pool.
+          WINEHOST_JIT_POOL_MB: 2048
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+      - name: The x86 program with a window runs again with the code caches loaded
+        env:
+          WINEHOST_CLICK: 50,50
+          WINEHOST_EXPECT_LOG: |
+            [aot-cache] enabled
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
+          WINEHOST_FEX_CODEMAP: 1
+          # Every x86 block the window, the tap and the exit take was in the code map.
+          WINEHOST_FEX_ALL_CACHED: 1
+          WINEHOST_FEX_DUMP_DISPATCHER: 1
+        run: |
+          sh tests/wine-loader/converge-cache.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/window.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
+      - name: Those code caches linked into a dylib
+        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-window" "$RUNNER_TEMP/fexaot-window/fexaot.dylib"
+      - name: The x86 program with a window runs from that dylib with NoJIT and takes a tap, the blocks it lacked compiled in until none is left
+        env:
+          WINEHOST_CLICK: 50,50
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-window/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          # No JIT run took some blocks this run takes (kernelbase's around waits, and
+          # from there blocks that start inside code the image compiled as part of a
+          # longer block). FEX's interpreter runs them and writes them to the code map;
+          # they are compiled into the image's caches, the image is linked again and
+          # the program runs again, until a run takes every block from the image.
+          # Nothing is made executable in any of these runs.
+          WINEHOST_EXPECT_LOG: |
+            [nojit] no JIT pool: nothing is written to executable memory
+            [aot-dispatcher] static code from the AOT image
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window-image
+          WINEHOST_FEX_CODEMAP: 1
+          WINEHOST_FEX_ALL_CACHED: 1
+        run: |
+          sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/window.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
+            "$RUNNER_TEMP/fexcache-window"
+      - name: Window content of the x86 program
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-window-x86
+          path: ${{ runner.temp }}/wine-loader/host-window/frames
+          if-no-files-found: ignore
+      - name: FEX code map and code caches of the x86 program with a window
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fex-cache-window
+          path: ${{ runner.temp }}/fexcache-window
+          if-no-files-found: ignore
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         id: modules-iphoneos
         run: |

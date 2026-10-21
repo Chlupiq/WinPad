@@ -81,6 +81,8 @@ fi
 # WINEHOST_AOT_IMAGE=DYLIB gives FEX code caches linked into a dylib instead
 # (tests/fex-wow64/build-aot-image.sh); the host loads it. With
 # WINEHOST_FEX_NOJIT=1 FEX runs only that image and makes no memory executable.
+# WINEHOST_FEX_INTERP_SURVEY=1 makes FEX's offline compiler report which blocks
+# of the code map the NoJIT interpreter could run and which IR ops it lacks.
 fex_codemap=
 fex_cache=
 fex_dump_dispatcher=
@@ -110,6 +112,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_AOT_IMAGE="${WINEHOST_AOT_IMAGE:-}" \
     SIMCTL_CHILD_FEX_DUMPDISPATCHER="$fex_dump_dispatcher" SIMCTL_CHILD_FEX_NOJIT="${WINEHOST_FEX_NOJIT:-0}" \
     SIMCTL_CHILD_FEX_ENABLECODECACHEVALIDATION="${WINEHOST_FEX_VALIDATE:-0}" \
+    SIMCTL_CHILD_FEX_INTERP_SURVEY="${WINEHOST_FEX_INTERP_SURVEY:-0}" \
     SIMCTL_CHILD_MADEIRA_WOW_MAP_END="${WINEHOST_WOW_MAP_END:-}" \
     SIMCTL_CHILD_MADEIRA_PAGE0="${WINEHOST_PAGE0:-}" \
     SIMCTL_CHILD_WINEHOST_VA_HOLES="${WINEHOST_VA_HOLES:-}" \
@@ -167,7 +170,9 @@ done
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001);
 # an x86 program stays a PE file.
-[ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log"
+case "$1" in */i386-windows/*) ;; *)
+    [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log" ;;
+esac
 # Every DLL comes from its dylib too (load_builtin). cmd.exe runs to its end:
 # it prints the line and exits with 0. Any other program draws a window
 # through win32u's winios driver.

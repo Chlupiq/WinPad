@@ -2,7 +2,9 @@
 # Packs the Wine app (tests/wine-app) as an Xcode project for a Mac with
 # Xcode: open WinPadWine.xcodeproj, pick a team, Run on the iPad or on an
 # iPad simulator (Apple Silicon Macs). It runs the 32-bit x86 hello.exe in
-# Wine through WoW64 and FEX, with NoJIT, from the AOT image CI linked.
+# Wine through WoW64 and FEX, with NoJIT, from the AOT image CI linked
+# (with the blocks FEX's interpreter ran compiled in, converge-nojit.sh); a
+# block still missing from it runs in that interpreter.
 #
 # Everything but main.m is prebuilt, once for the device (iphoneos) and once
 # for the simulator (iphonesimulator): the host (tests/wine-loader/host,
@@ -138,7 +140,7 @@ xcrun simctl install "$udid" "$sim_app"
 # address 0, so ntdll maps no copy of the TEB there either (patches/madeira/0004).
 # Its kernel refuses mappings at 32-63 GB and past the end of the map, so the
 # host holds those ranges (WINEHOST_VA_HOLES), and FEX's host band is the rest
-# of the map above the guest window (patches/fex-wow64/0019).
+# of the map above the guest window (patches/fex-wow64/0021).
 SIMCTL_CHILD_MADEIRA_WOW_MAP_END=0x7180000000 SIMCTL_CHILD_MADEIRA_PAGE0=0 \
     SIMCTL_CHILD_WINEHOST_VA_HOLES=0x800000000-0x1000000000,0x7180000000-0x8000000000 \
     xcrun simctl launch "$udid" "$bundle"
