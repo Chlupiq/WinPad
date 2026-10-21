@@ -350,12 +350,15 @@ jobs:
             [aot-cache] enabled
             [aot-link] first block link through the data area
             [wow-window] short address map: it ends at 0x7180000000
+            page0: MADEIRA_PAGE0=0: page 0 taken to be unavailable
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-image
           WINEHOST_FEX_CODEMAP: 1
           WINEHOST_FEX_ALL_CACHED: 1
           # As on an iPad without the extended virtual addressing entitlement, whose
           # address map ends at 0x7180000000: the guest window goes below that end.
           WINEHOST_WOW_MAP_END: "0x7180000000"
+          # As on an iPad, which maps nothing at address 0: no TEB copy at page 0.
+          WINEHOST_PAGE0: "0"
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         run: |

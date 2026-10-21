@@ -99,8 +99,10 @@ xcrun simctl bootstatus "$udid" -b >/dev/null
 xcrun simctl install "$udid" "$sim_app"
 # The map of an iPad without the extended virtual addressing entitlement ends at
 # 0x7180000000 (TASK_VM_INFO.max_address); ntdll places the 32-bit guest window
-# as if the simulator's did too (patches/madeira/0003).
-SIMCTL_CHILD_MADEIRA_WOW_MAP_END=0x7180000000 xcrun simctl launch "$udid" "$bundle"
+# as if the simulator's did too (patches/madeira/0003). An iPad maps nothing at
+# address 0, so ntdll maps no copy of the TEB there either (patches/madeira/0004).
+SIMCTL_CHILD_MADEIRA_WOW_MAP_END=0x7180000000 SIMCTL_CHILD_MADEIRA_PAGE0=0 \
+    xcrun simctl launch "$udid" "$bundle"
 log="$(xcrun simctl get_app_container "$udid" "$bundle" data)/Documents/wine.log"
 for _ in $(seq 150); do
     grep -q '== finished' "$log" 2>/dev/null && break
@@ -115,7 +117,13 @@ for expect in 'Hello from x86' 'winehost: NoJIT, so no JIT pool' \
     '[nojit] no JIT pool: nothing is written to executable memory' \
     '[aot-dispatcher] static code from the AOT image' 'xtajit.dll.dylib" at' \
     '[wow-window] MADEIRA_WOW_MAP_END: the map is taken to end at 0x7180000000' \
-    '[wow-window] short address map: it ends at 0x7180000000'; do
+    '[wow-window] short address map: it ends at 0x7180000000' \
+    'page0: MADEIRA_PAGE0=0: page 0 taken to be unavailable'; do
     grep -qF "$expect" "$log" || { echo "missing in the app's log: $expect" >&2; exit 1; }
 done
+# Under Xcode's debugger on an iPad the debugger BRK of the page-0 chain stopped
+# the app; ntdll executes it only with MADEIRA_PAGE0=debugger.
+if grep -qF 'page0: trying debugger' "$log"; then
+    echo "ntdll asked a debugger to map page 0 (BRK #0xf00d)" >&2; exit 1
+fi
 echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT image with NoJIT"
