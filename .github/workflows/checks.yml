@@ -508,8 +508,12 @@ jobs:
           if-no-files-found: ignore
       - name: FEX's host heap keeps its free pages committed in the NoJIT run of the x86 program on an iPad's address map
         # patches/fex-wow64/0022: before it, rpmalloc decommitted every page it freed and
-        # committed it again at the next allocation of its size.
-        run: python3 -I tests/fex-wow64/heap-churn.py "$RUNNER_TEMP/hello-nojit-ipad-map.log"
+        # committed it again at the next allocation of its size. This run then decommitted 9
+        # host heap pages and logged 58 rw- commits of them (CI run 39584998095); with free
+        # pages kept committed it decommits none, so 3 leaves room for a run that frees more.
+        run: |
+          echo "before patches/fex-wow64/0022: 9 decommits, 58 rw- commits of host heap pages"
+          python3 -I tests/fex-wow64/heap-churn.py "$RUNNER_TEMP/hello-nojit-ipad-map.log" --max-decommits 3
 
   fexcore-ios:
     runs-on: macos-15
