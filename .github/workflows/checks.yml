@@ -362,7 +362,7 @@ jobs:
           WINEHOST_PAGE0: "0"
           # As on that iPad, whose kernel refuses mappings at 32-63 GB and past the end
           # of the map: FEX's host band is then the rest of the map above the guest
-          # window (patches/fex-wow64/0021), not 0x7c00000000 as on a simulator.
+          # window (patches/fex-wow64/0024), not 0x7c00000000 as on a simulator.
           WINEHOST_VA_HOLES: "0x800000000-0x1000000000,0x7180000000-0x8000000000"
         # As for the program with a window: blocks no JIT run took run in FEX's
         # interpreter and are compiled into the image (patches/fex-wow64/0019, 0020),

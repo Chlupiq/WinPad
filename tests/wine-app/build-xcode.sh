@@ -171,7 +171,7 @@ run_app() {
     # address 0, so ntdll maps no copy of the TEB there either (patches/madeira/0004).
     # Its kernel refuses mappings at 32-63 GB and past the end of the map, so the
     # host holds those ranges (WINEHOST_VA_HOLES), and FEX's host band is the rest
-    # of the map above the guest window (patches/fex-wow64/0021).
+    # of the map above the guest window (patches/fex-wow64/0024).
     SIMCTL_CHILD_MADEIRA_WOW_MAP_END=0x7180000000 SIMCTL_CHILD_MADEIRA_PAGE0=0 \
         SIMCTL_CHILD_WINEHOST_VA_HOLES=0x800000000-0x1000000000,0x7180000000-0x8000000000 \
         xcrun simctl launch "$udid" "$bundle" "$@"
