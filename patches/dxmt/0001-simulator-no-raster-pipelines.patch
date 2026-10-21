@@ -1,0 +1,58 @@
+WinPad: render pipelines that do not rasterize get an attachment on the simulator.
+
+DXMT's EmulatedCommandContext makes two vertex-only pipelines (the geometry
+and tessellation argument marshalling) with rasterization disabled and no
+attachment. The iPad simulator's Metal (MTLSimDevice) stops the process on
+them, "Render Pipeline Descriptor Validation: No valid pixelFormats set",
+when the D3D9 device is created. On the simulator only, such a pipeline now
+has a colour attachment it never writes.
+
+Applies to willfaust/dxmt at db546ee (Madeira's dxmt submodule).
+---
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1575,6 +1575,27 @@
+ 
+ #endif
+ 
++#if TARGET_OS_SIMULATOR
++/* The simulator's Metal (MTLSimDevice) asserts on a render pipeline without
++ * any attachment pixel format, also when rasterization is disabled, as for
++ * DXMT's vertex-only argument marshalling pipelines; a real GPU takes it.
++ * Such a pipeline draws nothing, so it gets a colour attachment it never
++ * writes. */
++static void
++sim_attachment_for_no_raster(MTLRenderPipelineDescriptor *descriptor) {
++  if (descriptor.rasterizationEnabled || descriptor.depthAttachmentPixelFormat != MTLPixelFormatInvalid ||
++      descriptor.stencilAttachmentPixelFormat != MTLPixelFormatInvalid)
++    return;
++  for (unsigned i = 0; i < 8; i++)
++    if (descriptor.colorAttachments[i].pixelFormat != MTLPixelFormatInvalid)
++      return;
++  descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
++  descriptor.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
++}
++#else
++#define sim_attachment_for_no_raster(descriptor) ((void)0)
++#endif
++
+ static NTSTATUS
+ _MTLDevice_newRenderPipelineState(void *obj) {
+   struct unixcall_mtldevice_newrenderpso *params = obj;
+@@ -1639,6 +1660,7 @@
+   NSError *err = NULL;
+   MTLPipelineOption options =
+       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
++  sim_attachment_for_no_raster(descriptor);
+   params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithDescriptor:descriptor
+                                                                                               options:options
+                                                                                            reflection:nil
+@@ -1738,6 +1760,7 @@
+   NSError *err = NULL;
+   MTLPipelineOption options =
+       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
++  sim_attachment_for_no_raster(descriptor);
+   params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithDescriptor:descriptor
+                                                                                               options:options
+                                                                                            reflection:nil

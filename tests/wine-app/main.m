@@ -10,15 +10,23 @@
 // out like Madeira's: aarch64-windows, i386-windows, nls and fonts next to
 // the executable, where Madeira's ntdll looks for them.
 //
+// With WINPAD_PROGRAM=d3d9-cube (the "WinPadWine D3D9" scheme) it runs
+// tests/wine-i386/d3d9-cube.c instead, a 32-bit Direct3D 9 program, through
+// DXMT and Metal, with FEX's JIT: its frames show on screen. The JIT needs
+// a debugger attached (Run from Xcode). The bundle has the cube only when
+// CI built DXMT for the app.
+//
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
 // interpreter (patches/fex-wow64/0019) and is written to the code map in
 // Documents/fexcache/codemap/new, so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
+#import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 int winehost_main(int argc, char* argv[]);
@@ -63,6 +71,18 @@ static NSString* MakePrefix(NSString* bundle) {
   return prefix;
 }
 
+// The view DXMT's Metal layers go on (host/metal-display.m looks this up).
+static UIView* metal_view;
+
+__attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALayer* layer) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    CGRect b = metal_view.bounds;
+    CGFloat w = MIN(b.size.width - 32, 640), h = w * 3 / 4;
+    layer.frame = CGRectMake((b.size.width - w) / 2, 64, w, h);
+    [metal_view.layer addSublayer:layer];
+  });
+}
+
 @interface WineViewController : UIViewController
 @property(nonatomic, strong) UITextView* text;
 @property(nonatomic, strong) NSTimer* timer;
@@ -79,6 +99,7 @@ static NSString* MakePrefix(NSString* bundle) {
   self.text.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
   self.text.textContainerInset = UIEdgeInsetsMake(48, 16, 16, 16);
   [self.view addSubview:self.text];
+  metal_view = self.view;
 
   NSString* previous = ReadLog();
   if (previous.length && ![previous containsString:FinishedMarker]) {
@@ -134,23 +155,32 @@ static NSString* MakePrefix(NSString* bundle) {
   // Madeira wants left over by default.
   setenv("MADEIRA_WOW_MIN_FREE_GB", "2", 1);
   setenv("WINEHOST_RETURN", "1", 1);
-  setenv("WINEHOST_AOT_IMAGE",
-         [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"fexaot.dylib"].fileSystemRepresentation, 1);
-  setenv("FEX_NOJIT", "1", 1);
-  setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
-  setenv("FEX_ENABLECODECACHEVALIDATION", "0", 1);
-  setenv("FEX_APP_CACHE_LOCATION", WindowsDir(cache).UTF8String, 1);
+  const char* which = getenv("WINPAD_PROGRAM");
+  const BOOL cube = which && !strcmp(which, "d3d9-cube");
+  if (!cube) {
+    setenv("WINEHOST_AOT_IMAGE",
+           [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"fexaot.dylib"].fileSystemRepresentation, 1);
+    setenv("FEX_NOJIT", "1", 1);
+    setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
+    setenv("FEX_ENABLECODECACHEVALIDATION", "0", 1);
+    setenv("FEX_APP_CACHE_LOCATION", WindowsDir(cache).UTF8String, 1);
+  }
 
-  NSString* program = [bundle stringByAppendingPathComponent:@"i386-windows/hello.exe"];
+  // The cube spins for 8 s, exits with 43 and says how many frames it presented.
+  NSString* program = [bundle stringByAppendingPathComponent:cube ? @"i386-windows/d3d9-cube.exe"
+                                                                  : @"i386-windows/hello.exe"];
   char* args[] = {"winehost", "60", (char*)program.fileSystemRepresentation, NULL};
   const int status = winehost_main(3, args);
   NSString* log = ReadLog();
-  const BOOL ok = status == 0 && [log containsString:@"Hello from x86"] &&
-                  [log containsString:@"winehost: Wine process exited with code 0"];
+  const BOOL ok = cube ? [log containsString:@"MADEIRA-D3D9: done, frames presented = "] &&
+                             [log containsString:@"winehost: Wine process exited with code 43"]
+                       : status == 0 && [log containsString:@"Hello from x86"] &&
+                             [log containsString:@"winehost: Wine process exited with code 0"];
   printf("%s, exit %d\n", FinishedMarker.UTF8String, ok ? 0 : 1);
 
-  self.summary = ok ? @"OK: the x86 program ran in Wine from the AOT image, without a JIT.\n\n"
-                    : [NSString stringWithFormat:@"FAILED (winehost %d)\n\n", status];
+  self.summary = !ok ? [NSString stringWithFormat:@"FAILED (winehost %d)\n\n", status]
+                 : cube ? @"OK: the 32-bit D3D9 cube presented its frames through DXMT and Metal.\n\n"
+                        : @"OK: the x86 program ran in Wine from the AOT image, without a JIT.\n\n";
   NSData* data = [[self.summary stringByAppendingString:ReadLog()] dataUsingEncoding:NSUTF8StringEncoding];
   write(console, data.bytes, data.length);
   dispatch_async(dispatch_get_main_queue(), ^{

@@ -19,6 +19,7 @@
 // Built with -DWINEHOST_LIBRARY it has no main: an app calls winehost_main
 // (tests/wine-app), and with WINEHOST_RETURN=1 that returns at the end
 // instead of ending the process.
+#include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
@@ -567,7 +568,12 @@ int winehost_main(int argc, char* argv[]) {
   if ((env = getenv("WINEHOST_CLICK")) && *env) goals_needed |= GOAL_CHANGED;
   double begin = now(), done_at = 0;
   while (now() - begin < seconds) {
-    usleep(100000);
+    // The main thread waits in its run loop, which also runs what Wine's
+    // threads give the main queue: DXMT sets up and presents Metal layers
+    // there (execute_on_main in winemetal_unix.c, dispatch_sync), as in the
+    // app, whose main thread is UIKit's.
+    if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false) == kCFRunLoopRunFinished)
+      usleep(100000);
     int met_all = (__atomic_load_n(&goals_met, __ATOMIC_ACQUIRE) & goals_needed) == goals_needed;
     if (__atomic_load_n(&wine_exited, __ATOMIC_ACQUIRE) || (goals_needed && met_all)) {
       if (!done_at) done_at = now();
