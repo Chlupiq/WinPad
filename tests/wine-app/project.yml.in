@@ -8,9 +8,12 @@ targets:
     platform: iOS
     sources:
       - main.m
+      # The "program" setting in the Settings app (main.m, ProgramName).
+      - Settings.bundle
     postBuildScripts:
       # Wine's files for the platform being built, laid out next to the
-      # executable as in Madeira's app, and the AOT image in Frameworks/.
+      # executable as in Madeira's app, and the AOT images in Frameworks/
+      # (fexaot.dylib for hello.exe, fexaot-NAME.dylib for NAME.exe).
       # Every dylib gets signed; none is linked, Wine and the host load them
       # with dlopen.
       - name: Embed Wine and the AOT image
@@ -28,9 +31,9 @@ targets:
           cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/"
           cp -R "$PROJECT_DIR/wine/i386-windows" "$PROJECT_DIR/wine/nls" "$PROJECT_DIR/wine/fonts" "$app/"
           mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
-          cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME/fexaot.dylib" "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
-            for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/fexaot.dylib"; do
+            for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib; do
               codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
             done
           fi

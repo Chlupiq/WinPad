@@ -464,10 +464,17 @@ jobs:
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window-image
           WINEHOST_FEX_CODEMAP: 1
           WINEHOST_FEX_ALL_CACHED: 1
+          # On the address map of an iPad, as hello.exe's NoJIT run: the image the
+          # app ships (tests/wine-app) has the blocks such a run takes.
+          WINEHOST_WOW_MAP_END: "0x7180000000"
+          WINEHOST_PAGE0: "0"
+          WINEHOST_VA_HOLES: "0x800000000-0x1000000000,0x7180000000-0x8000000000"
         run: |
           sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
             "$RUNNER_TEMP/wine-loader/i386-windows/window.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
             "$RUNNER_TEMP/fexcache-window"
+      - name: The same AOT image of the program with a window links for an iPad
+        run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-window" "$RUNNER_TEMP/fexaot-window-iphoneos/fexaot.dylib" iphoneos
       - name: Window content of the x86 program
         if: always()
         uses: actions/upload-artifact@v4
@@ -488,10 +495,20 @@ jobs:
           cp "$RUNNER_TEMP/xtajit/xtajit.dll" "$RUNNER_TEMP/wine-loader/modules-iphoneos/aarch64-windows/xtajit.dll"
           sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos \
             "$RUNNER_TEMP/wine-loader/modules-iphoneos/aarch64-windows/xtajit.dll"
-      - name: The x86 program in Wine in an iPad app (Xcode project), run on an iPad simulator
+      - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         run: |
           sh tests/wine-app/build-xcode.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/fexaot/fexaot.dylib" \
-            "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" "$RUNNER_TEMP/wine-app"
+            "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" "$RUNNER_TEMP/wine-app" \
+            "$RUNNER_TEMP/fexaot-window/fexaot.dylib" "$RUNNER_TEMP/fexaot-window-iphoneos/fexaot.dylib"
+      - name: Window content of the x86 program in the app, and the app's logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-app-window
+          path: |
+            ${{ runner.temp }}/wine-app/window-frames
+            ${{ runner.temp }}/wine-app/wine-*.log
+          if-no-files-found: ignore
       - name: Upload the Xcode project of the Wine app
         uses: actions/upload-artifact@v4
         with:

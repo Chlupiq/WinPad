@@ -10,6 +10,12 @@
 // out like Madeira's: aarch64-windows, i386-windows, nls and fonts next to
 // the executable, where Madeira's ntdll looks for them.
 //
+// Which program it runs is the "program" setting (ProgramName): hello
+// (hello.exe, the default) or window (tests/wine-i386/window.c, a window
+// drawn with GDI, from its own AOT image Frameworks/fexaot-window.dylib).
+// The window's frames show on screen; 2 s after it shows, the app taps it
+// (as CI does), it changes colour and the program exits.
+//
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
 // interpreter (patches/fex-wow64/0019) and is written to the code map in
@@ -22,6 +28,7 @@
 #include <unistd.h>
 
 int winehost_main(int argc, char* argv[]);
+extern void (*winehost_frame_hook)(void* hwnd, int width, int height, int stride, const void* bits);
 
 static NSString* const FinishedMarker = @"== finished";
 
@@ -32,6 +39,38 @@ static NSString* DocumentsPath(NSString* name) {
 
 static NSString* ReadLog(void) {
   return [NSString stringWithContentsOfFile:DocumentsPath(@"wine.log") encoding:NSUTF8StringEncoding error:nil] ?: @"";
+}
+
+// The program to run: WINPAD_PROGRAM (set by an Xcode scheme), else the
+// "program" user default: the Settings app (Settings → WinPad Wine →
+// Program), or a launch argument "-program NAME". Without either, hello.
+static NSString* ProgramName(void) {
+  const char* env = getenv("WINPAD_PROGRAM");
+  if (env && *env) return @(env);
+  NSString* setting = [NSUserDefaults.standardUserDefaults stringForKey:@"program"];
+  return setting.length ? setting : @"hello";
+}
+
+// Shows the newest frame of the program's window (winehost_frame_hook).
+static UIImageView* frame_view;
+
+static void ShowFrame(void* hwnd, int width, int height, int stride, const void* bits) {
+  (void)hwnd;
+  CFDataRef data = CFDataCreate(NULL, bits, (CFIndex)stride * height);
+  CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
+  CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+  // BGRX in memory: a little-endian 32-bit XRGB word.
+  CGImageRef cg = CGImageCreate(width, height, 8, 32, stride, rgb,
+                                kCGBitmapByteOrder32Little | (CGBitmapInfo)kCGImageAlphaNoneSkipFirst, provider, NULL,
+                                false, kCGRenderingIntentDefault);
+  UIImage* image = cg ? [UIImage imageWithCGImage:cg] : nil;
+  CGImageRelease(cg);
+  CGColorSpaceRelease(rgb);
+  CGDataProviderRelease(provider);
+  CFRelease(data);
+  if (image) dispatch_async(dispatch_get_main_queue(), ^{
+      frame_view.image = image;
+    });
 }
 
 // Windows path of a directory for FEX: Z: is the root, with a trailing backslash.
@@ -67,6 +106,7 @@ static NSString* MakePrefix(NSString* bundle) {
 @property(nonatomic, strong) UITextView* text;
 @property(nonatomic, strong) NSTimer* timer;
 @property(atomic, copy) NSString* summary;
+@property(nonatomic, copy) NSString* program;
 @end
 
 @implementation WineViewController
@@ -79,6 +119,16 @@ static NSString* MakePrefix(NSString* bundle) {
   self.text.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
   self.text.textContainerInset = UIEdgeInsetsMake(48, 16, 16, 16);
   [self.view addSubview:self.text];
+  self.program = ProgramName();
+  if ([self.program isEqualToString:@"window"]) {
+    // The window on top, the log below it.
+    frame_view = [UIImageView new];
+    frame_view.contentMode = UIViewContentModeScaleAspectFit;
+    frame_view.layer.magnificationFilter = kCAFilterNearest;
+    frame_view.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    [self.view addSubview:frame_view];
+    winehost_frame_hook = ShowFrame;
+  }
 
   NSString* previous = ReadLog();
   if (previous.length && ![previous containsString:FinishedMarker]) {
@@ -97,6 +147,16 @@ static NSString* MakePrefix(NSString* bundle) {
   });
 }
 
+- (void)viewDidLayoutSubviews {
+  [super viewDidLayoutSubviews];
+  if (!frame_view) return;
+  CGRect b = self.view.bounds;
+  const CGFloat top = self.view.safeAreaInsets.top + 8, h = MIN(b.size.height * 0.45, 480);
+  frame_view.frame = CGRectMake(16, top, b.size.width - 32, h);
+  self.text.frame = CGRectMake(0, top + h, b.size.width, b.size.height - top - h);
+  self.text.textContainerInset = UIEdgeInsetsMake(8, 16, 16, 16);
+}
+
 - (void)showLog {
   NSString* summary = self.summary;
   self.text.text = [(summary ?: @"WinPad Wine: running…\n\n") stringByAppendingString:ReadLog()];
@@ -104,6 +164,8 @@ static NSString* MakePrefix(NSString* bundle) {
 }
 
 - (void)runWine {
+  NSString* name = self.program;
+  const BOOL window = [name isEqualToString:@"window"];
   NSString* bundle = NSBundle.mainBundle.bundlePath;
   NSString* prefix = MakePrefix(bundle);
   NSString* cache = DocumentsPath(@"fexcache");
@@ -134,22 +196,38 @@ static NSString* MakePrefix(NSString* bundle) {
   // Madeira wants left over by default.
   setenv("MADEIRA_WOW_MIN_FREE_GB", "2", 1);
   setenv("WINEHOST_RETURN", "1", 1);
+  // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
+  NSString* image = [name isEqualToString:@"hello"] ? @"fexaot.dylib" : [NSString stringWithFormat:@"fexaot-%@.dylib", name];
   setenv("WINEHOST_AOT_IMAGE",
-         [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"fexaot.dylib"].fileSystemRepresentation, 1);
+         [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:image].fileSystemRepresentation, 1);
   setenv("FEX_NOJIT", "1", 1);
   setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
   setenv("FEX_ENABLECODECACHEVALIDATION", "0", 1);
   setenv("FEX_APP_CACHE_LOCATION", WindowsDir(cache).UTF8String, 1);
 
-  NSString* program = [bundle stringByAppendingPathComponent:@"i386-windows/hello.exe"];
+  if (window) {
+    // As CI's runs of the program, which its AOT image was built from: a tap
+    // in the middle of the window 2 s after it shows, then it exits. Its newest
+    // frame also goes to Documents/frames as a BMP.
+    setenv("WINEHOST_WINDOW", "1", 1);
+    setenv("WINEHOST_CLICK", "50,50", 1);
+    setenv("WINEHOST_WAIT_EXIT", "1", 1);
+    setenv("WINEHOST_FRAMES", DocumentsPath(@"frames").fileSystemRepresentation, 1);
+    [NSFileManager.defaultManager removeItemAtPath:DocumentsPath(@"frames") error:nil];
+  }
+  printf("WinPad Wine: program %s, AOT image %s\n", name.UTF8String, image.UTF8String);
+
+  NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   char* args[] = {"winehost", "60", (char*)program.fileSystemRepresentation, NULL};
   const int status = winehost_main(3, args);
   NSString* log = ReadLog();
-  const BOOL ok = status == 0 && [log containsString:@"Hello from x86"] &&
-                  [log containsString:@"winehost: Wine process exited with code 0"];
+  const BOOL ok = status == 0 && [log containsString:@"winehost: Wine process exited with code 0"] &&
+                  (window ? [log containsString:@"winehost: window content changed after the click"]
+                          : [log containsString:@"Hello from x86"]);
   printf("%s, exit %d\n", FinishedMarker.UTF8String, ok ? 0 : 1);
 
-  self.summary = ok ? @"OK: the x86 program ran in Wine from the AOT image, without a JIT.\n\n"
+  self.summary = ok && window ? @"OK: the x86 program drew its window and took a tap in Wine from the AOT image, without a JIT.\n\n"
+                 : ok ? @"OK: the x86 program ran in Wine from the AOT image, without a JIT.\n\n"
                     : [NSString stringWithFormat:@"FAILED (winehost %d)\n\n", status];
   NSData* data = [[self.summary stringByAppendingString:ReadLog()] dataUsingEncoding:NSUTF8StringEncoding];
   write(console, data.bytes, data.length);

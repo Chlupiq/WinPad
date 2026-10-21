@@ -18,7 +18,9 @@
 // came up. Whatever Wine does in the meantime goes to stderr.
 // Built with -DWINEHOST_LIBRARY it has no main: an app calls winehost_main
 // (tests/wine-app), and with WINEHOST_RETURN=1 that returns at the end
-// instead of ending the process.
+// instead of ending the process. An app shows the program's window through
+// winehost_frame_hook. WINEHOST_WAIT_EXIT=1 waits for the Wine process to
+// exit even after everything the run checks has shown up.
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach.h>
@@ -73,6 +75,10 @@ void fatal_error(const char* err, ...) {
 // over the content of a window whenever GDI flushes it; the app uploads it
 // into a layer. Here the newest frame of each window goes to a BMP file.
 static const char* frames_dir;
+// An app sets this to show the program's window: it gets every frame of the
+// first window with a menu bar (the one scripted input goes to), as a 32bpp
+// top-down BGRX bitmap, on a Wine thread.
+void (*winehost_frame_hook)(void* hwnd, int width, int height, int stride, const void* bits);
 
 static double now(void) {
   struct timespec ts;
@@ -119,6 +125,8 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
   static int presents, after_input;
   long dark = 0;
   met(GOAL_FRAME);
+  if (winehost_frame_hook && hwnd && hwnd == first_window && surf_w > 0 && surf_h > 0)
+    winehost_frame_hook(hwnd, surf_w, surf_h, stride, bits);
   for (int y = 0; y < surf_h; y++) {
     const unsigned char* row = (const unsigned char*)bits + (size_t)y * stride;
     for (int x = 0; x < surf_w; x++)
@@ -565,11 +573,12 @@ int winehost_main(int argc, char* argv[]) {
   if ((env = getenv("WINEHOST_TYPE")) && *env) goals_needed |= GOAL_TYPED;
   if ((env = getenv("WINEHOST_CLICK_MENU")) && !strcmp(env, "1")) goals_needed |= GOAL_NEW_WINDOW;
   if ((env = getenv("WINEHOST_CLICK")) && *env) goals_needed |= GOAL_CHANGED;
+  const int wait_exit = (env = getenv("WINEHOST_WAIT_EXIT")) && !strcmp(env, "1");
   double begin = now(), done_at = 0;
   while (now() - begin < seconds) {
     usleep(100000);
     int met_all = (__atomic_load_n(&goals_met, __ATOMIC_ACQUIRE) & goals_needed) == goals_needed;
-    if (__atomic_load_n(&wine_exited, __ATOMIC_ACQUIRE) || (goals_needed && met_all)) {
+    if (__atomic_load_n(&wine_exited, __ATOMIC_ACQUIRE) || (goals_needed && met_all && !wait_exit)) {
       if (!done_at) done_at = now();
       if (now() - done_at >= 2) {
         printf("winehost: done after %.0f s, exiting\n", now() - begin);
