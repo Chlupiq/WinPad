@@ -105,15 +105,12 @@ static id counting_next_drawable(id self, SEL sel) {
     fprintf(stderr, "winehost: drawable %ld of Metal layer %p: %lux%lu, pixel format %lu, device %s\n",
             n, (__bridge void*)self, (unsigned long)t.width, (unsigned long)t.height,
             (unsigned long)t.pixelFormat, [[((CAMetalLayer*)self).device name] UTF8String]);
-    [drawable addPresentedHandler:^(id<MTLDrawable> d) {
-      fprintf(stderr, "winehost: drawable %ld presented at %.3f\n", n, d.presentedTime);
-    }];
   }
   return drawable;
 }
 
-// The first command buffers committed and how each one ends, to tell GPU
-// work that never completes from presents that never come back.
+// The first command buffers committed and how each one ends. (The
+// simulator SDK has no presented handlers for drawables.)
 static void (*commit_buffer)(id, SEL);
 static long commits;
 
