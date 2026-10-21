@@ -13,7 +13,7 @@ Kódová mapa není deterministická: běh s `FEX_NOJIT=1` občas narazí na blo
 - Každý interpretovaný blok se poprvé zaloguje jako `[interp] learned block X` (prvních 64) a zapíše do kódové mapy, pokud se nějaká píše. Další `process-all` ho tak přidá do obrazu. Při `NtTerminateProcess` běh zaloguje `[interp] fallback ran N blocks (M distinct)`.
 - `FEX_INTERP_SURVEY=1` (v CI `WINEHOST_FEX_INTERP_SURVEY`) v offline kompilátoru spočítá, kolik bloků kódové mapy by interpret zvládl a které operace chybějí ostatním (`[interp-survey] ...`).
 
-Okenní program v CI s NoJIT narazí na bloky, které žádný běh s JITem nevzal (v kernelbase, user32 kolem x87), a interpret je spustí. CI také z kódové mapy hello.exe vyhodí každý čtvrtý blok (`codemap.py drop --every 4`), postaví z ní cache a obraz a spustí hello.exe s NoJIT. Běh musí vypsat `Hello from x86`, skončit s 0, zalogovat interpretované bloky a zapsat je do nové kódové mapy.
+Okenní program v CI s NoJIT narazí na bloky, které žádný běh s JITem nevzal (v kernelbase, user32 kolem x87, a od nich bloky začínající uvnitř kódu, který obraz přeložil jako část delšího bloku), a interpret je spustí. `tests/wine-loader/converge-nojit.sh` jejich kódové mapy přidá do cache, ze kterých se obraz staví, offline kompilátor je přeloží, obraz se slinkuje znovu a program běží znovu, dokud poslední běh nevezme všechno z obrazu (nejvýš 4 kola). CI také z kódové mapy hello.exe vyhodí každý čtvrtý blok (`codemap.py drop --every 4`), postaví z ní cache a obraz a spustí hello.exe s NoJIT. Běh musí vypsat `Hello from x86`, skončit s 0, zalogovat interpretované bloky a zapsat je do nové kódové mapy.
 
 ## Co zbývá
 
@@ -21,5 +21,5 @@ Okenní program v CI s NoJIT narazí na bloky, které žádný běh s JITem nevz
 2. Výpadky paměti uvnitř interpretu. Přístup hosta na neplatnou adresu teď spadne v C++ kódu interpretu a obsluha výjimek WoW64 ho nepozná jako kód FEXu. Je potřeba buď ověřovat přístupy, nebo PC interpretu přeložit na adresu hosta a doručit SEH jako z JITu.
 3. Cache IR. Blok se teď dekóduje při každé návštěvě znovu, takže smyčka v chybějícím bloku je pomalá. Stačí mapa adresa → kopie IR, zneplatňovaná spolu s lookup cache (SMC a uvolnění kódu).
 4. Vlákna a SMC. Interpretované bloky se neregistrují pro detekci samomodifikujícího kódu. S cache IR je to nutné.
-5. Zpětná vazba do buildu. Naučené bloky jsou v `codemap/new`, ale aplikace je do obrazu dostane až při dalším buildu. Je potřeba je z iPadu sbírat (např. s logem) a přidat do kódové mapy, ze které se obraz staví.
+5. Zpětná vazba z iPadu. V CI se naučené bloky vracejí do buildu (`converge-nojit.sh`), aplikace na iPadu je ale zapíše jen do svého `codemap/new`. Je potřeba je odtud sbírat (např. s logem) a přidat do kódové mapy, ze které se obraz staví.
 6. Single-step (příznak TF) bez JITu: `CompileSingleStep` pořád překládá.
