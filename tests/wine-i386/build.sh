@@ -5,20 +5,34 @@
 # make of each module's i386-windows target. The PE side needs no MinGW: Wine
 # compiles it with LLVM clang for i686-windows and links it with lld.
 # Also builds tests/wine-i386/hello.c, a 32-bit console program that only
-# imports kernel32, and tests/wine-i386/window.c, one with a window (user32,
-# gdi32).
+# imports kernel32, tests/wine-i386/window.c, one with a window (user32,
+# gdi32), tests/wine-i386/imports.c, which imports what a game imports, and
+# tests/wine-i386/guard.c, stack growth and guard pages.
 #
 # Usage: build.sh WORK_DIR [MODULE...]
-# (default: ntdll kernelbase kernel32 and what a program with a window needs)
+# (default: ntdll kernelbase kernel32, what a program with a window needs and
+# the import closure of tests/wine-i386/imports.c)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
-# Output: WORK_DIR/i386-windows/*.dll, hello.exe and window.exe.
+# Output: WORK_DIR/i386-windows/*.dll, hello.exe, guard.exe, cwd.exe, window.exe, imports.exe and
+# casetest.dll (imports.exe's own DLL).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 work=$1
 shift
-[ $# -gt 0 ] || set -- ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32
+# The default set is what a program with a window needs, then what the DLLs a
+# game imports (DirectInput, DirectSound, DirectDraw, winmm, Winsock, TAPI,
+# netapi32, shell32 and shfolder) import in turn: their whole import closure,
+# or the loader stops at the first missing one (c0000135). d3d9 is not here.
+# mmdevapi is no import but the COM class dsound creates for its device;
+# cryptbase and cryptsp are where advapi32 forwards its SystemFunction* exports
+# (RtlGenRandom, which mmdevapi reaches; an unresolved forward aborts the call).
+[ $# -gt 0 ] || set -- ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32 \
+    dinput8 dinput dsound ddraw winmm ws2_32 tapi32 netapi32 shfolder shell32 \
+    comctl32 ole32 combase coml2 oleaut32 rpcrt4 hid setupapi cfgmgr32 wined3d opengl32 \
+    msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi \
+    cryptbase cryptsp
 wine="$work/madeira/wine"
 b="$wine/build-i386"
 out="$work/i386-windows"
@@ -74,6 +88,15 @@ kernel32=$(implib kernel32)
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console \
     "$here/hello.c" "$kernel32" -o "$out/hello.exe" -fuse-ld=lld
+# Stack growth and guard pages (kernel32 only); the image asks for an 8 MB
+# stack, as a game's does.
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console -Wl,-stack:8388608 \
+    "$here/guard.c" "$kernel32" -o "$out/guard.exe" -fuse-ld=lld
+# A file read by a relative path, as a game reads its data.
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console \
+    "$here/cwd.c" "$kernel32" -o "$out/cwd.exe" -fuse-ld=lld
 # The program with a window, if this build has its modules.
 if [ -f "$out/user32.dll" ] && [ -f "$out/gdi32.dll" ]; then
     user32=$(implib user32)
@@ -81,6 +104,44 @@ if [ -f "$out/user32.dll" ] && [ -f "$out/gdi32.dll" ]; then
     clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
         -Wl,-entry:start -Wl,-subsystem:windows \
         "$here/window.c" "$kernel32" "$user32" "$gdi32" -o "$out/window.exe" -fuse-ld=lld
+fi
+# The program with a game's imports, if this build has their DLLs.
+game_dlls="user32 advapi32 gdi32 winmm dinput8 ddraw ws2_32 shfolder shell32 tapi32 netapi32"
+have=1
+for m in $game_dlls dsound; do [ -f "$out/$m.dll" ] || have=; done
+if [ -n "$have" ]; then
+    libs=
+    for m in $game_dlls; do libs="$libs $(implib "$m")"; done
+    # Games import DirectSoundCreate by its ordinal, 1, not by name; Wine's
+    # import library has it by name, so this one is made here.
+    printf 'LIBRARY DSOUND.dll\nEXPORTS\nDirectSoundCreate@12 @1 NONAME\n' >"$work/dsound-ordinal.def"
+    llvm-dlltool -m i386 -d "$work/dsound-ordinal.def" -l "$work/libdsound-ordinal.a"
+    libs="$libs $work/libdsound-ordinal.a"
+    # The program's own DLL, next to it (no entry point, no imports).
+    clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding -shared \
+        -Wl,-noentry -Wl,-implib:"$work/libcasetest.a" \
+        "$here/casetest.c" -o "$out/casetest.dll" -fuse-ld=lld
+    libs="$libs $work/libcasetest.a"
+    # kernel32 last: its import library has winmm's time* functions too,
+    # and they have to come from winmm, as in the game.
+    # shellcheck disable=SC2086 # a list of import libraries
+    clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+        -Wl,-entry:start -Wl,-subsystem:console \
+        "$here/imports.c" $libs "$kernel32" -o "$out/imports.exe" -fuse-ld=lld
+    # A game names some DLLs in capitals (USER32.dll, DINPUT8.dll) and the files
+    # are lowercase, so the loader has to find them without regard to case. The
+    # import table names are rewritten in place, same length.
+    python3 -I - "$out/imports.exe" <<'PY'
+import sys
+path = sys.argv[1]
+data = open(path, "rb").read()
+for name in (b"user32.dll", b"advapi32.dll", b"gdi32.dll", b"dinput8.dll", b"casetest.dll"):
+    old, new = b"\0" + name + b"\0", b"\0" + name[:-4].upper() + b".dll\0"
+    if data.count(old) != 1:
+        sys.exit(f"imports.exe: {name.decode()} is in it {data.count(old)} times, not once")
+    data = data.replace(old, new)
+open(path, "wb").write(data)
+PY
 fi
 ls -l "$out"
 for exe in "$out"/*.exe; do

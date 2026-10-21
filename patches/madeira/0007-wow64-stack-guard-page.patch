@@ -1,0 +1,119 @@
+From: WinPad
+Subject: [PATCH] ntdll: Know a WoW64 thread's 32-bit stack by its host addresses on iOS.
+
+The WOW_TEB of a WoW64 thread holds its 32-bit stack in guest addresses
+(thread_ios.c stores ios_wow_guest_addr() of the stack it allocated in
+the guest window at B); a fault address is a host address, B + guest.
+is_inside_thread_stack compared the two as they are, and its Mach
+exception-thread twin is_inside_thread_stack_teb did not look at the
+32-bit stack at all, so no access to a 32-bit stack was ever inside it.
+A fault on that stack's guard page was taken for an ordinary PAGE_GUARD
+page: the guard flag went, STATUS_GUARD_PAGE_VIOLATION was raised to the
+program instead of STATUS_STACK_OVERFLOW, and the next access below hit
+the uncommitted page under the guard page, an access violation on the
+lowest page of the stack. Both now add B (the window of the TEB's own
+process) to the 32-bit stack, and growing that stack stores StackLimit
+back as a guest address.
+
+Applies to willfaust/Madeira at 48f9764, after 0001.
+---
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index de21e57..1192d59 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -19784,6 +19784,39 @@ struct thread_stack_info
+     BOOL   is_wow;
+ };
+ 
++#ifdef WINE_IOS
++/* WinPad: the 32-bit stack of a WoW64 thread, in host addresses.
++ *
++ * The WOW_TEB holds guest addresses (thread_ios.c stores
++ * ios_wow_guest_addr() of the stack it allocated in the guest window at
++ * B), while a fault address is a host address, B + guest. Compared as they
++ * are, no host address of a 32-bit stack is ever inside it, so a fault on
++ * its guard page was taken for an ordinary PAGE_GUARD page: the guard flag
++ * went and STATUS_GUARD_PAGE_VIOLATION was raised to the program instead of
++ * the stack growing, and the next access below hit the uncommitted page
++ * under the guard page, an access violation on the lowest page of the
++ * stack. B is the window of the thread's own process (teb->Peb), so this
++ * works on the Mach exception thread too, for another thread's TEB. */
++static BOOL ios_wow_stack_info( TEB *teb, WOW_TEB *wow_teb, void *ptr,
++                                struct thread_stack_info *stack, size_t min_guaranteed )
++{
++    ULONG_PTR base = ios_wow_base_for_peb( teb->Peb );
++
++    stack->start = (char *)base + wow_teb->DeallocationStack;
++    stack->limit = (char *)base + wow_teb->Tib.StackLimit;
++    stack->end   = (char *)base + wow_teb->Tib.StackBase;
++    stack->guaranteed = max( wow_teb->GuaranteedStackBytes, min_guaranteed );
++    stack->is_wow = TRUE;
++    return wow_teb->DeallocationStack && (char *)ptr > stack->start && (char *)ptr <= stack->end;
++}
++
++/* The StackLimit of a 32-bit stack is a guest address. */
++static void ios_wow_set_stack_limit( TEB *teb, WOW_TEB *wow_teb, char *page )
++{
++    wow_teb->Tib.StackLimit = (ULONG)((ULONG_PTR)page - ios_wow_base_for_peb( teb->Peb ));
++}
++#endif
++
+ /***********************************************************************
+  *           is_inside_thread_stack
+  */
+@@ -19801,12 +19834,16 @@ static BOOL is_inside_thread_stack( void *ptr, struct thread_stack_info *stack )
+     if ((char *)ptr > stack->start && (char *)ptr <= stack->end) return TRUE;
+ 
+     if (!wow_teb) return FALSE;
++#ifdef WINE_IOS
++    return ios_wow_stack_info( teb, wow_teb, ptr, stack, min_guaranteed );
++#else
+     stack->start = ULongToPtr( wow_teb->DeallocationStack );
+     stack->limit = ULongToPtr( wow_teb->Tib.StackLimit );
+     stack->end   = ULongToPtr( wow_teb->Tib.StackBase );
+     stack->guaranteed = max( wow_teb->GuaranteedStackBytes, min_guaranteed );
+     stack->is_wow = TRUE;
+     return ((char *)ptr > stack->start && (char *)ptr <= stack->end);
++#endif
+ }
+ 
+ 
+@@ -19834,7 +19871,11 @@ static NTSTATUS grow_thread_stack( char *page, struct thread_stack_info *stack_i
+     if (stack_info->is_wow)
+     {
+         WOW_TEB *wow_teb = get_wow_teb( NtCurrentTeb() );
++#ifdef WINE_IOS
++        ios_wow_set_stack_limit( NtCurrentTeb(), wow_teb, page );
++#else
+         wow_teb->Tib.StackLimit = PtrToUlong( page );
++#endif
+     }
+     else NtCurrentTeb()->Tib.StackLimit = page;
+     return ret;
+@@ -20184,7 +20225,15 @@ static BOOL is_inside_thread_stack_teb( void *ptr, struct thread_stack_info *sta
+     stack->end   = teb->Tib.StackBase;
+     stack->guaranteed = max( teb->GuaranteedStackBytes, min_guaranteed );
+     stack->is_wow = FALSE;
+-    return ((char *)ptr > stack->start && (char *)ptr <= stack->end);
++    if ((char *)ptr > stack->start && (char *)ptr <= stack->end) return TRUE;
++
++    /* WinPad: a WoW64 thread's guest code faults on its 32-bit stack, in
++     * the guest window; with FEX's JIT those faults come here. */
++    {
++        WOW_TEB *wow_teb = get_wow_teb( teb );
++        if (!wow_teb) return FALSE;
++        return ios_wow_stack_info( teb, wow_teb, ptr, stack, min_guaranteed );
++    }
+ }
+ 
+ static NTSTATUS grow_thread_stack_teb( char *page, struct thread_stack_info *stack_info, TEB *teb )
+@@ -20205,7 +20254,8 @@ static NTSTATUS grow_thread_stack_teb( char *page, struct thread_stack_info *sta
+         mprotect_range( page, stack_info->guaranteed, 0, 0 );
+         ret = STATUS_STACK_OVERFLOW;
+     }
+-    teb->Tib.StackLimit = page;
++    if (stack_info->is_wow) ios_wow_set_stack_limit( teb, get_wow_teb( teb ), page );
++    else teb->Tib.StackLimit = page;
+     return ret;
+ }
+ 

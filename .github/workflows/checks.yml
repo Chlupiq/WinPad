@@ -228,7 +228,7 @@ jobs:
       - name: Madeira's Wine modules wrapped into dylibs for the iPad simulator
         if: steps.wine-built.outputs.cache-hit != 'true'
         run: sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
-      - name: Wine's 32-bit x86 ntdll, kernelbase and kernel32, and a 32-bit test program
+      - name: Wine's 32-bit x86 modules (ntdll up to the DLLs a game imports) and the 32-bit test programs
         run: |
           PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
           sh tests/wine-i386/build.sh "$RUNNER_TEMP/wine-loader"
@@ -489,6 +489,54 @@ jobs:
           name: fex-cache-window
           path: ${{ runner.temp }}/fexcache-window
           if-no-files-found: ignore
+      - name: A 32-bit x86 program with a game's import table (DirectInput 8, DirectSound, DirectDraw, winmm, Winsock, TAPI, shell32) loads and calls into it, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # The loader resolves every import and the DLLs behind them (a missing one is c0000135);
+          # FEX runs the program and those 32-bit DLLs with its JIT. Its last line:
+          WINEHOST_EXPECT_OUTPUT: "imports: done"
+        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe"
+      - name: A 32-bit x86 program grows its stacks (an 8 MB main thread and an 8 MB CreateThread thread, through _chkstk, down to a stack overflow) and takes guard pages from VirtualAlloc, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # Every check prints "guard: ok" or "guard: FAIL"; the last line only when all passed.
+          WINEHOST_EXPECT_OUTPUT: "guard: all passed"
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/guard.exe" || status=$?
+          grep -E '^guard:|\[fault-rgn\]|mach-deliver|stack overflow|Unhandled' "$RUNNER_TEMP/wine-loader/host-guard/run.log" | head -120 || true
+          exit $status
+      - name: The same program in a game's folder of its own on a case-sensitive volume, as on an iPad, finds the DLLs it names in capitals (USER32.dll in syswow64, its CASETEST.dll next to it)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "imports: done"
+          # Both found by reading their directory (patches/madeira/0005), its own DLL in its folder.
+          WINEHOST_EXPECT_LOG: |
+            /syswow64/user32.dll found by reading its directory
+            /cs/game/casetest.dll found by reading its directory
+        run: |
+          # The runner's volume compares names without case, the iPad's does not.
+          cs="$RUNNER_TEMP/cs"
+          hdiutil create -quiet -size 256m -fs "Case-sensitive APFS" -volname winpad-cs -type SPARSE "$RUNNER_TEMP/cs.sparseimage"
+          hdiutil attach -quiet -nobrowse -mountpoint "$cs" "$RUNNER_TEMP/cs.sparseimage"
+          # The Wine prefix (with its syswow64) is made under the work directory, so that goes there too.
+          mkdir -p "$cs/work" "$cs/game"
+          for e in "$RUNNER_TEMP/wine-loader"/*; do
+            case "${e##*/}" in host-*) continue ;; esac
+            ln -s "$e" "$cs/work/"
+          done
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe" "$RUNNER_TEMP/wine-loader/i386-windows/casetest.dll" "$cs/game/"
+          # The program is not under i386-windows: run-host.sh knows it is 32-bit from its PE header.
+          sh tests/wine-loader/run-host.sh "$cs/work" "$cs/game/imports.exe"
+      - name: A 32-bit x86 program in a game's folder reads its data by a relative path (the current directory is the program's folder, not the Wine prefix)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "cwd: done"
+        run: |
+          game="$RUNNER_TEMP/cwd-game"
+          mkdir -p "$game/DATA"
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/cwd.exe" "$game/"
+          echo "game data found" > "$game/DATA/CWD.TXT"
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$game/cwd.exe" || status=$?
+          grep -E '^cwd:|current directory' "$RUNNER_TEMP/wine-loader/host-cwd/run.log" || true
+          exit $status
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         id: modules-iphoneos
         run: |
