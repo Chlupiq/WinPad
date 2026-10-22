@@ -466,16 +466,16 @@ jobs:
           for run in 1 2 3; do
             sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
           done
-      - name: FEX's offline compiler turns that code map into code caches (x86 program with a window)
+      - name: FEX's offline compiler turns that code map into code caches (x86 program with a window), three caches per process
         env:
-          WINEHOST_EXPECT_OUTPUT: Successfully populated cache
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window
-          WINEHOST_EXPECT_FEX_CACHE: 1
           WINEHOST_SYSWOW64: 1
           WINEHOST_JIT: 1
-          # It compiles user32, gdi32 and the rest in one process, which outgrows 512 MB of JIT pool.
           WINEHOST_JIT_POOL_MB: 2048
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+        # As tests/wine-app/game-aot.sh compiles a game's few dozen DLLs, whose code buffers
+        # outgrow any JIT pool in one process: process-all --max-caches (patches/fex-wow64/0028)
+        # in fresh processes until no cache is left.
+        run: sh tests/fex-wow64/process-all-batches.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" 3
       - name: The x86 program with a window runs again with the code caches loaded
         env:
           WINEHOST_CLICK: 50,50

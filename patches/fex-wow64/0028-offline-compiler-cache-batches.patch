@@ -1,0 +1,85 @@
+FEX's offline compiler generates at most N caches per process-all (FEX 3bec2ac, on top of 0027)
+
+process-all --max-caches N generates at most N code caches and leaves the
+rest for the next process-all, which picks up where this one stopped (a
+cache counts as up to date once it is newer than its ready code map). It
+ends with "[process-all] G caches generated (F failed), L left for the
+next process-all".
+
+The code buffers of every cache one process generates stay in its JIT
+pool. NFSU2's 48 modules in one process ran out of a 4 GB pool at
+SPEED2.EXE ("EXEC ALLOC FAILED", after opengl32 and shell32), and a
+bigger pool leaves Wine no room to map. tests/fex-wow64/process-all-batches.sh
+runs process-all in fresh processes until nothing is left.
+
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 67f7d69..b1d564a 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -49,6 +49,7 @@
+ #include <Common/Module.h>
+ #include <Common/OvercommitTracker.h>
+ #include <Common/PortabilityInfo.h>
++#include <cstdlib>
+ 
+ static std::unique_ptr<FEX::Windows::OvercommitTracker> OvercommitTracker;
+ #endif
+@@ -899,7 +900,12 @@ static void AggregateCodeMaps(const std::string& NewCodeMapDirectory, const std:
+   }
+ }
+ 
+-static int ProcessAll() {
++// WinPad: MaxCaches > 0 generates at most that many caches and leaves the rest for the next
++// process-all. Code buffers of one GenerateCache stay in the JIT pool, so a game's few dozen DLLs
++// compiled in one process run out of it; a later process-all picks up where this one stopped (a
++// cache counts as up to date once it is newer than its ready code map).
++static int ProcessAll(size_t MaxCaches) {
++  size_t Generated = 0, Left = 0, Failed = 0;
+   const auto CacheDirectory = FEX::Config::GetCacheDirectory();
+   const std::string NewCodeMapDirectory = fmt::format("{}codemap/new", CacheDirectory);
+   const std::string ReadyCodeMapDirectory = fmt::format("{}codemap/ready", CacheDirectory);
+@@ -951,6 +957,11 @@ static int ProcessAll() {
+ 
+       // TODO: Also check for matching FEX version from cache header
+ 
++      if (MaxCaches && Generated >= MaxCaches) {
++        Left++;
++        continue;
++      }
++      Generated++;
+       fmt::println("  {} cache: {}", ec ? "Generating" : "Updating outdated", BinaryName);
+ 
+       // Defer to GenerateCache
+@@ -960,10 +971,12 @@ static int ProcessAll() {
+       };
+       if (GenerateCache(GenerateArgs.size(), GenerateArgs.data()) != 0) {
+         fmt::println("ERROR: Cache generation failed for {}", BinaryName);
++        Failed++;
+       }
+     }
+   }
+ 
++  fmt::println("[process-all] {} caches generated ({} failed), {} left for the next process-all", Generated, Failed, Left);
+   return 0;
+ }
+ 
+@@ -984,12 +997,18 @@ int main(int argc, char** argv) {
+   if (argc >= 2 && argv[1] == std::string_view {"generate"}) {
+     return GenerateCache(argc - 1, Args.data());
+   } else if (argc >= 2 && argv[1] == std::string_view {"process-all"}) {
+-    return ProcessAll();
++    // WinPad: process-all --max-caches N
++    size_t MaxCaches = 0;
++    if (argc >= 4 && argv[2] == std::string_view {"--max-caches"}) {
++      MaxCaches = std::strtoull(argv[3], nullptr, 10);
++    }
++    return ProcessAll(MaxCaches);
+   } else {
+     fmt::print("Usage: {} <command>\n\n", basename(argv[0]));
+     fmt::print("Commands:\n");
+     fmt::print("  generate\tTrigger cache generation from combined code map\n");
+     fmt::print("  process-all\tProcess all new code maps and update all caches\n");
++    fmt::print("  process-all --max-caches N\tThe same, generating at most N caches\n");
+     return EXIT_FAILURE;
+   }
+ }
