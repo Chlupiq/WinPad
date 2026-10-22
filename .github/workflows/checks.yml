@@ -409,7 +409,10 @@ jobs:
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-partial-image
           # Without WINEHOST_FEX_ALL_CACHED the code map has to hold blocks: the learned ones.
           WINEHOST_FEX_CODEMAP: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+        # A block the interpreter runs again runs from its IR cache (patches/fex-wow64/0023).
+        run: |
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+          sh tests/fex-wow64/interp-cache.sh "$RUNNER_TEMP/wine-loader/host-hello/run.log"
       - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
         env:
           # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.
