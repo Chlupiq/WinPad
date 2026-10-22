@@ -74,5 +74,23 @@ dokud ji neukončíš. Ovládá se hardwarovou klávesnicí (Magic Keyboard, Blu
 nebo USB): šipky, Enter, Esc a další klávesy jdou přímo do hry. `dinput8.dll` ze složky hry (ASI Loader) má přednost
 před Wine (`WINEDLLOVERRIDES=dinput8=n,b`).
 
+### Hra bez JITu (AOT obraz z Macu)
+
+iPad s TXM (iPadOS 26 a novější) JIT kód nespustí ani pod debuggerem Xcode
+(chyba podpisu kódu, `kr=50`). Hra proto běží bez JITu z obrazu
+`Frameworks/fexaot-game.dylib`, pokud ho projekt má. Ten se staví jen na
+Macu se hrou, nikdy v CI (je to přeložený kód hry):
+
+    sh tests/wine-app/game-aot.sh WORK_DIR ~/Games/NFSU2/SPEED2.EXE \
+        FEXOfflineCompiler.exe ~/Developer/nfsu2-fexcache WinPadWine-xcode
+
+Hra třikrát proběhne v simulátoru s JITem a zapíše mapu kódu, offline
+kompilátor FEXu z ní udělá cache a ty se slinkují do `fexaot-game.dylib`
+pro simulátor i iPad. Pak stačí v Xcode dát Run; hra na iPadu poběží i bez
+debuggeru (spuštěná z plochy). Bloky, které v obrazu chybí, spustí
+interpretr FEXu a zapíše je do Soubory → WinPad Wine → `fexcache/codemap/new`.
+Tu složku zkopíruj na Mac a dej ji skriptu jako šestý argument: další obraz
+je už bude mít.
+
 Projekt vzniká v CI (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
 Nic v něm neupravuj ručně, při další verzi se přegeneruje.
