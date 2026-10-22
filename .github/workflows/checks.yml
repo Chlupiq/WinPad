@@ -475,6 +475,44 @@ jobs:
           sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
             "$RUNNER_TEMP/wine-loader/i386-windows/hook.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
             "$RUNNER_TEMP/fexcache-hook"
+      - name: The x86 program with unaligned accesses runs from an AOT image whose blocks were compiled with plain loads and stores and half barriers
+        env:
+          WINEHOST_EXPECT_OUTPUT: "unaligned: done"
+          # An iPad's CPU faults on an acquire load or release store across 16 bytes; FEX
+          # emulates the access, and since AOT code is never patched, it records the block
+          # instead (patches/fex-wow64/0030) for the offline compiler to compile in the
+          # patched form. The simulator's CPU does not fault, so the code maps get the mark
+          # from codemap.py here, and the step checks the compile and the run of its result.
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-unaligned/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          WINEHOST_EXPECT_LOG: "[aot-dispatcher] static code from the AOT image"
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-unaligned-image
+          WINEHOST_FEX_CODEMAP: 1
+          WINEHOST_FEX_ALL_CACHED: 1
+        run: |
+          cache="$RUNNER_TEMP/fexcache-unaligned"
+          program="$RUNNER_TEMP/wine-loader/i386-windows/unaligned.exe"
+          rm -rf "$cache"
+          cp -Rp "$RUNNER_TEMP/fexcache" "$cache"
+          sh tests/fex-wow64/build-aot-image.sh "$cache" "$WINEHOST_AOT_IMAGE"
+          sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" "$program" \
+            "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" "$cache"
+          ready=$(find "$cache/codemap/ready" -type f -iname 'unaligned.exe*')
+          built=$(find "$cache/cache" -type f -iname 'unaligned.exe*')
+          barriers() { python3 -c 'import sys; print(open(sys.argv[1], "rb").read().count(bytes.fromhex("bf3903d5")))' "$1"; }
+          before=$(barriers "$built")
+          mkdir -p "$cache/codemap/new"
+          python3 tests/fex-wow64/codemap.py halfbarrier "$ready" "$cache/codemap/new/halfbarrier.bin"
+          env -u WINEHOST_EXPECT_LOG -u WINEHOST_EXPECT_OUTPUT -u WINEHOST_FEX_CODEMAP -u WINEHOST_FEX_ALL_CACHED \
+            -u WINEHOST_FEX_NOJIT -u WINEHOST_AOT_IMAGE \
+            WINEHOST_FEX_CACHE="$cache" WINEHOST_EXPECT_OUTPUT="compiled with plain loads and stores and half barriers" \
+            WINEHOST_EXPECT_FEX_CACHE=1 WINEHOST_SYSWOW64=1 WINEHOST_JIT=1 WINEHOST_JIT_POOL_MB=2048 \
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+          after=$(barriers "$built")
+          echo "unaligned.exe's cache: $before load half barriers before, $after after"
+          [ "$after" -gt "$before" ]
+          sh tests/fex-wow64/build-aot-image.sh "$cache" "$WINEHOST_AOT_IMAGE"
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$program"
       - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
         env:
           # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.

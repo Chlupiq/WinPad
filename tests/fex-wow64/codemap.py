@@ -13,6 +13,12 @@ bytes left over at the end).
 N-th block entry (the N-th, 2N-th, ... of each file), keeping the image
 records. A cache built from it misses those blocks, which is how CI makes a
 NoJIT run meet code that is not in its AOT image.
+
+       codemap.py halfbarrier IN OUT   Writes IN with every block entry
+marked as one that took unaligned atomic faults in a read-only AOT image
+(CodeMap::HalfBarrierTSOBlock, patches/fex-wow64/0030), as such a run
+records it. The offline compiler compiles those blocks with plain loads and
+stores and half barriers, which CI checks without a CPU that faults.
 """
 import struct
 import sys
@@ -75,7 +81,37 @@ def drop(every, paths):
     return 0 if dropped_all else 1
 
 
+HALF_BARRIER = 0x80000000
+
+
+def halfbarrier(src, dst):
+    with open(src, "rb") as f:
+        data = f.read()
+    out, pos, marked = bytearray(), 0, 0
+    while pos + ENTRY.size <= len(data):
+        entry = ENTRY.unpack_from(data, pos)
+        if entry == LIBRARY:
+            end = data.index(b"\0", pos + ENTRY.size + 8)
+            nxt = (end + 1 + 3) & ~3
+        elif entry == SET_MAIN:
+            nxt = pos + ENTRY.size + 8
+        else:
+            out += ENTRY.pack(entry[0], entry[1] | HALF_BARRIER)
+            marked += 1
+            pos += ENTRY.size
+            continue
+        out += data[pos:nxt]
+        pos = nxt
+    out += data[pos:]
+    with open(dst, "wb") as f:
+        f.write(out)
+    print(f"{dst}: {marked} blocks marked for a half-barrier compile")
+    return 0 if marked else 1
+
+
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "halfbarrier":
+        return halfbarrier(sys.argv[2], sys.argv[3])
     if len(sys.argv) >= 4 and sys.argv[1] == "drop" and sys.argv[2] == "--every":
         return drop(int(sys.argv[3]), sys.argv[4:])
     total = 0
