@@ -21,10 +21,19 @@ __declspec(dllimport) __declspec(noreturn) void __stdcall ExitProcess(unsigned);
 
 static HANDLE out;
 
+/* A line goes out in one write at its newline, so that Wine's own messages,
+ * which share the log, cannot land in the middle of it. */
+static char line[128];
+static DWORD used;
 static void put(const char* s) {
-  DWORD n = 0, w;
-  while (s[n]) n++;
-  WriteFile(out, s, n, &w, 0);
+  DWORD w;
+  for (; *s; s++) {
+    if (used < sizeof(line)) line[used++] = *s;
+    if (*s == '\n') {
+      WriteFile(out, line, used, &w, 0);
+      used = 0;
+    }
+  }
 }
 static void hex(u32 v) {
   char b[9];
