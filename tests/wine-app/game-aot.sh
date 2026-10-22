@@ -24,9 +24,13 @@
 # OFFLINE_COMPILER: FEXOfflineCompiler.exe (tests/fex-wow64/build.sh).
 # CACHE_DIR: the game's FEX cache directory, kept from one image to the next.
 # XCODE_PROJECT: the WinPadWine-xcode directory build-xcode.sh wrote.
-# Environment: RUNS, SECONDS_PER_RUN (default 60), GAME_AOT_JIT_POOL_MB: the
-# offline compiler's JIT pool (default 4096; a game with dozens of DLLs
-# compiled in one process runs out of 2048).
+# Environment: RUNS (default 3; 0 makes no JIT runs and builds the image from
+# the code maps and caches CACHE_DIR has), SECONDS_PER_RUN (default 60),
+# GAME_AOT_CACHES_PER_RUN: caches the offline compiler generates in one process
+# (default 8, tests/fex-wow64/process-all-batches.sh), GAME_AOT_JIT_POOL_MB:
+# its JIT pool (default 4096), GAME_AOT_COMPILE_SECONDS: how long one such
+# process may take (default 600), REBUILD_CACHES=1: generate every cache again
+# (after a change to FEX's code generation).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -48,6 +52,10 @@ export WINEHOST_FEX_CACHE="$cache_dir" WINEHOST_SECONDS="${SECONDS_PER_RUN:-60}"
 # Whatever the game does in the simulator, the code map is what counts.
 export WINEHOST_EXPECT_OUTPUT='winehost: starting' WINEHOST_EXPECT_EXIT=running
 mkdir -p "$cache_dir/codemap/new"
+if [ "${REBUILD_CACHES:-}" = 1 ]; then
+    rm -rf "$cache_dir/cache"
+    echo "=== generating every code cache again"
+fi
 
 if [ -n "$new_maps" ]; then
     set -- $(find "$new_maps" -type f -name '*.bin' -size +0)
@@ -72,10 +80,10 @@ python3 "$loader/../fex-wow64/codemap-name-main.py" "\\??\\Z:$(printf '%s' "$gam
 
 compile() {
     echo "=== compiling the code maps into code caches"
-    env -u WINEHOST_EXPECT_EXIT -u WINEHOST_DLLOVERRIDES -u WINEHOST_SECONDS \
-        WINEHOST_EXPECT_OUTPUT="Successfully populated cache" WINEHOST_EXPECT_FEX_CACHE=1 \
+    env -u WINEHOST_EXPECT_EXIT -u WINEHOST_DLLOVERRIDES -u WINEHOST_EXPECT_OUTPUT \
+        WINEHOST_SECONDS="${GAME_AOT_COMPILE_SECONDS:-600}" \
         WINEHOST_SYSWOW64=1 WINEHOST_JIT=1 WINEHOST_JIT_POOL_MB="${GAME_AOT_JIT_POOL_MB:-4096}" \
-        sh "$loader/run-host.sh" "$work" "$compiler" process-all
+        sh "$loader/../fex-wow64/process-all-batches.sh" "$work" "$compiler" "${GAME_AOT_CACHES_PER_RUN:-8}"
 }
 compile
 echo "=== a run with the code caches loaded, dumping FEX's dispatcher"

@@ -133,7 +133,7 @@ SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-ip
     SIMCTL_CHILD_WINEHOST_VA_HOLES="${WINEHOST_VA_HOLES:-}" \
     env ${WINEHOST_DLLOVERRIDES:+SIMCTL_CHILD_WINEDLLOVERRIDES=$WINEHOST_DLLOVERRIDES} \
     ${WINEHOST_WOW_MIN_FREE_GB:+SIMCTL_CHILD_MADEIRA_WOW_MIN_FREE_GB=$WINEHOST_WOW_MIN_FREE_GB} \
-    perl -e 'alarm shift; exec @ARGV' 120 \
+    perl -e 'alarm shift; exec @ARGV' $((seconds + 90)) \
     xcrun simctl spawn "$udid" "$out/winehost" $seconds "$@" >"$out/run.log" 2>&1 &
 spawn=$!
 # A simulator process is a Mac process: shortly before the host gives up,

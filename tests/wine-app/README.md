@@ -92,5 +92,11 @@ interpretr FEXu a zapíše je do Soubory → WinPad Wine → `fexcache/codemap/n
 Tu složku zkopíruj na Mac a dej ji skriptu jako šestý argument: další obraz
 je už bude mít.
 
+Kompilátor dělá nejvýš 8 cache v jednom procesu (`GAME_AOT_CACHES_PER_RUN`)
+a spouští se znovu, dokud nějaká chybí, protože 48 modulů hry by se do JIT
+poolu jednoho procesu nevešlo. `RUNS=0` hru s JITem nespouští a obraz postaví
+z map a cache, které už v adresáři jsou. `REBUILD_CACHES=1` vygeneruje všechny
+cache znovu, což je potřeba po změně v generování kódu FEXu.
+
 Projekt vzniká v CI (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
 Nic v něm neupravuj ručně, při další verzi se přegeneruje.
