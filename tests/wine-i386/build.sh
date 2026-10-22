@@ -14,7 +14,7 @@
 # the import closure of tests/wine-i386/imports.c)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
-# Output: WORK_DIR/i386-windows/*.dll, hello.exe, guard.exe, cwd.exe, window.exe, imports.exe and
+# Output: WORK_DIR/i386-windows/*.dll, hello.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
 # casetest.dll (imports.exe's own DLL).
 set -eu
 
@@ -93,6 +93,11 @@ clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console -Wl,-stack:8388608 \
     "$here/guard.c" "$kernel32" -o "$out/guard.exe" -fuse-ld=lld
+# SIMD instructions whose results FEX's NoJIT interpreter has to match its
+# JIT on (inline assembly; kernel32 only).
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console \
+    "$here/simd.c" "$kernel32" -o "$out/simd.exe" -fuse-ld=lld
 # A file read by a relative path, as a game reads its data.
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console \

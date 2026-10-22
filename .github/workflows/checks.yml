@@ -408,6 +408,24 @@ jobs:
           # Without WINEHOST_FEX_ALL_CACHED the code map has to hold blocks: the learned ones.
           WINEHOST_FEX_CODEMAP: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+      - name: MMX and SSE instructions give the same results in FEX's NoJIT interpreter as with its JIT, in Wine on an iPad simulator
+        env:
+          WINEHOST_EXPECT_OUTPUT: "simd: done"
+        # simd.exe prints a hash of each instruction's results. It runs with the JIT,
+        # then with NoJIT from hello.exe's image, which has none of its blocks, so the
+        # interpreter runs every one (patches/fex-wow64/0019, 0026). The lines have to match.
+        run: |
+          simd="$RUNNER_TEMP/wine-loader/i386-windows/simd.exe"
+          log="$RUNNER_TEMP/wine-loader/host-simd/run.log"
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$simd"
+          grep '^simd: ' "$log" >"$RUNNER_TEMP/simd-jit.txt"
+          WINEHOST_AOT_IMAGE="$RUNNER_TEMP/fexaot/fexaot.dylib" WINEHOST_FEX_NOJIT=1 \
+            WINEHOST_FEX_CACHE="$RUNNER_TEMP/fexcache-simd" WINEHOST_FEX_CODEMAP=1 \
+            WINEHOST_EXPECT_LOG='[interp] fallback ran' \
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$simd"
+          grep '^simd: ' "$log" >"$RUNNER_TEMP/simd-nojit.txt"
+          diff "$RUNNER_TEMP/simd-jit.txt" "$RUNNER_TEMP/simd-nojit.txt"
+          echo "$(grep -c . "$RUNNER_TEMP/simd-jit.txt") lines match"
       - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
         env:
           # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.
