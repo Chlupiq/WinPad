@@ -1,0 +1,420 @@
+The NoJIT interpreter runs MMX and SSE shifts by a register, packs and conversions (FEX 3bec2ac, on top of 0024)
+
+NFSU2 stopped in the simulator before its window: its CRT checks the
+FPU and SSE exception masks with a block FEX's interpreter could not run
+("[interp] guest block 0x75eb50 needs IR op VUShrSWide"). The
+interpreter lacked the IR of 29 instructions a game of that time uses:
+
+- VUShlSWide, VUShrSWide, VSShrSWide: psllw/psrlw/psraw and their d/q
+  forms by an MMX or XMM register (the shift is its low 64 bits);
+- VSQXTN, VSQXTN2, VSQXTNPair, VSQXTUN, VSQXTUN2, VSQXTUNPair: packsswb,
+  packssdw, packuswb, packusdw, pmaddubsw;
+- VUShrNI, VUShrNI2: pmulhrsw, and the cvt*2dq range checks;
+- VSSHLL, VSSHLL2, VUABDL, VUABDL2: psadbw, mpsadbw;
+- VSRSHR, VSQSHL: psignb/w/d;
+- VFAddP, VFAddV: haddps/haddpd, dpps/dppd;
+- VFRecpPrecision, VFRSqrtPrecision, VFCopySign: 3DNow! reciprocals;
+- VFCVTL2, VFCVTN2, Vector_FToI, Vector_FToISized, Vector_F64ToI32,
+  VSToFVectorInsert, VFToIScalarInsert: roundps/pd/ss/sd, cvtps2dq,
+  cvtpd2dq, cvtpd2pi, cvtpi2ps, cvtss2si and the like.
+
+Each follows the arm64 JIT's code for a host without SVE, as the rest of
+the interpreter does: narrowing ops take the 128-bit source and write the
+low 64 bits, Vector_F64ToI32 rounds, narrows to a float and truncates as
+fcvtn + fcvtzs do, frint32x/frint32z give the most negative integer for
+NaN and out of range values, and the reciprocals are exact (no
+FEAT_RPRES on Apple M1/M2).
+
+diff --git a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
+index c2c6232..076bbfd 100644
+--- a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
++++ b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
+@@ -32,6 +32,7 @@
+ #include <FEXCore/IR/IR.h>
+ #include <FEXCore/Utils/LogManager.h>
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <bit>
+ #include <cmath>
+@@ -178,6 +179,42 @@ inline I SatCvt(F f) {
+   return static_cast<I>(f);
+ }
+ 
++// arm64 frintn/frintm/frintp/frintz/frinti: round to an integral value, kept as a float.
++template<typename F>
++inline F RoundTo(F f, RoundMode Mode) {
++  switch (Mode) {
++  case RoundMode::Nearest: return __builtin_roundeven(f);
++  case RoundMode::NegInfinity: return std::floor(f);
++  case RoundMode::PosInfinity: return std::ceil(f);
++  case RoundMode::TowardsZero: return std::trunc(f);
++  case RoundMode::Host: return std::nearbyint(f);
++  }
++  return f;
++}
++
++// arm64 sqxtn (OP_VSQXTN), sqxtun (OP_VSQXTUN) and shrn (OP_VUSHRNI): the wide elements of the
++// first InBytes bytes of A narrowed to ES bytes each, into InBytes / 2 bytes at Out.
++inline void Narrow(IROps Op, const Val& A, unsigned ES, unsigned InBytes, unsigned Shift, uint8_t* Out) {
++  const unsigned WS = ES * 2;
++  const unsigned Bits = ES * 8;
++  const int64_t SMax = static_cast<int64_t>((1ULL << (Bits - 1)) - 1);
++  const int64_t SMin = -SMax - 1;
++  const int64_t UMax = static_cast<int64_t>(Bits == 32 ? 0xffffffffULL : (1ULL << Bits) - 1);
++  for (unsigned i = 0; i < InBytes / WS; ++i) {
++    uint64_t w = 0;
++    memcpy(&w, A.B + i * WS, WS);
++    uint64_t r;
++    if (Op == OP_VUSHRNI) {
++      r = Shift >= 64 ? 0 : w >> Shift;
++    } else {
++      const unsigned Ext = 64 - WS * 8;
++      const int64_t s = static_cast<int64_t>(w << Ext) >> Ext;
++      r = static_cast<uint64_t>(Op == OP_VSQXTN ? std::clamp(s, SMin, SMax) : std::clamp<int64_t>(s, 0, UMax));
++    }
++    memcpy(Out + i * ES, &r, ES);
++  }
++}
++
+ #define FOR_ES(ES, BODY)                          \
+   switch (ES) {                                   \
+   case 1: {                                       \
+@@ -544,7 +581,36 @@ bool IsSupported(IROps Op) {
+   case OP_VECTOR_STOF:
+   case OP_VECTOR_FTOS:
+   case OP_VECTOR_FTOZS:
+-  case OP_VECTOR_FTOF: return true;
++  case OP_VECTOR_FTOF:
++  case OP_VUSHLSWIDE:
++  case OP_VUSHRSWIDE:
++  case OP_VSSHRSWIDE:
++  case OP_VSQXTN:
++  case OP_VSQXTN2:
++  case OP_VSQXTNPAIR:
++  case OP_VSQXTUN:
++  case OP_VSQXTUN2:
++  case OP_VSQXTUNPAIR:
++  case OP_VUSHRNI:
++  case OP_VUSHRNI2:
++  case OP_VSSHLL:
++  case OP_VSSHLL2:
++  case OP_VUABDL:
++  case OP_VUABDL2:
++  case OP_VSRSHR:
++  case OP_VSQSHL:
++  case OP_VFADDP:
++  case OP_VFADDV:
++  case OP_VFRECPPRECISION:
++  case OP_VFRSQRTPRECISION:
++  case OP_VFCOPYSIGN:
++  case OP_VFCVTL2:
++  case OP_VFCVTN2:
++  case OP_VECTOR_FTOI:
++  case OP_VECTOR_FTOISIZED:
++  case OP_VECTOR_F64TOI32:
++  case OP_VSTOFVECTORINSERT:
++  case OP_VFTOISCALARINSERT: return true;
+   default: return false;
+   }
+ }
+@@ -2415,7 +2481,13 @@ uintptr_t Interpreter::Run() {
+       }
+       case OP_VUSHLS:
+       case OP_VUSHRS:
+-      case OP_VSSHRS: {
++      case OP_VSSHRS:
++      case OP_VUSHLSWIDE:
++      case OP_VUSHRSWIDE:
++      case OP_VSSHRSWIDE: {
++        // All share {Vector, ShiftScalar}. The shift is the low 64 bits of ShiftScalar, as x86's
++        // psllw/psrlw/psraw xmm, xmm take it (the Wide forms); a shift past the element size
++        // gives zero, or the sign for an arithmetic one.
+         auto Op = IROp->C<IROp_VUShlS>();
+         const Val& A = VV(Op->Vector);
+         const uint64_t Sh = GetEl<uint64_t>(VV(Op->ShiftScalar), 0);
+@@ -2426,9 +2498,9 @@ uintptr_t Interpreter::Run() {
+           for (unsigned i = 0; i < SZ / ES; ++i) {
+             const T a = GetEl<T>(A, i);
+             T r;
+-            if (IROp->Op == OP_VUSHLS) {
++            if (IROp->Op == OP_VUSHLS || IROp->Op == OP_VUSHLSWIDE) {
+               r = Sh >= Bits ? T {0} : static_cast<T>(a << Sh);
+-            } else if (IROp->Op == OP_VUSHRS) {
++            } else if (IROp->Op == OP_VUSHRS || IROp->Op == OP_VUSHRSWIDE) {
+               r = Sh >= Bits ? T {0} : static_cast<T>(a >> Sh);
+             } else {
+               r = static_cast<T>(static_cast<ST>(a) >> (Sh >= Bits ? Bits - 1 : Sh));
+@@ -2439,6 +2511,272 @@ uintptr_t Interpreter::Run() {
+         SetV(Id, V);
+         break;
+       }
++      case OP_VSQXTN:
++      case OP_VSQXTUN:
++      case OP_VUSHRNI: {
++        // ElementSize is the narrowed size. Like arm64 sqxtn/sqxtun/shrn (xtn for a shift of 0):
++        // the 128-bit source's wide elements narrow into the low 64 bits; the rest is zero.
++        const Val& A = VV(IROp->Args[0]);
++        const unsigned Shift = IROp->Op == OP_VUSHRNI ? IROp->C<IROp_VUShrNI>()->BitShift : 0;
++        Val V {};
++        Narrow(IROp->Op, A, ES, SZ > 16 ? SZ : 16, Shift, V.B);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSQXTN2:
++      case OP_VSQXTUN2:
++      case OP_VUSHRNI2: {
++        // The low half comes from VectorLower, the high half is VectorUpper narrowed.
++        const Val& L = VV(IROp->Args[0]);
++        const Val& U = VV(IROp->Args[1]);
++        const unsigned Shift = IROp->Op == OP_VUSHRNI2 ? IROp->C<IROp_VUShrNI2>()->BitShift : 0;
++        const IROps Base = IROp->Op == OP_VSQXTN2 ? OP_VSQXTN : IROp->Op == OP_VSQXTUN2 ? OP_VSQXTUN : OP_VUSHRNI;
++        uint8_t N[32] {};
++        Narrow(Base, U, ES, SZ > 16 ? SZ : 16, Shift, N);
++        Val V {};
++        memcpy(V.B, L.B, SZ / 2);
++        memcpy(V.B + SZ / 2, N, SZ / 2);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSQXTNPAIR:
++      case OP_VSQXTUNPAIR: {
++        // VectorLower narrowed, then VectorUpper narrowed, each SZ bytes of wide elements.
++        const Val& L = VV(IROp->Args[0]);
++        const Val& U = VV(IROp->Args[1]);
++        const IROps Base = IROp->Op == OP_VSQXTNPAIR ? OP_VSQXTN : OP_VSQXTUN;
++        Val V {};
++        Narrow(Base, L, ES, SZ, 0, V.B);
++        Narrow(Base, U, ES, SZ, 0, V.B + SZ / 2);
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSSHLL:
++      case OP_VSSHLL2: {
++        // ElementSize is the widened size: sign-extended elements of the low (or high) half,
++        // shifted left.
++        const Val& A = VV(IROp->Args[0]);
++        const unsigned Shift = IROp->Op == OP_VSSHLL ? IROp->C<IROp_VSSHLL>()->BitShift : IROp->C<IROp_VSSHLL2>()->BitShift;
++        const unsigned N = SZ / ES;
++        const unsigned HS = ES / 2;
++        const unsigned From = IROp->Op == OP_VSSHLL2 ? N * HS : 0;
++        Val V {};
++        for (unsigned i = 0; i < N; ++i) {
++          uint64_t s = 0;
++          memcpy(&s, A.B + From + i * HS, HS);
++          const unsigned Ext = 64 - HS * 8;
++          s = static_cast<uint64_t>(static_cast<int64_t>(s << Ext) >> Ext) << Shift;
++          memcpy(V.B + i * ES, &s, ES);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VUABDL:
++      case OP_VUABDL2: {
++        // ElementSize is the widened size: |a - b| of the unsigned elements of the low (or high)
++        // half.
++        const Val& A = VV(IROp->Args[0]);
++        const Val& B = VV(IROp->Args[1]);
++        const unsigned N = SZ / ES;
++        const unsigned HS = ES / 2;
++        const unsigned From = IROp->Op == OP_VUABDL2 ? N * HS : 0;
++        Val V {};
++        for (unsigned i = 0; i < N; ++i) {
++          uint64_t a = 0, b = 0;
++          memcpy(&a, A.B + From + i * HS, HS);
++          memcpy(&b, B.B + From + i * HS, HS);
++          const uint64_t r = a > b ? a - b : b - a;
++          memcpy(V.B + i * ES, &r, ES);
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSRSHR:
++      case OP_VSQSHL: {
++        // Signed rounding shift right (srshr) and signed saturating shift left (sqshl), by an
++        // immediate.
++        const Val& A = VV(IROp->Args[0]);
++        const unsigned Shift = IROp->Op == OP_VSRSHR ? IROp->C<IROp_VSRSHR>()->BitShift : IROp->C<IROp_VSQSHL>()->BitShift;
++        Val V {};
++        FOR_ES(ES, {
++          using ST = std::make_signed_t<T>;
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const __int128 a = static_cast<ST>(GetEl<T>(A, i));
++            __int128 r;
++            if (IROp->Op == OP_VSRSHR) {
++              r = Shift ? (a + (static_cast<__int128>(1) << (Shift - 1))) >> Shift : a;
++            } else {
++              r = a * (static_cast<__int128>(1) << Shift);
++              r = std::clamp<__int128>(r, std::numeric_limits<ST>::min(), std::numeric_limits<ST>::max());
++            }
++            SetEl<T>(V, i, static_cast<T>(static_cast<ST>(r)));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFADDP: {
++        // Pairwise float add over VectorLower:VectorUpper (faddp).
++        auto Op = IROp->C<IROp_VFAddP>();
++        Val C[2] = {VV(Op->VectorLower), VV(Op->VectorUpper)};
++        Val V {};
++        FOR_FES(ES, {
++          const unsigned N = SZ / ES;
++          for (unsigned i = 0; i < N; ++i) {
++            const unsigned j = 2 * i;
++            const F a = std::bit_cast<F>(GetEl<T>(C[j / N], j % N));
++            const F b = std::bit_cast<F>(GetEl<T>(C[(j + 1) / N], (j + 1) % N));
++            SetEl<T>(V, i, std::bit_cast<T>(a + b));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFADDV: {
++        // The sum of the elements in element 0, in the order of the JIT's faddp sequence:
++        // (v0 + v1) + (v2 + v3) for 32-bit elements, v0 + v1 for 64-bit ones.
++        const Val& A = VV(IROp->Args[0]);
++        Val V {};
++        if (ES == 4) {
++          const auto f = [&](unsigned i) { return std::bit_cast<float>(GetEl<uint32_t>(A, i)); };
++          SetEl<uint32_t>(V, 0, std::bit_cast<uint32_t>((f(0) + f(1)) + (f(2) + f(3))));
++        } else {
++          const auto f = [&](unsigned i) { return std::bit_cast<double>(GetEl<uint64_t>(A, i)); };
++          SetEl<uint64_t>(V, 0, std::bit_cast<uint64_t>(f(0) + f(1)));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFRECPPRECISION:
++      case OP_VFRSQRTPRECISION: {
++        // 32-bit elements, scalar (RegisterSize 4) or two of them (8). Exact, as the JIT emits on
++        // a host without FEAT_RPRES.
++        const Val& A = VV(IROp->Args[0]);
++        Val V {};
++        for (unsigned i = 0; i < SZ / 4; ++i) {
++          const float a = std::bit_cast<float>(GetEl<uint32_t>(A, i));
++          const float r = IROp->Op == OP_VFRECPPRECISION ? 1.0f / a : 1.0f / std::sqrt(a);
++          SetEl<uint32_t>(V, i, std::bit_cast<uint32_t>(r));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFCOPYSIGN: {
++        // The magnitude of Vector1 with the sign of Vector2.
++        const Val& M = VV(IROp->Args[0]);
++        const Val& Sg = VV(IROp->Args[1]);
++        Val V {};
++        FOR_ES(ES, {
++          const T SignBit = static_cast<T>(T {1} << (sizeof(T) * 8 - 1));
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            SetEl<T>(V, i, static_cast<T>((GetEl<T>(M, i) & ~SignBit) | (GetEl<T>(Sg, i) & SignBit)));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFCVTL2: {
++        // The two floats of the upper 64 bits, widened to doubles.
++        const Val& A = VV(IROp->Args[0]);
++        Val V {};
++        for (unsigned i = 0; i < 2; ++i) {
++          SetEl<uint64_t>(V, i, FToBits(static_cast<double>(std::bit_cast<float>(GetEl<uint32_t>(A, 2 + i)))));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFCVTN2: {
++        // The low 64 bits from VectorLower, then VectorUpper's two doubles narrowed to floats.
++        auto Op = IROp->C<IROp_VFCVTN2>();
++        const Val& U = VV(Op->VectorUpper);
++        Val V {};
++        memcpy(V.B, VV(Op->VectorLower).B, 8);
++        for (unsigned i = 0; i < 2; ++i) {
++          SetEl<uint32_t>(V, 2 + i, static_cast<uint32_t>(FToBits(static_cast<float>(std::bit_cast<double>(GetEl<uint64_t>(U, i))))));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VECTOR_FTOI: {
++        // Round to an integral value, kept as a float (frintn/m/p/z/i). One element if
++        // ElementSize is RegisterSize; the scalar form zeroes the rest.
++        auto Op = IROp->C<IROp_Vector_FToI>();
++        const Val& A = VV(Op->Vector);
++        Val V {};
++        FOR_FES(ES, {
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            SetEl<T>(V, i, std::bit_cast<T>(RoundTo(std::bit_cast<F>(GetEl<T>(A, i)), Op->Round)));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VECTOR_FTOISIZED: {
++        // frint32x/frint32z (frint64x/z for a 64-bit IntSize): round to an integral value that
++        // fits the integer size, with the most negative one for NaN and out of range values.
++        auto Op = IROp->C<IROp_Vector_FToISized>();
++        const Val& A = VV(Op->Vector);
++        const bool Int64 = Op->IntSize == OpSize::i64Bit;
++        Val V {};
++        FOR_FES(ES, {
++          const F Min = Int64 ? static_cast<F>(std::numeric_limits<int64_t>::min()) : static_cast<F>(std::numeric_limits<int32_t>::min());
++          for (unsigned i = 0; i < SZ / ES; ++i) {
++            const F a = std::bit_cast<F>(GetEl<T>(A, i));
++            F r = Op->HostRound ? std::nearbyint(a) : std::trunc(a);
++            // -Min is 2^31 (2^63): the first value past the top of the range.
++            if (std::isnan(r) || r < Min || r >= -Min) {
++              r = Min;
++            }
++            SetEl<T>(V, i, std::bit_cast<T>(r));
++          }
++        });
++        SetV(Id, V);
++        break;
++      }
++      case OP_VECTOR_F64TOI32: {
++        // As the JIT does it without SVE: each double rounded (frint*), narrowed to a float
++        // (fcvtn), then converted to a saturated 32-bit integer toward zero (fcvtzs), into the low
++        // 64 bits.
++        auto Op = IROp->C<IROp_Vector_F64ToI32>();
++        const Val& A = VV(Op->Vector);
++        Val V {};
++        for (unsigned i = 0; i < 2; ++i) {
++          const float f = static_cast<float>(RoundTo(std::bit_cast<double>(GetEl<uint64_t>(A, i)), Op->Round));
++          SetEl<uint32_t>(V, i, static_cast<uint32_t>(SatCvt<int32_t>(std::trunc(f))));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VSTOFVECTORINSERT: {
++        // Element 0 of Vector2 (or, with HasTwoElements, its two 32-bit elements) converted from
++        // signed integers to floats, over Vector1.
++        auto Op = IROp->C<IROp_VSToFVectorInsert>();
++        Val V = VV(Op->Vector1);
++        if (SZ < 32) {
++          memset(V.B + SZ, 0, sizeof(V.B) - SZ);
++        }
++        const Val& B = VV(Op->Vector2);
++        if (ES == 4) {
++          for (unsigned i = 0; i < (Op->HasTwoElements ? 2U : 1U); ++i) {
++            SetEl<uint32_t>(V, i, std::bit_cast<uint32_t>(static_cast<float>(static_cast<int32_t>(GetEl<uint32_t>(B, i)))));
++          }
++        } else {
++          SetEl<uint64_t>(V, 0, std::bit_cast<uint64_t>(static_cast<double>(static_cast<int64_t>(GetEl<uint64_t>(B, 0)))));
++        }
++        SetV(Id, V);
++        break;
++      }
++      case OP_VFTOISCALARINSERT: {
++        // Element 0 of Vector2 rounded to an integral value (as a float), over Vector1.
++        auto Op = IROp->C<IROp_VFToIScalarInsert>();
++        Val V = VV(Op->Vector1);
++        if (SZ < 32) {
++          memset(V.B + SZ, 0, sizeof(V.B) - SZ);
++        }
++        FOR_FES(ES, { SetEl<T>(V, 0, std::bit_cast<T>(RoundTo(std::bit_cast<F>(GetEl<T>(VV(Op->Vector2), 0)), Op->Round))); });
++        SetV(Id, V);
++        break;
++      }
+       case OP_VSXTL:
+       case OP_VSXTL2:
+       case OP_VUXTL:
