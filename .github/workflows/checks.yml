@@ -427,6 +427,31 @@ jobs:
           grep -E '^simd: ([a-z0-9-]+ [0-9a-f]{8}|done)$' "$log" >"$RUNNER_TEMP/simd-nojit.txt"
           diff "$RUNNER_TEMP/simd-jit.txt" "$RUNNER_TEMP/simd-nojit.txt"
           echo "$(grep -c . "$RUNNER_TEMP/simd-jit.txt") lines match"
+      - name: The x86 program in an image without NX_COMPAT, which turns DEP off, runs from the AOT image with NoJIT, the blocks it lacked compiled in until none is left
+        env:
+          WINEHOST_EXPECT_OUTPUT: Hello from x86
+          # The 32-bit ntdll's loader turns DEP off for such an image, and FEX then drops
+          # every compiled block; the code caches' blocks have to be registered again
+          # (patches/fex-wow64/0027), or everything after that runs in the interpreter
+          # in every round and the rounds never converge.
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-nodep/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          WINEHOST_EXPECT_LOG: |
+            [code-inval] DEP setting changed
+            [aot-cache] registering the loaded code caches again after a DEP change
+            [aot-dispatcher] static code from the AOT image
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-nodep-image
+          WINEHOST_FEX_CODEMAP: 1
+          WINEHOST_FEX_ALL_CACHED: 1
+        # It starts from hello.exe's code caches: the system DLLs' blocks are there, and
+        # the rounds add nodep.exe's own and those of ntdll's path that turns DEP off.
+        run: |
+          rm -rf "$RUNNER_TEMP/fexcache-nodep"
+          cp -Rp "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexcache-nodep"
+          sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-nodep" "$RUNNER_TEMP/fexaot-nodep/fexaot.dylib"
+          sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/nodep.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
+            "$RUNNER_TEMP/fexcache-nodep"
       - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
         env:
           # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.

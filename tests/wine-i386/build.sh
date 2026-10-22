@@ -14,7 +14,7 @@
 # the import closure of tests/wine-i386/imports.c)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
-# Output: WORK_DIR/i386-windows/*.dll, hello.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
+# Output: WORK_DIR/i386-windows/*.dll, hello.exe, nodep.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
 # casetest.dll (imports.exe's own DLL).
 set -eu
 
@@ -88,6 +88,11 @@ kernel32=$(implib kernel32)
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console \
     "$here/hello.c" "$kernel32" -o "$out/hello.exe" -fuse-ld=lld
+# The same program in an image without NX_COMPAT, as a game of that time is:
+# the 32-bit ntdll's loader then turns DEP off for the process.
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console -Wl,-nxcompat:no \
+    "$here/hello.c" "$kernel32" -o "$out/nodep.exe" -fuse-ld=lld
 # Stack growth and guard pages (kernel32 only); the image asks for an 8 MB
 # stack, as a game's does.
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \

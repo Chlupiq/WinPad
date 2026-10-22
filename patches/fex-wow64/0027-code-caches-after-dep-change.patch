@@ -1,0 +1,168 @@
+Code caches stay in use after a DEP change (FEX 3bec2ac, on top of 0026)
+
+NFSU2 ran 64 blocks of the 32-bit ntdll in FEX's NoJIT interpreter in
+every run, although each round compiled them into the AOT image. The
+game's image has no NX_COMPAT, so the 32-bit ntdll's loader turns DEP off
+for the process (NtSetInformationProcess(ProcessExecuteFlags)), Wine's
+wow64 calls BTCpuNotifyProcessExecuteFlagsChange, and the invalidation
+tracker drops every block in the guest window:
+
+  [code-inval] DEP setting changed: 0x0-0x100000000 dropped 7806 blocks
+
+That includes every block the code caches registered, and nothing
+registered them again, so whatever ran after that came from the JIT, or
+under NoJIT from the interpreter.
+
+The change drops compiled code because a block compiled with DEP on can
+hold a NoExec stub for an address that is executable now. A code cache's
+blocks were compiled offline from the image's code sections, which are
+executable whatever the DEP setting, so they are still right:
+
+- InvalidationTracker::HandleProcessExecuteFlagsChange says whether it
+  dropped anything (the setting really changed);
+- BTCpuNotifyProcessExecuteFlagsChange then has ImageTracker register
+  the blocks of every loaded code cache again (ReenableLoadedCaches,
+  "[aot-cache] registering the loaded code caches again after a DEP
+  change dropped their blocks"); EnableLoadedSection does not apply a
+  cache page's relocations twice (LoadedPages);
+- an unmapped image's cache is never registered again (its Image
+  pointer pointed into MappedImages and is cleared on unmap).
+
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index eb25e23..1ddfbb4 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -223,6 +223,17 @@ void ImageTracker::HandleImageUnmap(uint64_t Address, uint64_t Size) {
+   CTX.RemoveForceTSOInformation(Address, Size);
+ 
+   std::unique_lock Lk {ImagesLock};
++#ifdef FEX_IOS_HOST
++  {
++    // The cache's Image points into MappedImages; an unmapped image's cache is never enabled again.
++    std::scoped_lock CachesLk {LoadedCachesLock};
++    for (auto& Loaded : LoadedCaches) {
++      if (auto It = MappedImages.find(Address); It != MappedImages.end() && Loaded.Image == &It->second) {
++        Loaded.Image = nullptr;
++      }
++    }
++  }
++#endif
+   MappedImages.erase(Address);
+ }
+ 
+@@ -330,7 +341,7 @@ void ImageTracker::LoadImageCache(const MappedImageInfo& Image, std::string_view
+ void ImageTracker::EnableLoadedCaches(FEXCore::Core::InternalThreadState* Thread) {
+   std::scoped_lock Lk {LoadedCachesLock};
+   for (auto& Loaded : LoadedCaches) {
+-    if (Loaded.Enabled) {
++    if (Loaded.Enabled || !Loaded.Image) {
+       continue;
+     }
+     Loaded.Enabled = true;
+@@ -339,6 +350,17 @@ void ImageTracker::EnableLoadedCaches(FEXCore::Core::InternalThreadState* Thread
+     LogMan::Msg::EFmt("[aot-cache] enabled {} at guest {:#x}", Loaded.Image->Info.Filename, Loaded.GuestBegin);
+   }
+ }
++
++void ImageTracker::ReenableLoadedCaches(FEXCore::Core::InternalThreadState* Thread) {
++  {
++    std::scoped_lock Lk {LoadedCachesLock};
++    for (auto& Loaded : LoadedCaches) {
++      Loaded.Enabled = false;
++    }
++  }
++  LogMan::Msg::EFmt("[aot-cache] registering the loaded code caches again after a DEP change dropped their blocks");
++  EnableLoadedCaches(Thread);
++}
+ #endif
+ 
+ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
+diff --git a/Source/Windows/Common/ImageTracker.h b/Source/Windows/Common/ImageTracker.h
+index 1c6eb5f..08ec41b 100644
+--- a/Source/Windows/Common/ImageTracker.h
++++ b/Source/Windows/Common/ImageTracker.h
+@@ -53,6 +53,9 @@ public:
+   // lookup cache is per code buffer, made with the first thread), and HandleImageMap runs for ntdll
+   // and the main image before there is one, so the WoW64 module calls this once a thread exists.
+   void EnableLoadedCaches(FEXCore::Core::InternalThreadState* Thread);
++  // WinPad: registers the blocks of every loaded code cache again after an invalidation that
++  // dropped them although no guest code changed (a DEP change drops the whole window).
++  void ReenableLoadedCaches(FEXCore::Core::InternalThreadState* Thread);
+ #endif
+ 
+ private:
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 7901850..8e14dfc 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -178,14 +178,14 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
+   }
+ }
+ 
+-void InvalidationTracker::HandleProcessExecuteFlagsChange(ULONG Flags) {
++bool InvalidationTracker::HandleProcessExecuteFlagsChange(ULONG Flags) {
+   const bool DisableDEP = (Flags & MEM_EXECUTE_OPTION_ENABLE) != 0;
+ 
+   std::scoped_lock CodeLock(CTX.GetCodeInvalidationMutex());
+   std::unique_lock Lock(IntervalsLock);
+ 
+   if (DisableDEP == DEPDisabled) {
+-    return;
++    return false;
+   }
+ 
+   DEPDisabled = DisableDEP;
+@@ -249,6 +249,7 @@ void InvalidationTracker::HandleProcessExecuteFlagsChange(ULONG Flags) {
+   // Invalidate all cached code: previously-compiled blocks may contain NoExec stubs for addresses
+   // that are now executable (or reference regions whose executability just changed).
+   InvalidateIntervalInternalLocked(0, std::numeric_limits<uint64_t>::max(), "DEP setting changed");
++  return true;
+ }
+ 
+ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address) {
+diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
+index 4624a1c..4112ad1 100644
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -43,7 +43,8 @@ public:
+   InvalidationTracker(FEXCore::Context::Context& CTX, const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads);
+ #endif
+   void HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot);
+-  void HandleProcessExecuteFlagsChange(ULONG Flags);
++  // Returns true when the change dropped compiled code (the setting really changed).
++  bool HandleProcessExecuteFlagsChange(ULONG Flags);
+   void HandleImageMap(std::string_view Name, uint64_t Address);
+   struct InvalidateContainingSectionResult {
+     uint64_t SectionStart;
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 3220fdb..db03047 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -2150,12 +2150,23 @@ void BTCpuNotifyReadFile(HANDLE Handle, void* Address, SIZE_T Size, BOOL After,
+   }
+ }
+ 
+-// No address at all - Flags is a bitmask (MEM_EXECUTE_OPTION_*). Nothing to convert. Note that this
+-// Wine tree never calls it: NtSetInformationProcess(ProcessExecuteFlags) is forwarded straight
+-// through at wine/dlls/wow64/process.c:962 with no BTCpu notification.
++// No address at all - Flags is a bitmask (MEM_EXECUTE_OPTION_*). Nothing to convert. Wine's wow64
++// calls it after NtSetInformationProcess(ProcessExecuteFlags), which the 32-bit ntdll's loader
++// makes for a main image without NX_COMPAT (DEP off).
+ void BTCpuNotifyProcessExecuteFlagsChange(ULONG Flags) {
+   std::scoped_lock Lock(ThreadCreationMutex);
+-  InvalidationTracker->HandleProcessExecuteFlagsChange(Flags);
++  const bool Dropped = InvalidationTracker->HandleProcessExecuteFlagsChange(Flags);
++#ifdef FEX_IOS_HOST
++  // WinPad: the change drops every block in the guest window, the code caches' included, but no
++  // guest code changed, so their blocks are still right. Without this a program that turns DEP
++  // off at startup (an image without NX_COMPAT) runs everything after that through the JIT, or
++  // under NoJIT through the interpreter, although the AOT image has it.
++  if (Dropped) {
++    if (auto* Thread = GetTLS().ThreadState()) {
++      ImageTracker->ReenableLoadedCaches(Thread);
++    }
++  }
++#endif
+ }
+ 
+ BOOLEAN WINAPI BTCpuIsProcessorFeaturePresent(UINT Feature) {
