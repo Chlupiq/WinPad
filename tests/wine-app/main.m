@@ -24,7 +24,10 @@
 // "game" setting naming its program there (NFSU2/SPEED2.EXE by default).
 // The game starts in its own folder (winehost.c) and runs until it ends or
 // the app is stopped. Their frames show on screen through a Metal layer,
-// and a hardware keyboard's keys go to the game (HardwareKeyboard).
+// and a hardware keyboard's keys go to the game (HardwareKeyboard). Until the
+// game has a Metal layer, its first window's GDI frames show there instead
+// (a launcher, a message box), and a status line above says how long it has
+// run and how many frames it has drawn.
 // An iPad with TXM runs no JIT code even under the debugger, so the game
 // runs with NoJIT from Frameworks/fexaot-game.dylib when the project has one
 // (game-aot.sh builds it on the Mac with the game), FEX's interpreter running
@@ -39,6 +42,7 @@
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 
+#include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -107,13 +111,21 @@ static void ShowFrame(void* hwnd, int width, int height, int stride, const void*
 // 640 wide at most for the cube, as large as fits for a game.
 static UIView* metal_view;
 static BOOL metal_fill;
+// A game's picture: where its Metal layer goes (game_rect, set by the layout)
+// and whether it has one yet.
+static CGRect game_rect;
+static BOOL game_has_layer;
 
 __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALayer* layer) {
   dispatch_async(dispatch_get_main_queue(), ^{
     CGRect b = metal_view.bounds;
     CGFloat w = MIN(b.size.width - 32, metal_fill ? (b.size.height - 96) * 4 / 3 : 640), h = w * 3 / 4;
-    layer.frame = CGRectMake((b.size.width - w) / 2, 64, w, h);
+    layer.frame = metal_fill ? game_rect : CGRectMake((b.size.width - w) / 2, 64, w, h);
     [metal_view.layer addSublayer:layer];
+    if (metal_fill) {
+      game_has_layer = YES;
+      frame_view.hidden = YES;
+    }
   });
 }
 
@@ -191,6 +203,8 @@ static NSString* MakePrefix(NSString* bundle) {
 @property(nonatomic, strong) NSTimer* timer;
 @property(atomic, copy) NSString* summary;
 @property(nonatomic, copy) NSString* program;
+@property(nonatomic, strong) UILabel* status;
+@property(nonatomic, strong) NSDate* started;
 @end
 
 @implementation WineViewController
@@ -204,14 +218,22 @@ static NSString* MakePrefix(NSString* bundle) {
   self.text.textContainerInset = UIEdgeInsetsMake(48, 16, 16, 16);
   [self.view addSubview:self.text];
   self.program = ProgramName();
-  if ([self.program isEqualToString:@"window"]) {
-    // The window on top, the log below it.
+  const BOOL game = [self.program isEqualToString:@"game"];
+  if ([self.program isEqualToString:@"window"] || game) {
+    // The window on top, the log below it. (A game's picture, with a status line above.)
     frame_view = [UIImageView new];
     frame_view.contentMode = UIViewContentModeScaleAspectFit;
     frame_view.layer.magnificationFilter = kCAFilterNearest;
     frame_view.backgroundColor = UIColor.secondarySystemBackgroundColor;
     [self.view addSubview:frame_view];
     winehost_frame_hook = ShowFrame;
+  }
+  if (game) {
+    frame_view.backgroundColor = UIColor.blackColor;
+    self.status = [UILabel new];
+    self.status.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold];
+    self.status.text = @"Starting the game…";
+    [self.view addSubview:self.status];
   }
   metal_view = self.view;
   metal_fill = [self.program isEqualToString:@"game"];
@@ -243,6 +265,17 @@ static NSString* MakePrefix(NSString* bundle) {
   [super viewDidLayoutSubviews];
   if (!frame_view) return;
   CGRect b = self.view.bounds;
+  if (self.status) {
+    // The game's picture as large as fits at 4:3 above a few lines of the log.
+    const CGFloat top = self.view.safeAreaInsets.top + 8;
+    self.status.frame = CGRectMake(16, top, b.size.width - 32, 24);
+    const CGFloat w = MIN(b.size.width - 32, (b.size.height - top - 32 - 120) * 4 / 3), h = w * 3 / 4;
+    game_rect = CGRectMake((b.size.width - w) / 2, top + 32, w, h);
+    frame_view.frame = game_rect;
+    self.text.frame = CGRectMake(0, top + 32 + h, b.size.width, b.size.height - top - 32 - h);
+    self.text.textContainerInset = UIEdgeInsetsMake(8, 16, 16, 16);
+    return;
+  }
   const CGFloat top = self.view.safeAreaInsets.top + 8, h = MIN(b.size.height * 0.45, 480);
   frame_view.frame = CGRectMake(16, top, b.size.width - 32, h);
   self.text.frame = CGRectMake(0, top + h, b.size.width, b.size.height - top - h);
@@ -251,6 +284,20 @@ static NSString* MakePrefix(NSString* bundle) {
 
 - (void)showLog {
   NSString* summary = self.summary;
+  if (self.status) {
+    if (!self.started) self.started = [NSDate date];
+    // host/metal-display.m counts them; the bundle has it only when it has DXMT.
+    static long (*metal_frames)(void);
+    if (!metal_frames) metal_frames = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
+    const long seconds = (long)-[self.started timeIntervalSinceNow], frames = metal_frames ? metal_frames() : 0;
+    self.status.text = summary ? [summary stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]
+                       : [NSString stringWithFormat:@"%@ %ld:%02ld · %@", frames ? @"Running" : @"Starting", seconds / 60,
+                                                    seconds % 60,
+                                                    frames            ? [NSString stringWithFormat:@"%ld frames drawn", frames]
+                                                    : game_has_layer  ? @"Direct3D window open, no frame yet"
+                                                    : frame_view.image ? @"a window is shown"
+                                                                       : @"no window yet"];
+  }
   self.text.text = [(summary ?: @"WinPad Wine: running…\n\n") stringByAppendingString:ReadLogTail()];
   if (summary) [self.timer invalidate];
 }
