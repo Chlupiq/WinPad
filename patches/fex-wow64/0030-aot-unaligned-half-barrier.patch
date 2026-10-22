@@ -24,6 +24,11 @@ minutes in it and never opened its window:
   DMB ISH + STUR, same size). It prints how many blocks of an image it
   compiled that way.
 
+- The offline compiler takes back a library's ready code map, which has no
+  executable marker (WriteNewCodeMap writes only its library load). Marking
+  every ready map of a game with codemap.py halfbarrier made process-all die
+  in Result.at(*ExecutableFileId) on the first library map.
+
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 1c1cd12..b0545e1 100644
 --- a/FEXCore/Source/Interface/Context/Context.h
@@ -237,7 +242,7 @@ index 25476a4..33735b9 100644
    FEX_DEFAULT_VISIBILITY virtual void HandleCallback(FEXCore::Core::InternalThreadState* Thread, uint64_t RIP) = 0;
  
 diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
-index b1d564a..c4732d5 100644
+index b1d564a..c994819 100644
 --- a/Source/Tools/FEXOfflineCompiler/Main.cpp
 +++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
 @@ -506,6 +506,11 @@ struct winsize {
@@ -299,3 +304,19 @@ index b1d564a..c4732d5 100644
      }
      if (Skipped) {
        fmt::print("  [aot-gen] {} of {} code map blocks of {} left out of the cache\n", Skipped, BlockList.size(), Binary.Filename);
+@@ -852,9 +872,12 @@ static std::map<FEXCore::CodeMapFileId, ParsedContentsAndDependencies> ImportPen
+       }
+     }
+ 
+-    // Every imported code map should have had exactly one executable marker
+-    LOGMAN_THROW_A_FMT(ExecutableFileId, "Could not find an executable identifer in the code map");
+-    Result.at(*ExecutableFileId).Dependencies = std::move(Dependencies);
++    // WinPad: a ready code map of a library (as written by WriteNewCodeMap) has no executable
++    // marker, only its own library load. Such maps come back here when they are re-imported, e.g.
++    // after codemap.py halfbarrier marked their blocks; they carry no dependencies to record.
++    if (ExecutableFileId) {
++      Result.at(*ExecutableFileId).Dependencies = std::move(Dependencies);
++    }
+ 
+     // Delete imported code map
+     Incoming.close();

@@ -503,6 +503,10 @@ jobs:
           before=$(barriers "$built")
           mkdir -p "$cache/codemap/new"
           python3 tests/fex-wow64/codemap.py halfbarrier "$ready" "$cache/codemap/new/halfbarrier.bin"
+          # A library's ready map has no executable marker; process-all must take it back too
+          # (the game's image is rebuilt by marking every ready map this way).
+          lib=$(find "$cache/codemap/ready" -type f -iname 'kernel32.dll*' | head -n 1)
+          python3 tests/fex-wow64/codemap.py halfbarrier "$lib" "$cache/codemap/new/halfbarrier-lib.bin"
           env -u WINEHOST_EXPECT_LOG -u WINEHOST_EXPECT_OUTPUT -u WINEHOST_FEX_CODEMAP -u WINEHOST_FEX_ALL_CACHED \
             -u WINEHOST_FEX_NOJIT -u WINEHOST_AOT_IMAGE \
             WINEHOST_FEX_CACHE="$cache" WINEHOST_EXPECT_OUTPUT="compiled with plain loads and stores and half barriers" \
