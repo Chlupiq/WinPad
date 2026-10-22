@@ -452,6 +452,29 @@ jobs:
           sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
             "$RUNNER_TEMP/wine-loader/i386-windows/nodep.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
             "$RUNNER_TEMP/fexcache-nodep"
+      - name: The x86 program that VirtualProtects its code and patches it, as a hook installer does, runs from the AOT image with NoJIT, the blocks it lacked compiled in until none is left
+        env:
+          WINEHOST_EXPECT_OUTPUT: "hook: done"
+          # Making a page executable drops its blocks. Those of the image whose bytes did not
+          # change come back (patches/fex-wow64/0029): fa's, whose page was only reprotected,
+          # and gb's, on the page with the patch. Otherwise they run in the interpreter in
+          # every round and the rounds never converge.
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-hook/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          WINEHOST_EXPECT_LOG: |
+            [code-inval] executable protection set (alloc/protect)
+            registered again after a protection change
+            1 of its code pages there changed since the image was mapped
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-hook-image
+          WINEHOST_FEX_CODEMAP: 1
+          WINEHOST_FEX_ALL_CACHED: 1
+        run: |
+          rm -rf "$RUNNER_TEMP/fexcache-hook"
+          cp -Rp "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexcache-hook"
+          sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-hook" "$RUNNER_TEMP/fexaot-hook/fexaot.dylib"
+          sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/hook.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
+            "$RUNNER_TEMP/fexcache-hook"
       - name: A 32-bit x86 program with a window draws it with GDI and takes a tap, in Wine through WoW64 and FEX on an iPad simulator
         env:
           # Its user32, gdi32 and win32u are the 32-bit x86 ones, run by FEX with its JIT.

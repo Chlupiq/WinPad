@@ -1,0 +1,445 @@
+Code caches' blocks come back after a VirtualProtect that left their code as it was (FEX 3bec2ac, on top of 0028)
+
+With the DEP fix (0027) NFSU2 still ran 64 blocks of SPEED2.EXE in FEX's
+NoJIT interpreter, every time. 59 of them were on 14 pages of its .text
+that something (its hook installer, Ultimate ASI Loader and the
+widescreen fix) makes executable again with VirtualProtect:
+
+  [code-inval] executable protection set (alloc/protect): 0x5bf000-0x5c0000 dropped 33 blocks
+
+FEX drops a page's blocks whenever it is made executable, since code may
+have been written to it while it was not, and nothing registered the
+code caches' blocks again.
+
+- ImageTracker hashes every 64 bytes of an image's executable sections
+  when it maps an image it has a code cache for (XXH3, 32 bits a chunk);
+- InvalidationTracker::HandleMemoryProtectionNotification says whether it
+  dropped code because a range was made executable, and
+  BTCpuNotifyMemoryProtect then calls ImageTracker::RevalidateLoadedCaches;
+- that registers again, through the new CodeCache::EnableLoadedBlocks,
+  the cached blocks with a code page in the range whose code did not
+  change: a block whose pages all hash as mapped comes back as it is; a
+  block on a page that changed (a hook patched other code on it) is
+  decoded again from the current bytes, and comes back when it decodes to
+  the same code pages and none of its instruction bytes changed. A block
+  whose bytes changed stays out and is compiled (or interpreted) from the
+  new bytes;
+- "[aot-cache] N blocks of IMAGE registered again after a protection
+  change at guest A-B; K of its code pages there changed since the image
+  was mapped" (first 64).
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index 3f3de98..1c1cd12 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -109,6 +109,10 @@ public:
+   LoadLinkedCache(const std::byte* Meta, std::byte* Code, std::byte* Data, const ExecutableFileInfo&, uint64_t FileStartVA) override;
+ 
+   bool EnableLoadedSection(Core::InternalThreadState*, MappedCodeCacheFile&, const ExecutableFileSectionInfo&) override;
++  size_t EnableLoadedBlocks(Core::InternalThreadState*, MappedCodeCacheFile&, const ExecutableFileSectionInfo&,
++                            const LoadedBlockFilter&) override;
++  size_t EnableLoadedSectionImpl(Core::InternalThreadState*, MappedCodeCacheFile&, const ExecutableFileSectionInfo&,
++                                 const LoadedBlockFilter*);
+ 
+   void FinalizeCodePages(MappedCodeCacheFile&, std::span<std::byte> CodeRange) override;
+ 
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index c2a600d..66add1a 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -11,6 +11,7 @@
+ #include <Interface/Core/Dispatcher/Dispatcher.h>
+ #include <Interface/Core/JIT/DebugData.h>
+ #include <Interface/Core/JIT/Relocations.h>
++#include <Interface/Core/Frontend.h>
+ #include <Interface/Core/LookupCache.h>
+ #include <Interface/Core/OpcodeDispatcher.h>
+ #include <Interface/IR/PassManager.h>
+@@ -865,8 +866,19 @@ fextl::unique_ptr<MappedCodeCacheFile> CodeCache::LoadLinkedCache(const std::byt
+ }
+ 
+ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCodeCacheFile& Code, const ExecutableFileSectionInfo& BinarySection) {
++  EnableLoadedSectionImpl(Thread, Code, BinarySection, nullptr);
++  return true;
++}
++
++size_t CodeCache::EnableLoadedBlocks(Core::InternalThreadState* Thread, MappedCodeCacheFile& Code,
++                                     const ExecutableFileSectionInfo& BinarySection, const LoadedBlockFilter& Filter) {
++  return EnableLoadedSectionImpl(Thread, Code, BinarySection, &Filter);
++}
++
++size_t CodeCache::EnableLoadedSectionImpl(Core::InternalThreadState* Thread, MappedCodeCacheFile& Code,
++                                          const ExecutableFileSectionInfo& BinarySection, const LoadedBlockFilter* Filter) {
+   if (!EnableCodeCaching) {
+-    return true;
++    return 0;
+   }
+ 
+   namespace ranges = std::ranges;
+@@ -900,7 +912,7 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+       ranges::upper_bound(begin, BlockList.end(), BinarySection.EndVA - BinarySection.FileStartVA - 1, std::less {}, &BlockListEntry::first);
+     if (begin == end) {
+       LogMan::Msg::IFmt("No blocks cached in this range, aborting");
+-      return true;
++      return 0;
+     }
+     BlockList.erase(end, BlockList.end());
+     BlockList.erase(BlockList.begin(), begin);
+@@ -927,6 +939,40 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+       for (auto& CodePage : Block.CodePages) {
+         CodePage += BinarySection.FileStartVA;
+       }
++    }
++    if (Filter) {
++      const auto PageUnchanged = [Filter](uint64_t Page) {
++        return Filter->RangeUnchanged(Filter->Ctx, Page, Page + FEXCore::Utils::FEX_PAGE_SIZE);
++      };
++      std::erase_if(BlockList, [&](const BlockListEntry& Entry) {
++        const auto& Pages = Entry.second.CodePages;
++        if (!ranges::any_of(Pages, [Filter](uint64_t Page) { return Page >= Filter->Begin && Page < Filter->End; })) {
++          return true;
++        }
++        if (ranges::all_of(Pages, PageUnchanged)) {
++          return false;
++        }
++        // A page of the block changed (a hook patched other code on it): decode the block again from
++        // the current bytes. Decoding depends only on them (and on which pages are executable, the
++        // same pages here), so the same pages and unchanged bytes mean the same block.
++        const uint64_t GuestRIP = Entry.first + BinarySection.FileStartVA;
++        if (!ranges::all_of(Pages, [Filter](uint64_t Page) { return Filter->PageReadable(Filter->Ctx, Page); })) {
++          return true;
++        }
++        Thread->FrontendDecoder->DecodeInstructionsAtEntry(Thread, reinterpret_cast<const uint8_t*>(CTX.GetGuestBase() + GuestRIP),
++                                                           GuestRIP, 0);
++        const auto* Info = Thread->FrontendDecoder->GetDecodedBlockInfo();
++        if (Info->Blocks.empty() || Info->CodePages.size() != Pages.size() ||
++            !ranges::all_of(Pages, [Info](uint64_t Page) { return Info->CodePages.contains(Page); })) {
++          return true;
++        }
++        return !ranges::all_of(Info->Blocks, [Filter](const auto& Decoded) {
++          return Decoded.BlockStatus == Frontend::Decoder::DecodedBlockStatus::SUCCESS &&
++                 Filter->RangeUnchanged(Filter->Ctx, Decoded.Entry, Decoded.Entry + Decoded.Size);
++        });
++      });
++    }
++    for (auto& [Guest, Block] : BlockList) {
+       LOGMAN_THROW_A_FMT(Block.HostCode < Code.CodeBuffer.size_bytes(), "Host offset {:#x} out of range ({:#x})", Block.HostCode,
+                          Code.CodeBuffer.size_bytes());
+       auto HostCode = &Code.CodeBuffer[Block.HostCode];
+@@ -960,6 +1006,10 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+         Entrypoint += BinarySection.FileStartVA;
+       }
+ 
++      // Entry points of blocks left out are only looked up when the page is invalidated again.
++      if (Filter && (CodePage < Filter->Begin || CodePage >= Filter->End)) {
++        continue;
++      }
+       if (LookupCache.AddBlockExecutableRange(Entrypoints, CodePage, FEXCore::Utils::FEX_PAGE_SIZE, WriteLock)) {
+         CTX.SyscallHandler->MarkGuestExecutableRange(Thread, CodePage, FEXCore::Utils::FEX_PAGE_SIZE);
+       }
+@@ -978,7 +1028,7 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+     }
+   }
+ 
+-  if (EnableCodeCacheValidation) {
++  if (EnableCodeCacheValidation && !Filter) {
+     fextl::set<uint64_t> GuestBlocks, HostBlocks;
+     for (auto& [Guest, Host] : BlockList) {
+       GuestBlocks.insert(Guest + BinarySection.FileStartVA);
+@@ -988,7 +1038,7 @@ bool CodeCache::EnableLoadedSection(Core::InternalThreadState* Thread, MappedCod
+     Validate(BinarySection, std::move(GuestBlocks), HostBlocks, Code.CodeBuffer);
+   }
+ 
+-  return true;
++  return BlockList.size();
+ }
+ 
+ } // namespace FEXCore::Context
+diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
+index b57effa..56de2d7 100644
+--- a/FEXCore/include/FEXCore/Core/CodeCache.h
++++ b/FEXCore/include/FEXCore/Core/CodeCache.h
+@@ -282,6 +282,31 @@ public:
+    */
+   virtual bool EnableLoadedSection(Core::InternalThreadState*, MappedCodeCacheFile&, const ExecutableFileSectionInfo&) = 0;
+ 
++  /**
++   * WinPad: which cached blocks EnableLoadedBlocks registers again. A block qualifies when one of
++   * its guest code pages lies in [Begin, End) and its guest code is unchanged: RangeUnchanged says
++   * a guest range [B, E) holds the bytes the cache was compiled from. Its pages are checked whole
++   * first; a block on a page that changed is decoded again, and qualifies when it decodes to the
++   * same code pages and none of its instruction bytes changed.
++   */
++  struct LoadedBlockFilter {
++    uint64_t Begin;
++    uint64_t End;
++    bool (*RangeUnchanged)(void* Ctx, uint64_t GuestBegin, uint64_t GuestEnd);
++    bool (*PageReadable)(void* Ctx, uint64_t GuestPage);
++    void* Ctx;
++  };
++
++  /**
++   * WinPad: registers again the blocks of a loaded cache that an invalidation dropped although
++   * their guest code is unchanged (as EnableLoadedSection, for the blocks the filter admits).
++   * Returns how many blocks it registered.
++   */
++  virtual size_t EnableLoadedBlocks(Core::InternalThreadState*, MappedCodeCacheFile&, const ExecutableFileSectionInfo&,
++                                    const LoadedBlockFilter&) {
++    return 0;
++  }
++
+   /**
+    * Extend the given code range so that it can be safely finalized.
+    *
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index 1ddfbb4..211c81c 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: MIT
+ 
++#include <algorithm>
+ #include <array>
++#include <atomic>
+ #include <mutex>
+ #include <filesystem>
+ #include <optional>
+@@ -256,6 +258,51 @@ int ImageTracker::OpenCodeMapFile() {
+ }
+ 
+ #ifdef FEX_IOS_HOST
++constexpr uint64_t CodeChunkSize = 64;
++
++static uint32_t HashChunk(uint64_t HostAddress) {
++  return static_cast<uint32_t>(XXH3_64bits(reinterpret_cast<const void*>(HostAddress), CodeChunkSize));
++}
++
++// WinPad: hashes of each 64 bytes of an image's executable sections, as mapped. Address is the
++// image's host address, GuestBase what is subtracted to get guest addresses.
++static auto HashCodeSections(uint64_t Address, uint64_t Size, uint64_t GuestBase) {
++  fextl::vector<ImageTracker::CodeSectionHashes> Sections;
++  auto* Nt = RtlImageNtHeader(reinterpret_cast<HMODULE>(Address));
++  if (!Nt) {
++    return Sections;
++  }
++  auto* First = IMAGE_FIRST_SECTION(Nt);
++  for (auto* Section = First; Section != First + Nt->FileHeader.NumberOfSections; Section++) {
++    if (!(Section->Characteristics & IMAGE_SCN_MEM_EXECUTE)) {
++      continue;
++    }
++    const uint64_t Begin = Section->VirtualAddress & ~(CodeChunkSize - 1);
++    const uint64_t End = FEXCore::AlignUp(std::min<uint64_t>(Section->VirtualAddress + Section->Misc.VirtualSize, Size), CodeChunkSize);
++    if (Begin >= End) {
++      continue;
++    }
++    auto& Hashes = Sections.emplace_back();
++    Hashes.GuestBegin = Address - GuestBase + Begin;
++    Hashes.GuestEnd = Address - GuestBase + End;
++    Hashes.Chunks.reserve((End - Begin) / CodeChunkSize);
++    for (uint64_t Offset = Begin; Offset < End; Offset += CodeChunkSize) {
++      Hashes.Chunks.push_back(HashChunk(Address + Offset));
++    }
++  }
++  return Sections;
++}
++
++static bool IsReadablePage(uint64_t HostPage) {
++  MEMORY_BASIC_INFORMATION Info;
++  if (!VirtualQuery(reinterpret_cast<LPCVOID>(HostPage), &Info, sizeof(Info)) || Info.State != MEM_COMMIT) {
++    return false;
++  }
++  return (Info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
++                          PAGE_EXECUTE_WRITECOPY)) &&
++         !(Info.Protect & PAGE_GUARD);
++}
++
+ // WinPad: the cache FEX's offline compiler made for this image, `<cache dir>cache\<ID>-<config id>`
+ // (the name the Linux frontend loads, config id 0). The whole file goes into executable JIT-pool
+ // memory: on Windows FEXCore runs the cached code where the file was loaded and applies its
+@@ -282,7 +329,8 @@ bool ImageTracker::LoadLinkedImageCache(const MappedImageInfo& Image, std::strin
+                     fmt::ptr(Entry->Text), Address - GuestBase);
+ 
+   std::scoped_lock Lk {LoadedCachesLock};
+-  LoadedCaches.push_back({std::move(Cache), &Image, Address - GuestBase, Address - GuestBase + Size, false});
++  LoadedCaches.push_back({std::move(Cache), &Image, Address - GuestBase, Address - GuestBase + Size, false,
++                          HashCodeSections(Address, Size, GuestBase)});
+   return true;
+ }
+ 
+@@ -335,7 +383,8 @@ void ImageTracker::LoadImageCache(const MappedImageInfo& Image, std::string_view
+   LogMan::Msg::EFmt("[aot-cache] loaded {} ({} bytes) for guest {:#x}", AnsiPath, FileSize, Address - GuestBase);
+ 
+   std::scoped_lock Lk {LoadedCachesLock};
+-  LoadedCaches.push_back({std::move(Cache), &Image, Address - GuestBase, Address - GuestBase + Size, false});
++  LoadedCaches.push_back({std::move(Cache), &Image, Address - GuestBase, Address - GuestBase + Size, false,
++                          HashCodeSections(Address, Size, GuestBase)});
+ }
+ 
+ void ImageTracker::EnableLoadedCaches(FEXCore::Core::InternalThreadState* Thread) {
+@@ -361,6 +410,68 @@ void ImageTracker::ReenableLoadedCaches(FEXCore::Core::InternalThreadState* Thre
+   LogMan::Msg::EFmt("[aot-cache] registering the loaded code caches again after a DEP change dropped their blocks");
+   EnableLoadedCaches(Thread);
+ }
++
++void ImageTracker::RevalidateLoadedCaches(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t Size) {
++  const uint64_t GuestBase = Guest32Base();
++  if (Address < GuestBase) {
++    return;
++  }
++  const uint64_t Begin = Address - GuestBase;
++  const uint64_t End = Begin + Size;
++
++  struct RangeCheck {
++    const LoadedCache* Loaded;
++    uint64_t GuestBase;
++  };
++  auto PageReadable = [](void* Ctx, uint64_t GuestPage) {
++    return IsReadablePage(static_cast<const RangeCheck*>(Ctx)->GuestBase + GuestPage);
++  };
++  auto RangeUnchanged = [](void* Ctx, uint64_t GuestBegin, uint64_t GuestEnd) {
++    const auto* Check = static_cast<const RangeCheck*>(Ctx);
++    const uint64_t Begin = GuestBegin & ~(CodeChunkSize - 1);
++    const uint64_t End = FEXCore::AlignUp(GuestEnd, CodeChunkSize);
++    auto Section = std::ranges::find_if(Check->Loaded->CodeHashes, [&](const auto& S) { return S.GuestBegin <= Begin && End <= S.GuestEnd; });
++    if (Section == Check->Loaded->CodeHashes.end()) {
++      return false;
++    }
++    for (uint64_t Page = Begin & FEXCore::Utils::FEX_PAGE_MASK; Page < End; Page += FEXCore::Utils::FEX_PAGE_SIZE) {
++      if (!IsReadablePage(Check->GuestBase + Page)) {
++        return false;
++      }
++    }
++    for (uint64_t Chunk = Begin; Chunk < End; Chunk += CodeChunkSize) {
++      if (HashChunk(Check->GuestBase + Chunk) != Section->Chunks[(Chunk - Section->GuestBegin) / CodeChunkSize]) {
++        return false;
++      }
++    }
++    return true;
++  };
++
++  std::scoped_lock Lk {LoadedCachesLock};
++  for (auto& Loaded : LoadedCaches) {
++    if (!Loaded.Enabled || !Loaded.Image || End <= Loaded.GuestBegin || Begin >= Loaded.GuestEnd) {
++      continue;
++    }
++    RangeCheck Check {&Loaded, GuestBase};
++    const FEXCore::AbstractCodeCache::LoadedBlockFilter Filter {std::max(Begin, Loaded.GuestBegin), std::min(End, Loaded.GuestEnd),
++                                                                RangeUnchanged, PageReadable, &Check};
++    size_t Changed = 0;
++    for (uint64_t Page = Filter.Begin; Page < Filter.End; Page += FEXCore::Utils::FEX_PAGE_SIZE) {
++      if (std::ranges::any_of(Loaded.CodeHashes, [Page](const auto& S) { return S.GuestBegin <= Page && Page < S.GuestEnd; }) &&
++          !RangeUnchanged(&Check, Page, Page + FEXCore::Utils::FEX_PAGE_SIZE)) {
++        Changed++;
++      }
++    }
++    const FEXCore::ExecutableFileSectionInfo Section {Loaded.Image->Info, Loaded.GuestBegin, Loaded.GuestBegin, Loaded.GuestEnd};
++    const size_t Registered = CTX.GetCodeCache().EnableLoadedBlocks(Thread, *Loaded.Cache, Section, Filter);
++    static std::atomic<uint32_t> Reports {0};
++    if ((Registered || Changed) && Reports.fetch_add(1, std::memory_order_relaxed) < 64) {
++      LogMan::Msg::EFmt("[aot-cache] {} blocks of {} registered again after a protection change at guest {:#x}-{:#x}; "
++                        "{} of its code pages there changed since the image was mapped",
++                        Registered, Loaded.Image->Info.Filename, Filter.Begin, Filter.End, Changed);
++    }
++  }
++}
+ #endif
+ 
+ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
+diff --git a/Source/Windows/Common/ImageTracker.h b/Source/Windows/Common/ImageTracker.h
+index 08ec41b..0b609eb 100644
+--- a/Source/Windows/Common/ImageTracker.h
++++ b/Source/Windows/Common/ImageTracker.h
+@@ -56,6 +56,17 @@ public:
+   // WinPad: registers the blocks of every loaded code cache again after an invalidation that
+   // dropped them although no guest code changed (a DEP change drops the whole window).
+   void ReenableLoadedCaches(FEXCore::Core::InternalThreadState* Thread);
++  // WinPad: after a protection change made [Address, Address + Size) (host addresses) executable
++  // and dropped its blocks, registers again the cached blocks whose code pages still hold what they
++  // held when the image was mapped. A page the program patched keeps its blocks out.
++  void RevalidateLoadedCaches(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t Size);
++
++  // Guest range [GuestBegin, GuestEnd) of an executable section, a hash for each 64 bytes of it.
++  struct CodeSectionHashes {
++    uint64_t GuestBegin;
++    uint64_t GuestEnd;
++    fextl::vector<uint32_t> Chunks;
++  };
+ #endif
+ 
+ private:
+@@ -81,6 +92,8 @@ private:
+     uint64_t GuestBegin;
+     uint64_t GuestEnd;
+     bool Enabled;
++    // Hashes of each 64 bytes of the image's executable sections when it was mapped.
++    fextl::vector<CodeSectionHashes> CodeHashes;
+   };
+   void LoadImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size);
+   bool LoadLinkedImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size);
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index 8e14dfc..a113353 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -85,11 +85,11 @@ static bool ProtIsWritable(ULONG Prot) {
+   return (Prot & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+ }
+ 
+-void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
++bool InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot) {
+   if (IntervalsLock.HeldByThisThread()) {
+     // FEX's own heap, changed while this thread holds IntervalsLock: see OwnedSharedMutex.
+     NestedNotificationSkips.fetch_add(1, std::memory_order_relaxed);
+-    return;
++    return false;
+   }
+   const auto AlignedBase = Address & FEXCore::Utils::FEX_PAGE_MASK;
+   const auto AlignedSize = (Address - AlignedBase + Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
+@@ -176,6 +176,7 @@ void InvalidationTracker::HandleMemoryProtectionNotification(uint64_t Address, u
+     InvalidateIntervalInternal(AlignedBase, AlignedSize,
+                                ProtHasExec(Prot) ? "executable protection set (alloc/protect)" : "execute access removed (alloc/protect)");
+   }
++  return NeedsInvalidate && ProtHasExec(Prot);
+ }
+ 
+ bool InvalidationTracker::HandleProcessExecuteFlagsChange(ULONG Flags) {
+diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
+index 4112ad1..8ac8ac6 100644
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -42,7 +42,8 @@ public:
+ #else
+   InvalidationTracker(FEXCore::Context::Context& CTX, const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads);
+ #endif
+-  void HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot);
++  // Returns true when it dropped code because the range was made executable.
++  bool HandleMemoryProtectionNotification(uint64_t Address, uint64_t Size, ULONG Prot);
+   // Returns true when the change dropped compiled code (the setting really changed).
+   bool HandleProcessExecuteFlagsChange(ULONG Flags);
+   void HandleImageMap(std::string_view Name, uint64_t Address);
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index db03047..94feeee 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -2074,7 +2074,21 @@ void BTCpuNotifyMemoryProtect(void* Address, SIZE_T Size, ULONG NewProt, BOOL Af
+     ThreadCreationMutex.lock();
+   } else {
+     if (!Status) {
+-      InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), NewProt);
++      const bool Dropped =
++        InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), NewProt);
++#ifdef FEX_IOS_HOST
++      // WinPad: making code executable again drops its blocks, the code caches' included, even when
++      // nothing was written to it (a hook installer's VirtualProtect around its patch, say). The
++      // cached blocks whose pages still hold the mapped code are registered again.
++      if (Dropped) {
++        if (auto* Thread = GetTLS().ThreadState()) {
++          ImageTracker->RevalidateLoadedCaches(Thread, reinterpret_cast<uint64_t>(Address) & FEXCore::Utils::FEX_PAGE_MASK,
++                                               ((reinterpret_cast<uint64_t>(Address) & ~FEXCore::Utils::FEX_PAGE_MASK) + Size +
++                                                FEXCore::Utils::FEX_PAGE_SIZE - 1) &
++                                                 FEXCore::Utils::FEX_PAGE_MASK);
++        }
++      }
++#endif
+     }
+     ThreadCreationMutex.unlock();
+   }
