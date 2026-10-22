@@ -24,7 +24,9 @@
 # OFFLINE_COMPILER: FEXOfflineCompiler.exe (tests/fex-wow64/build.sh).
 # CACHE_DIR: the game's FEX cache directory, kept from one image to the next.
 # XCODE_PROJECT: the WinPadWine-xcode directory build-xcode.sh wrote.
-# Environment: RUNS, SECONDS_PER_RUN (default 60).
+# Environment: RUNS, SECONDS_PER_RUN (default 60), GAME_AOT_JIT_POOL_MB: the
+# offline compiler's JIT pool (default 4096; a game with dozens of DLLs
+# compiled in one process runs out of 2048).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -72,7 +74,7 @@ compile() {
     echo "=== compiling the code maps into code caches"
     env -u WINEHOST_EXPECT_EXIT -u WINEHOST_DLLOVERRIDES -u WINEHOST_SECONDS \
         WINEHOST_EXPECT_OUTPUT="Successfully populated cache" WINEHOST_EXPECT_FEX_CACHE=1 \
-        WINEHOST_SYSWOW64=1 WINEHOST_JIT=1 WINEHOST_JIT_POOL_MB=2048 \
+        WINEHOST_SYSWOW64=1 WINEHOST_JIT=1 WINEHOST_JIT_POOL_MB="${GAME_AOT_JIT_POOL_MB:-4096}" \
         sh "$loader/run-host.sh" "$work" "$compiler" process-all
 }
 compile
