@@ -414,16 +414,17 @@ jobs:
         # simd.exe prints a hash of each instruction's results. It runs with the JIT,
         # then with NoJIT from hello.exe's image, which has none of its blocks, so the
         # interpreter runs every one (patches/fex-wow64/0019, 0026). The lines have to match.
+        # Only the result lines count: Wine's stderr lines in run.log start with "simd: " too.
         run: |
           simd="$RUNNER_TEMP/wine-loader/i386-windows/simd.exe"
           log="$RUNNER_TEMP/wine-loader/host-simd/run.log"
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$simd"
-          grep '^simd: ' "$log" >"$RUNNER_TEMP/simd-jit.txt"
+          grep -E '^simd: ([a-z0-9-]+ [0-9a-f]{8}|done)$' "$log" >"$RUNNER_TEMP/simd-jit.txt"
           WINEHOST_AOT_IMAGE="$RUNNER_TEMP/fexaot/fexaot.dylib" WINEHOST_FEX_NOJIT=1 \
             WINEHOST_FEX_CACHE="$RUNNER_TEMP/fexcache-simd" WINEHOST_FEX_CODEMAP=1 \
             WINEHOST_EXPECT_LOG='[interp] fallback ran' \
             sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$simd"
-          grep '^simd: ' "$log" >"$RUNNER_TEMP/simd-nojit.txt"
+          grep -E '^simd: ([a-z0-9-]+ [0-9a-f]{8}|done)$' "$log" >"$RUNNER_TEMP/simd-nojit.txt"
           diff "$RUNNER_TEMP/simd-jit.txt" "$RUNNER_TEMP/simd-nojit.txt"
           echo "$(grep -c . "$RUNNER_TEMP/simd-jit.txt") lines match"
       - name: The x86 program in an image without NX_COMPAT, which turns DEP off, runs from the AOT image with NoJIT, the blocks it lacked compiled in until none is left
