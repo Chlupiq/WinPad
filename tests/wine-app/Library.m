@@ -321,6 +321,14 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 @property(nonatomic, strong) NSMutableArray* observers;
 @property(nonatomic) unsigned pad;  // the controller buttons held at the last change (Pad*)
 @property(nonatomic) BOOL started;
+- (void)reload;
+- (void)showFocus;
+- (void)moveFocusBy:(NSInteger)by;
+- (void)startFocused;
+- (void)startProgram:(NSString*)program game:(WinPadGame*)game;
+- (void)openSettings;
+- (void)attach:(GCController*)controller;
+- (void)readPad:(GCExtendedGamepad*)pad;
 @end
 
 enum { PadLeft = 1, PadRight = 2, PadA = 4, PadB = 8, PadY = 16 };
@@ -454,7 +462,7 @@ enum { CoverTag = 1001, TitleTag = 1002 };
                          game.image.lastPathComponent ?: @"none"];
   [report writeToFile:[Documents() stringByAppendingPathComponent:@"library.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-    [self move:1];
+    [self moveFocusBy:1];
     [self startFocused];
   });
 }
@@ -566,7 +574,7 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   self.empty.frame = CGRectMake(m, hero_y, w, MAX(120, row_y - 72 - hero_y));
 }
 
-- (void)move:(NSInteger)by {
+- (void)moveFocusBy:(NSInteger)by {
   if (!self.games.count) return;
   self.focus = MAX(0, MIN((NSInteger)self.games.count - 1, self.focus + by));
   [self showFocus];
@@ -630,8 +638,8 @@ enum { CoverTag = 1001, TitleTag = 1002 };
     if (pressed & PadB) [self dismissViewControllerAnimated:YES completion:nil];
     return;
   }
-  if (pressed & PadLeft) [self move:-1];
-  if (pressed & PadRight) [self move:1];
+  if (pressed & PadLeft) [self moveFocusBy:-1];
+  if (pressed & PadRight) [self moveFocusBy:1];
   if (pressed & PadY) [self openSettings];
   if (pressed & PadA) [self startFocused];
 }
@@ -641,11 +649,11 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   for (UIPress* press in presses) {
     switch (press.key.keyCode) {
       case UIKeyboardHIDUsageKeyboardLeftArrow:
-        [self move:-1];
+        [self moveFocusBy:-1];
         handled = YES;
         break;
       case UIKeyboardHIDUsageKeyboardRightArrow:
-        [self move:1];
+        [self moveFocusBy:1];
         handled = YES;
         break;
       case UIKeyboardHIDUsageKeyboardReturnOrEnter:
