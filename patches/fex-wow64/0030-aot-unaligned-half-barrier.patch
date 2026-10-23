@@ -28,6 +28,9 @@ minutes in it and never opened its window:
   executable marker (WriteNewCodeMap writes only its library load). Marking
   every ready map of a game with codemap.py halfbarrier made process-all die
   in Result.at(*ExecutableFileId) on the first library map.
+- WINPAD_AOT_TRACE=1 makes the offline compiler name each block before it
+  compiles it, to find a block whose compile never ends (the game's
+  combase.dll took a whole 600 s batch).
 
 diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
 index 1c1cd12..b0545e1 100644
@@ -242,7 +245,7 @@ index 25476a4..33735b9 100644
    FEX_DEFAULT_VISIBILITY virtual void HandleCallback(FEXCore::Core::InternalThreadState* Thread, uint64_t RIP) = 0;
  
 diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
-index b1d564a..c994819 100644
+index b1d564a..3e52476 100644
 --- a/Source/Tools/FEXOfflineCompiler/Main.cpp
 +++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
 @@ -506,6 +506,11 @@ struct winsize {
@@ -270,13 +273,15 @@ index b1d564a..c994819 100644
        LOGMAN_THROW_A_FMT(MinBound && MaxBound, "Cached blocks offsets {:#x}-{:#x} out of bounds for library {} ({:016x} @ {:#x})!",
                           *min_val, *max_val, Binary.Filename, Binary.FileId, SyscallHandler->VAFileStart);
      }
-@@ -657,8 +662,15 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+@@ -657,8 +662,17 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
  
      FEX_CONFIG_OPT(MaxInst, MAXINST);
      // WinPad: a code map block left out here is compiled at run time again, so name each one.
 -    size_t Skipped = 0;
 -    for (auto Addr : BlockList) {
 +    size_t Skipped = 0, HalfBarrier = 0;
++    const char* TraceEnv = getenv("WINPAD_AOT_TRACE");
++    const bool Trace = TraceEnv && *TraceEnv && *TraceEnv != '0';
 +    for (auto Entry : BlockList) {
 +      // WinPad: a block of the AOT image recorded with unaligned atomic faults (fex-wow64 0030)
 +      // is compiled in the half-barrier form instead of its plain entry.
@@ -288,10 +293,16 @@ index b1d564a..c994819 100644
        if (!CTX->CheckIfBlockIsCacheable(*Thread, Addr + SyscallHandler->VAFileStart, MaxInst)) {
          fmt::print("  [aot-gen] {}+{:#x} left out: not cacheable (a relocation in it is not a whole 32/64-bit field)\n",
                     Binary.Filename, Addr);
-@@ -666,7 +678,15 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+@@ -666,7 +680,21 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
          continue;
        }
  
++      // WinPad: WINPAD_AOT_TRACE=1 names each block before it is compiled, for a compile that never
++      // ends.
++      if (Trace) {
++        fmt::print(stderr, "  [aot-trace] {}+{:#x}{}\n", Binary.Filename, Addr, IsHalfBarrier ? " (half barriers)" : "");
++        fflush(stderr);
++      }
 +      CTX->SetCompileHalfBarrierTSO(IsHalfBarrier);
        CTX->CompileRIP(Thread, Addr + SyscallHandler->VAFileStart);
 +      CTX->SetCompileHalfBarrierTSO(false);
@@ -304,7 +315,7 @@ index b1d564a..c994819 100644
      }
      if (Skipped) {
        fmt::print("  [aot-gen] {} of {} code map blocks of {} left out of the cache\n", Skipped, BlockList.size(), Binary.Filename);
-@@ -852,9 +872,12 @@ static std::map<FEXCore::CodeMapFileId, ParsedContentsAndDependencies> ImportPen
+@@ -852,9 +880,12 @@ static std::map<FEXCore::CodeMapFileId, ParsedContentsAndDependencies> ImportPen
        }
      }
  
