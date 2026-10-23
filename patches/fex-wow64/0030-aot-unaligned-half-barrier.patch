@@ -1,0 +1,322 @@
+Read-only AOT blocks with unaligned atomic faults are recorded and compiled with half barriers (FEX 3bec2ac, on top of 0029)
+
+FEX compiles a 32-bit guest's loads and stores as acquire loads and release
+stores (LDAPR, STLR) to keep x86's memory order. An iPad's CPU faults on
+one that crosses 16 bytes. With the JIT, FEX handles the first fault by
+patching the access into a plain one with a half barrier (LDR + DMB ISHLD,
+DMB ISH + STR). A read-only AOT block is never patched, so the access is
+emulated through a Mach exception every time it runs. NFSU2's widescreen
+fix scans the game's memory byte by byte, and on the iPad the game spent
+minutes in it and never opened its window:
+
+  [mach_exc] UNHANDLED #5500 pc=0x1118e05d8 addr=0x700112c72d ...
+  D 24 Handled unaligned atomic: new pc: 1118E05DC
+
+- HandleUnalignedAccess calls ContextImpl::NoteUnalignedAOTBlock for a
+  ReadOnlyCode block before it emulates the access. That logs the block
+  once ("[aot-unaligned] block ... recorded for a half-barrier compile",
+  for the first 64) and writes it to the code map with the new flag
+  CodeMap::HalfBarrierTSOBlock (bit 31 of the block offset). The code map's
+  summary line counts the faults.
+- The offline compiler compiles a block with that flag (in place of its
+  plain entry) with Context::SetCompileHalfBarrierTSO, and LoadMemTSO and
+  StoreMemTSO then emit the patched form right away (LDUR + DMB ISHLD,
+  DMB ISH + STUR, same size). It prints how many blocks of an image it
+  compiled that way.
+
+- The offline compiler takes back a library's ready code map, which has no
+  executable marker (WriteNewCodeMap writes only its library load). Marking
+  every ready map of a game with codemap.py halfbarrier made process-all die
+  in Result.at(*ExecutableFileId) on the first library map.
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index 1c1cd12..b0545e1 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -166,6 +166,9 @@ public:
+   bool CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState&, uint64_t GuestRIP, uint64_t MaxInst) override;
+   void CompileRIP(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) override;
+   void CompileRIPCount(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, uint64_t MaxInst) override;
++  void SetCompileHalfBarrierTSO(bool Enable) override {
++    CompileHalfBarrierTSO = Enable;
++  }
+ 
+   void HandleCallback(FEXCore::Core::InternalThreadState* Thread, uint64_t RIP) override;
+ 
+@@ -241,6 +244,10 @@ public:
+       std::scoped_lock lk(InterpLearnedLock);
+       LogMan::Msg::EFmt("[interp] fallback ran {} blocks ({} distinct) that are not in the AOT image", Runs, InterpLearned.size());
+     }
++    if (const auto Faults = UnalignedAOTFaults.load(std::memory_order_relaxed)) {
++      std::scoped_lock lk(UnalignedAOTLock);
++      LogMan::Msg::EFmt("[aot-unaligned] {} unaligned atomic faults in {} blocks of the AOT image", Faults, UnalignedAOTBlocks.size());
++    }
+     if (CodeMapWriter) {
+       CodeMapWriter.reset();
+     }
+@@ -469,6 +476,18 @@ public:
+   std::mutex InterpLearnedLock;
+   fextl::set<uint64_t> InterpLearned;
+ 
++  // WinPad: records the current block of a read-only AOT image after one of its TSO loads or
++  // stores took an unaligned atomic fault (log line and a code map entry with
++  // CodeMap::HalfBarrierTSOBlock, once per block). The JIT backpatches such an access into a plain
++  // one with a half barrier; AOT code stays as it is, so every later run of it faults again.
++  void NoteUnalignedAOTBlock(FEXCore::Core::InternalThreadState* Thread);
++  std::atomic<uint64_t> UnalignedAOTFaults {0};
++  std::mutex UnalignedAOTLock;
++  fextl::set<uint64_t> UnalignedAOTBlocks;
++  // Set by the offline compiler while it compiles a block recorded that way: its TSO loads and
++  // stores are emitted in the backpatched form (plain access and half barrier) right away.
++  bool CompileHalfBarrierTSO = false;
++
+   FEXCore::JITSymbols Symbols;
+ 
+   FEXCore::Utils::PooledAllocatorVirtual OpDispatcherAllocator {"FEXMem_OpDispatcher"};
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 66add1a..84f03ca 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -180,7 +180,7 @@ void CodeMapWriter::Flush(size_t Offset, std::unique_lock<std::shared_mutex>&) {
+   BufferOffset = 0;
+ }
+ 
+-void CodeMapWriter::AppendBlock(const FEXCore::ExecutableFileSectionInfo& SectionInfo, uint64_t BlockEntry) {
++void CodeMapWriter::AppendBlock(const FEXCore::ExecutableFileSectionInfo& SectionInfo, uint64_t BlockEntry, uint32_t Flags) {
+   if (!IsWriteEnabled(SectionInfo)) {
+     return;
+   }
+@@ -208,7 +208,7 @@ void CodeMapWriter::AppendBlock(const FEXCore::ExecutableFileSectionInfo& Sectio
+   }
+ 
+   // Register the actual code block
+-  CodeMap::Entry DataEntry {SectionInfo.FileInfo.FileId, static_cast<uint32_t>(BlockEntry)};
++  CodeMap::Entry DataEntry {SectionInfo.FileInfo.FileId, static_cast<uint32_t>(BlockEntry) | Flags};
+   AppendData(std::as_bytes(std::span {&DataEntry, 1}));
+ }
+ 
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 78d173c..02e5ec1 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -2339,6 +2339,35 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   return (uintptr_t)CodePtr;
+ }
+ 
++void ContextImpl::NoteUnalignedAOTBlock(FEXCore::Core::InternalThreadState* Thread) {
++  UnalignedAOTFaults.fetch_add(1, std::memory_order_relaxed);
++  const uint64_t GuestRIP = GetGuestBlockEntry(Thread);
++  if (!GuestRIP) {
++    return;
++  }
++  bool New;
++  size_t Count;
++  {
++    std::scoped_lock lk(UnalignedAOTLock);
++    New = UnalignedAOTBlocks.insert(GuestRIP).second;
++    Count = UnalignedAOTBlocks.size();
++  }
++  if (!New) {
++    return;
++  }
++  if (Count <= 64) {
++    LogMan::Msg::EFmt("[aot-unaligned] block {:#x} of the AOT image took an unaligned atomic fault; recorded for a "
++                      "half-barrier compile",
++                      GuestRIP);
++  }
++  if (CodeMapWriter) {
++    auto Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
++    if (Region && Region->FileStartVA != 0) {
++      CodeMapWriter->AppendBlock(*Region, GuestRIP, CodeMap::HalfBarrierTSOBlock);
++    }
++  }
++}
++
+ fextl::unique_ptr<CPU::InterpreterIR>
+ ContextImpl::GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool Publish) {
+   Thread->PassManager->SkipRA = true;
+diff --git a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
+index f31cecc..1ec0ebb 100644
+--- a/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/MemoryOps.cpp
+@@ -926,7 +926,23 @@ DEF_OP(LoadMemTSO) {
+   const auto MemReg = Guest.Base;
+ #endif
+ 
+-  if (CTX->HostFeatures.SupportsTSOImm9 && Op->Class == IR::RegClass::GPR) {
++  if (CTX->CompileHalfBarrierTSO && Op->Class == IR::RegClass::GPR && OpSize != IR::OpSize::i8Bit) {
++    // WinPad: a block of the AOT image recorded with unaligned atomic faults gets the form the
++    // unaligned backpatcher turns the acquire load below into: a plain load and a half barrier.
++    const auto Dst = GetReg(Node);
++    uint64_t Offset = 0;
++    if (!Guest.Offset.IsInvalid()) {
++      bool IsInline = IsInlineConstant(Guest.Offset, &Offset);
++      LOGMAN_THROW_A_FMT(IsInline, "expected immediate");
++    }
++    switch (OpSize) {
++    case IR::OpSize::i16Bit: ldurh(Dst, MemReg, Offset); break;
++    case IR::OpSize::i32Bit: ldur(Dst.W(), MemReg, Offset); break;
++    case IR::OpSize::i64Bit: ldur(Dst.X(), MemReg, Offset); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled LoadMemTSO size: {}", OpSize); break;
++    }
++    dmb(ARMEmitter::BarrierScope::ISHLD);
++  } else if (CTX->HostFeatures.SupportsTSOImm9 && Op->Class == IR::RegClass::GPR) {
+     const auto Dst = GetReg(Node);
+     uint64_t Offset = 0;
+     if (!Guest.Offset.IsInvalid()) {
+@@ -2084,7 +2100,23 @@ DEF_OP(StoreMemTSO) {
+   const auto MemReg = Guest.Base;
+ #endif
+ 
+-  if (CTX->HostFeatures.SupportsTSOImm9 && Op->Class == IR::RegClass::GPR) {
++  if (CTX->CompileHalfBarrierTSO && Op->Class == IR::RegClass::GPR && OpSize != IR::OpSize::i8Bit) {
++    // WinPad: as in LoadMemTSO, the backpatched form of the release store below: a barrier and a
++    // plain store.
++    const auto Src = GetZeroableReg(Op->Value);
++    uint64_t Offset = 0;
++    if (!Guest.Offset.IsInvalid()) {
++      bool IsInline = IsInlineConstant(Guest.Offset, &Offset);
++      LOGMAN_THROW_A_FMT(IsInline, "expected immediate");
++    }
++    dmb(ARMEmitter::BarrierScope::ISH);
++    switch (OpSize) {
++    case IR::OpSize::i16Bit: sturh(Src, MemReg, Offset); break;
++    case IR::OpSize::i32Bit: stur(Src.W(), MemReg, Offset); break;
++    case IR::OpSize::i64Bit: stur(Src.X(), MemReg, Offset); break;
++    default: LOGMAN_MSG_A_FMT("Unhandled StoreMemTSO size: {}", OpSize); break;
++    }
++  } else if (CTX->HostFeatures.SupportsTSOImm9 && Op->Class == IR::RegClass::GPR) {
+     const auto Src = GetZeroableReg(Op->Value);
+     uint64_t Offset = 0;
+     if (!Guest.Offset.IsInvalid()) {
+diff --git a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+index 291cfe7..dc8ffdf 100644
+--- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
++++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
+@@ -2270,6 +2270,8 @@ std::optional<int32_t> HandleUnalignedAccess(FEXCore::Core::InternalThreadState*
+ 
+   if (InlineTail->ReadOnlyCode) {
+     // AOT code is never backpatched; emulate the access as for non-JIT code.
++    // WinPad: and record the block, so that the next AOT image has it in the backpatched form.
++    CTX->NoteUnalignedAOTBlock(Thread);
+     return HandleUnalignedAccess(Thread, HandleType, ProgramCounter, GPRs, false);
+   }
+ 
+diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
+index 56de2d7..38c4488 100644
+--- a/FEXCore/include/FEXCore/Core/CodeCache.h
++++ b/FEXCore/include/FEXCore/Core/CodeCache.h
+@@ -99,6 +99,11 @@ struct CodeMap {
+     // Followed by padding to a 4 byte boundary
+   };
+ 
++  // WinPad: set in Entry::BlockOffset for a block of a read-only AOT image that took unaligned
++  // atomic faults. The offline compiler compiles it with plain loads/stores and half barriers, the
++  // form the JIT backpatches such code into, which read-only code can never be patched into.
++  static constexpr uint32_t HalfBarrierTSOBlock = 0x8000'0000;
++
+   // Followed by ExternalLibraryInfo
+   static constexpr Entry LoadExternalLibrary = {0xffff'ffff'ffff'ffff, 0xffff'ffff};
+ 
+@@ -150,7 +155,7 @@ public:
+     return false;
+   }
+ 
+-  void AppendBlock(const FEXCore::ExecutableFileSectionInfo&, uint64_t Entry);
++  void AppendBlock(const FEXCore::ExecutableFileSectionInfo&, uint64_t Entry, uint32_t Flags = 0);
+   void AppendLibraryLoad(const FEXCore::ExecutableFileInfo&);
+   void AppendSetMainExecutable(const FEXCore::ExecutableFileInfo&);
+ 
+diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
+index 25476a4..33735b9 100644
+--- a/FEXCore/include/FEXCore/Core/Context.h
++++ b/FEXCore/include/FEXCore/Core/Context.h
+@@ -76,6 +76,9 @@ public:
+   FEX_DEFAULT_VISIBILITY virtual bool CheckIfBlockIsCacheable(FEXCore::Core::InternalThreadState& Thread, uint64_t GuestRIP, uint64_t MaxInst) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void CompileRIP(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void CompileRIPCount(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, uint64_t MaxInst) = 0;
++  // WinPad: the offline compiler compiles a block recorded with CodeMap::HalfBarrierTSOBlock with
++  // this set, so that its TSO loads and stores are plain accesses with half barriers.
++  FEX_DEFAULT_VISIBILITY virtual void SetCompileHalfBarrierTSO(bool Enable) = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void HandleCallback(FEXCore::Core::InternalThreadState* Thread, uint64_t RIP) = 0;
+ 
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index b1d564a..c994819 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -506,6 +506,11 @@ struct winsize {
+ };
+ #endif
+ 
++// WinPad: a code map block entry without its CodeMap::HalfBarrierTSOBlock flag.
++static uint64_t BlockOffset(uint64_t Entry) {
++  return Entry & ~uint64_t {FEXCore::CodeMap::HalfBarrierTSOBlock};
++}
++
+ // Returns filename of generated cache on success
+ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInfo& Binary, uint64_t CodeCacheConfigId,
+                                                       fextl::set<uintptr_t> BlockList, std::string_view OutDir) {
+@@ -646,9 +651,9 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+     // Refuse to continue if the block list contains any out-of-bounds blocks.
+     // This often indicates a corrupted code map.
+     {
+-      auto [min_val, max_val] = std::ranges::minmax_element(BlockList, std::less {});
+-      auto MinBound = SyscallHandler->LookupExecutableFileSection(Thread, *min_val + SyscallHandler->VAFileStart);
+-      auto MaxBound = SyscallHandler->LookupExecutableFileSection(Thread, *max_val + SyscallHandler->VAFileStart);
++      auto [min_val, max_val] = std::ranges::minmax_element(BlockList, std::less {}, BlockOffset);
++      auto MinBound = SyscallHandler->LookupExecutableFileSection(Thread, BlockOffset(*min_val) + SyscallHandler->VAFileStart);
++      auto MaxBound = SyscallHandler->LookupExecutableFileSection(Thread, BlockOffset(*max_val) + SyscallHandler->VAFileStart);
+       LOGMAN_THROW_A_FMT(MinBound && MaxBound, "Cached blocks offsets {:#x}-{:#x} out of bounds for library {} ({:016x} @ {:#x})!",
+                          *min_val, *max_val, Binary.Filename, Binary.FileId, SyscallHandler->VAFileStart);
+     }
+@@ -657,8 +662,15 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+ 
+     FEX_CONFIG_OPT(MaxInst, MAXINST);
+     // WinPad: a code map block left out here is compiled at run time again, so name each one.
+-    size_t Skipped = 0;
+-    for (auto Addr : BlockList) {
++    size_t Skipped = 0, HalfBarrier = 0;
++    for (auto Entry : BlockList) {
++      // WinPad: a block of the AOT image recorded with unaligned atomic faults (fex-wow64 0030)
++      // is compiled in the half-barrier form instead of its plain entry.
++      const bool IsHalfBarrier = Entry & FEXCore::CodeMap::HalfBarrierTSOBlock;
++      const auto Addr = BlockOffset(Entry);
++      if (!IsHalfBarrier && BlockList.contains(Addr | FEXCore::CodeMap::HalfBarrierTSOBlock)) {
++        continue;
++      }
+       if (!CTX->CheckIfBlockIsCacheable(*Thread, Addr + SyscallHandler->VAFileStart, MaxInst)) {
+         fmt::print("  [aot-gen] {}+{:#x} left out: not cacheable (a relocation in it is not a whole 32/64-bit field)\n",
+                    Binary.Filename, Addr);
+@@ -666,7 +678,15 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+         continue;
+       }
+ 
++      CTX->SetCompileHalfBarrierTSO(IsHalfBarrier);
+       CTX->CompileRIP(Thread, Addr + SyscallHandler->VAFileStart);
++      CTX->SetCompileHalfBarrierTSO(false);
++      HalfBarrier += IsHalfBarrier;
++    }
++    if (HalfBarrier) {
++      fmt::print("  [aot-gen] {} blocks of {} compiled with plain loads and stores and half barriers (unaligned atomic "
++                 "faults recorded at run time)\n",
++                 HalfBarrier, Binary.Filename);
+     }
+     if (Skipped) {
+       fmt::print("  [aot-gen] {} of {} code map blocks of {} left out of the cache\n", Skipped, BlockList.size(), Binary.Filename);
+@@ -852,9 +872,12 @@ static std::map<FEXCore::CodeMapFileId, ParsedContentsAndDependencies> ImportPen
+       }
+     }
+ 
+-    // Every imported code map should have had exactly one executable marker
+-    LOGMAN_THROW_A_FMT(ExecutableFileId, "Could not find an executable identifer in the code map");
+-    Result.at(*ExecutableFileId).Dependencies = std::move(Dependencies);
++    // WinPad: a ready code map of a library (as written by WriteNewCodeMap) has no executable
++    // marker, only its own library load. Such maps come back here when they are re-imported, e.g.
++    // after codemap.py halfbarrier marked their blocks; they carry no dependencies to record.
++    if (ExecutableFileId) {
++      Result.at(*ExecutableFileId).Dependencies = std::move(Dependencies);
++    }
+ 
+     // Delete imported code map
+     Incoming.close();
