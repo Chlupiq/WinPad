@@ -9,7 +9,8 @@ useful: the Windows DLLs it ran are not the Wine ones the iPad runs.
 
 Usage: drcov2codemap.py DRCOV.LOG IMAGE.EXE MAP OUT
 
-  DRCOV.LOG  the drcov log (drcov.GAME.EXE.*.log), versions 2 to 5
+  DRCOV.LOG  the drcov log (drcov.GAME.EXE.*.log), versions 2 to 5, binary
+             or written with -dump_text
   IMAGE.EXE  the image's file name as drcov lists it (e.g. SPEED2.EXE); the
              PE file itself, when given as a path, is checked to match the
              module size drcov saw
@@ -74,6 +75,13 @@ def read_drcov(path):
     if not m:
         sys.exit(f"drcov2codemap: no BB table in {path}")
     n = int(m.group(1))
+    if data[pos:pos + 7] == b"module ":  # -dump_text: "module[  0]: 0x00001000,   5" per block
+        line()
+        blocks = []
+        for _ in range(n):
+            t = re.match(r"module\[\s*(\d+)\]:\s*0x([0-9a-fA-F]+),\s*(\d+)", line())
+            blocks.append((int(t.group(2), 16), int(t.group(3)), int(t.group(1))))
+        return modules, blocks
     blocks = [BB.unpack_from(data, pos + i * BB.size) for i in range(n)]
     return modules, blocks
 
