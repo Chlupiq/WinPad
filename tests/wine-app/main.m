@@ -24,7 +24,8 @@
 // "game" setting naming its program there (NFSU2/SPEED2.EXE by default).
 // The game starts in its own folder (winehost.c) and runs until it ends or
 // the app is stopped. Their frames show on screen through a Metal layer,
-// and a hardware keyboard's keys go to the game (HardwareKeyboard). Until the
+// and a hardware keyboard's keys go to the game (HardwareKeyboard), as do a
+// game controller's or the touch controller's buttons (Gamepads). Until the
 // game has a Metal layer, its first window's GDI frames show there instead
 // (a launcher, a message box), and a status line above says how long it has
 // run and how many frames it has drawn.
@@ -52,6 +53,8 @@ void winehost_post_key(unsigned short vk, int down);
 extern void (*winehost_frame_hook)(void* hwnd, int width, int height, int stride, const void* bits);
 
 static NSString* const FinishedMarker = @"== finished";
+static BOOL gamepad_test;  // "gamepadTest": CI presses A on the touch controller (PressTestButton)
+static void PressTestButton(void);
 
 static NSString* DocumentsPath(NSString* name) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -103,6 +106,10 @@ static void ShowFrame(void* hwnd, int width, int height, int stride, const void*
   CGDataProviderRelease(provider);
   CFRelease(data);
   if (image) dispatch_async(dispatch_get_main_queue(), ^{
+      if (gamepad_test && !frame_view.image)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+          PressTestButton();
+        });
       frame_view.image = image;
     });
 }
@@ -167,6 +174,130 @@ static void HardwareKeyboard(void) {
                                               usingBlock:^(NSNotification* note) {
                                                 attach(note.object);
                                               }];
+}
+
+// Game controllers: a Bluetooth or MFi one, or, when none is connected and
+// the "touchControls" setting is on, one drawn on the screen
+// (GCVirtualController). Their buttons and sticks become keys, which a game
+// reads as it reads a keyboard's; its options can remap them. PadKeys is the
+// mapping, made for a racing game: triggers and the stick drive.
+enum { PadUp, PadDown, PadLeft, PadRight, PadA, PadB, PadX, PadY, PadL1, PadR1, PadL2, PadR2, PadMenu, PadOptions, PadCount };
+static const struct { int input; unsigned short vk; } PadKeys[] = {
+    {PadUp, 0x26},   {PadR2, 0x26},      // accelerate, menu up
+    {PadDown, 0x28}, {PadL2, 0x28},      // brake and reverse, menu down
+    {PadLeft, 0x25}, {PadRight, 0x27},   // steer
+    {PadA, 0x0d},    {PadB, 0x1b},       // Enter, Escape
+    {PadX, 0x20},    {PadY, 'C'},        // Space (handbrake), camera
+    {PadL1, 'Z'},    {PadR1, 'A'},       // gear down, gear up
+    {PadMenu, 0x1b}, {PadOptions, 0x0d},
+};
+static BOOL pad_down[256];  // the keys the controllers hold down
+static BOOL pad_sent;       // a controller has sent a key
+static GCVirtualController* touch_pad;
+
+// Sends the keys whose state changed with this snapshot of a controller's inputs.
+static void ApplyPad(const BOOL in[PadCount]) {
+  BOOL want[256] = {NO};
+  for (size_t i = 0; i < sizeof(PadKeys) / sizeof(PadKeys[0]); i++)
+    if (in[PadKeys[i].input]) want[PadKeys[i].vk] = YES;
+  for (int vk = 0; vk < 256; vk++)
+    if (want[vk] != pad_down[vk]) {
+      pad_down[vk] = want[vk];
+      pad_sent = YES;
+      winehost_post_key(vk, want[vk]);
+    }
+}
+
+static void ReadPad(GCExtendedGamepad* pad) {
+  const float tilt = 0.5f;  // how far a stick or trigger goes before its key is down
+  GCControllerDirectionPad *dpad = pad.dpad, *stick = pad.leftThumbstick;
+  const BOOL in[PadCount] = {
+      [PadUp] = dpad.up.pressed || stick.yAxis.value > tilt,
+      [PadDown] = dpad.down.pressed || stick.yAxis.value < -tilt,
+      [PadLeft] = dpad.left.pressed || stick.xAxis.value < -tilt,
+      [PadRight] = dpad.right.pressed || stick.xAxis.value > tilt,
+      [PadA] = pad.buttonA.pressed,
+      [PadB] = pad.buttonB.pressed,
+      [PadX] = pad.buttonX.pressed,
+      [PadY] = pad.buttonY.pressed,
+      [PadL1] = pad.leftShoulder.pressed,
+      [PadR1] = pad.rightShoulder.pressed,
+      [PadL2] = pad.leftTrigger.value > tilt,
+      [PadR2] = pad.rightTrigger.value > tilt,
+      [PadMenu] = pad.buttonMenu.pressed,
+      [PadOptions] = pad.buttonOptions.pressed,
+  };
+  ApplyPad(in);
+}
+
+static BOOL PhysicalPadConnected(void) {
+  for (GCController* c in GCController.controllers)
+    if (c.extendedGamepad && c != touch_pad.controller) return YES;
+  return NO;
+}
+
+static void ShowTouchPad(void) {
+  if (!touch_pad || PhysicalPadConnected()) return;
+  [touch_pad connectWithReplyHandler:^(NSError* error) {
+    if (error) printf("gamepad: the touch controller did not show: %s\n", error.localizedDescription.UTF8String);
+  }];
+}
+
+static void Gamepads(BOOL touch) {
+  void (^attach)(GCController*) = ^(GCController* c) {
+    if (!c.extendedGamepad) return;
+    const BOOL virtual = c == touch_pad.controller;
+    printf("gamepad: %s connected\n", virtual ? "the touch controller" : (c.vendorName ?: @"a controller").UTF8String);
+    c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
+      ReadPad(pad);
+    };
+    if (!virtual && touch_pad) [touch_pad disconnect];  // a real one replaces the drawn one
+  };
+  if (touch) {
+    GCVirtualControllerConfiguration* config = [GCVirtualControllerConfiguration new];
+    config.elements = [NSSet setWithObjects:GCInputLeftThumbstick, GCInputButtonA, GCInputButtonB, GCInputButtonX,
+                                            GCInputLeftTrigger, GCInputRightTrigger, nil];
+    touch_pad = [[GCVirtualController alloc] initWithConfiguration:config];
+  }
+  for (GCController* c in GCController.controllers) attach(c);
+  NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
+  [center addObserverForName:GCControllerDidConnectNotification
+                      object:nil
+                       queue:NSOperationQueue.mainQueue
+                  usingBlock:^(NSNotification* note) {
+                    attach(note.object);
+                  }];
+  [center addObserverForName:GCControllerDidDisconnectNotification
+                      object:nil
+                       queue:NSOperationQueue.mainQueue
+                  usingBlock:^(NSNotification* note) {
+                    const BOOL none[PadCount] = {NO};
+                    ApplyPad(none);  // no key stays held by a controller that left
+                    if (note.object != touch_pad.controller) ShowTouchPad();
+                  }];
+  ShowTouchPad();
+}
+
+// CI's check of the controllers, once the window shows: A on the touch
+// controller, which is Enter. The simulator may give no touch controller or
+// not run its handler for a value set from code; then A goes in through
+// PadKeys directly, and the log says so.
+static void PressTestButton(void) {
+  GCControllerButtonInput* a = touch_pad.controller.extendedGamepad.buttonA;
+  printf("gamepad: pressing A on the touch controller (%s)\n", a ? "connected" : "not connected");
+  [a setValue:1];
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+    [a setValue:0];
+    if (pad_sent) return;
+    printf("gamepad: no key from the touch controller; pressing A through the mapping\n");
+    BOOL in[PadCount] = {NO};
+    in[PadA] = YES;
+    ApplyPad(in);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      const BOOL none[PadCount] = {NO};
+      ApplyPad(none);
+    });
+  });
 }
 
 // Windows path of a directory for FEX: Z: is the root, with a trailing backslash.
@@ -238,6 +369,7 @@ static NSString* MakePrefix(NSString* bundle) {
   metal_view = self.view;
   metal_fill = [self.program isEqualToString:@"game"];
   if (metal_fill) HardwareKeyboard();
+  gamepad_test = [self.program isEqualToString:@"window"] && [NSUserDefaults.standardUserDefaults boolForKey:@"gamepadTest"];
 
   NSString* previous = ReadLog();
   if (previous.length && ![previous containsString:FinishedMarker]) {
@@ -259,6 +391,16 @@ static NSString* MakePrefix(NSString* bundle) {
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     [self runWine];
   });
+}
+
+// The touch controller goes on the window, so the controllers start once it shows.
+- (void)viewDidAppear:(BOOL)animated {
+  [super viewDidAppear:animated];
+  static BOOL started;
+  if (started || !([self.program isEqualToString:@"game"] || gamepad_test)) return;
+  started = YES;
+  id touch = [NSUserDefaults.standardUserDefaults objectForKey:@"touchControls"];
+  Gamepads(gamepad_test || !touch || [touch boolValue]);
 }
 
 - (void)viewDidLayoutSubviews {
@@ -363,7 +505,8 @@ static NSString* MakePrefix(NSString* bundle) {
     // in the middle of the window 2 s after it shows, then it exits. Its newest
     // frame also goes to Documents/frames as a BMP.
     setenv("WINEHOST_WINDOW", "1", 1);
-    setenv("WINEHOST_CLICK", "50,50", 1);
+    // With gamepadTest the touch controller's A (Enter) closes it instead.
+    if (!gamepad_test) setenv("WINEHOST_CLICK", "50,50", 1);
     setenv("WINEHOST_WAIT_EXIT", "1", 1);
     setenv("WINEHOST_FRAMES", DocumentsPath(@"frames").fileSystemRepresentation, 1);
     [NSFileManager.defaultManager removeItemAtPath:DocumentsPath(@"frames") error:nil];
@@ -389,7 +532,8 @@ static NSString* MakePrefix(NSString* bundle) {
                              [log containsString:@"winehost: Wine process exited with code 43"]
                   : game ? [log containsString:@"winehost: Wine process exited with code 0"]
                          : status == 0 && [log containsString:@"winehost: Wine process exited with code 0"] &&
-                               (window ? [log containsString:@"winehost: window content changed after the click"]
+                               (window && gamepad_test ? [log containsString:@"winehost: key 0xd down"]
+                                : window ? [log containsString:@"winehost: window content changed after the click"]
                                        : [log containsString:@"Hello from x86"]);
   printf("%s, exit %d\n", FinishedMarker.UTF8String, ok ? 0 : 1);
 
