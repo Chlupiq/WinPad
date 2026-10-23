@@ -584,6 +584,49 @@ jobs:
             "$RUNNER_TEMP/fexcache-window"
       - name: The same AOT image of the program with a window links for an iPad
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-window" "$RUNNER_TEMP/fexaot-window-iphoneos/fexaot.dylib" iphoneos
+      - name: The x86 program with a window runs with NoJIT from an image whose blocks of window.exe were all found statically, none recorded
+        env:
+          WINEHOST_CLICK: 50,50
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-window-static/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          WINEHOST_EXPECT_LOG: |
+            [aot-dispatcher] static code from the AOT image
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-window-static-run
+          WINEHOST_FEX_CODEMAP: 1
+        # A game run on an iPad meets new code at every screen and interprets it until the
+        # next round of recording and compiling; tests/fex-wow64/discover.py walks a PE
+        # image's code ahead of time instead. Here window.exe's recorded map and cache are
+        # replaced by what the walk finds without them, and the run must take no block of
+        # window.exe from the interpreter. (Other modules keep their recorded caches.)
+        run: |
+          python3 -m pip install --quiet --user --break-system-packages capstone pefile
+          cache="$RUNNER_TEMP/fexcache-window-static"
+          program="$RUNNER_TEMP/wine-loader/i386-windows/window.exe"
+          rm -rf "$cache" "$WINEHOST_FEX_CACHE"
+          cp -Rp "$RUNNER_TEMP/fexcache-window" "$cache"
+          ready=$(find "$cache/codemap/ready" -type f -iname 'window.exe*')
+          [ -n "$ready" ]
+          mkdir -p "$cache/codemap/new" "$RUNNER_TEMP/discover"
+          python3 tests/fex-wow64/discover.py "$program" "$ready" "$cache/codemap/new/static.bin" --no-recorded --check
+          cp "$ready" "$RUNNER_TEMP/discover/recorded.bin"
+          rm -f $ready
+          find "$cache/cache" -type f -iname 'window.exe*' -delete
+          env -u WINEHOST_CLICK -u WINEHOST_EXPECT_LOG -u WINEHOST_FEX_CODEMAP -u WINEHOST_FEX_NOJIT -u WINEHOST_AOT_IMAGE \
+            WINEHOST_FEX_CACHE="$cache" WINEHOST_EXPECT_OUTPUT="Successfully populated cache" WINEHOST_EXPECT_FEX_CACHE=1 \
+            WINEHOST_SYSWOW64=1 WINEHOST_JIT=1 WINEHOST_JIT_POOL_MB=2048 \
+            sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+          [ -n "$(find "$cache/cache" -type f -iname 'window.exe*' -size +0)" ]
+          sh tests/fex-wow64/build-aot-image.sh "$cache" "$WINEHOST_AOT_IMAGE"
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$program"
+          # The interpreter writes every block it ran to the run's new code map.
+          new=$(find "$WINEHOST_FEX_CACHE/codemap/new" -type f -name '*.bin' -size +0 2>/dev/null || true)
+          learned=0
+          if [ -n "$new" ]; then
+            python3 -I tests/fex-wow64/codemap.py $new || true
+            learned=$(python3 -I tests/fex-wow64/codemap.py $new | grep -i 'window\.exe' | awk '{s+=$1} END {print s+0}')
+          fi
+          echo "window.exe blocks the interpreter ran: $learned"
+          [ "$learned" -eq 0 ]
       - name: Window content of the x86 program
         if: always()
         uses: actions/upload-artifact@v4

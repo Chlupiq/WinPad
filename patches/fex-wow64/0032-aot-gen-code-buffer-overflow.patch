@@ -1,0 +1,83 @@
+The offline compiler refuses a cache whose code overflowed its buffer (FEX 3bec2ac, on top of 0031)
+
+When the blocks of one image don't fit the 128 MB code buffer, the JIT
+swaps to a new buffer mid-compile. SaveData then wrote the block list and
+code of the last buffer only, with the relocations of all of them: the
+cache header said 17,476 blocks of NFSU2 where 74,332 were compiled, and
+loading it read past the code (memcpy in LoadCache, SEGV in ntdll). The
+JIT now prints "[aot-gen] code buffer full" on the first swap while
+generating a cache, SaveData refuses such a cache, and the offline
+compiler deletes the unfinished file and exits 1 ("no cache written for
+X: too much code for one code buffer").
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index b0545e1..b738a75 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -96,6 +96,9 @@ public:
+   fextl::unique_ptr<Core::InternalThreadState> ValidationThread;
+   FEXCore::Core::CPUState::gdt_segment ValidationGDT[32] {};
+   bool IsGeneratingCache = false;
++  // Set when the code buffer filled up while generating a cache: the blocks
++  // compiled before the swap are gone, so the cache can't be saved.
++  bool CodeBufferOverflowed = false;
+ 
+   FEX_CONFIG_OPT(EnableCodeCaching, ENABLECODECACHINGWIP);
+   FEX_CONFIG_OPT(EnableLazyCodeCaching, ENABLELAZYCODECACHINGWIP);
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 84f03ca..8cff835 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -299,6 +299,12 @@ bool CodeCache::SaveData(Core::InternalThreadState& Thread, int fd, const Execut
+   auto CodeBuffer = CTX.GetLatest();
+   auto& LookupCache = *Thread.LookupCache->Shared;
+   auto Relocations = Thread.CPUBackend->TakeRelocations(SourceBinary.FileStartVA);
++  if (CodeBufferOverflowed) {
++    // Block list and code come from the last buffer only, relocations from
++    // all of them: such a cache crashes when it is loaded.
++    LogMan::Msg::EFmt("[aot-gen] not saving the cache of {}: the code buffer overflowed while compiling it", SourceBinary.FileInfo.Filename);
++    return false;
++  }
+ 
+   // Write file header
+   CodeCacheHeader header {};
+diff --git a/FEXCore/Source/Interface/Core/JIT/JIT.cpp b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+index 8467482..8c49ff0 100644
+--- a/FEXCore/Source/Interface/Core/JIT/JIT.cpp
++++ b/FEXCore/Source/Interface/Core/JIT/JIT.cpp
+@@ -1412,6 +1412,12 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
+           return {};
+         }
+ #endif
++        if (CTX->GetCodeCache().IsGeneratingCache && !CTX->GetCodeCache().CodeBufferOverflowed) {
++          LogMan::Msg::EFmt("[aot-gen] code buffer full ({} bytes): the blocks compiled so far are dropped and the cache would be "
++                            "incomplete; compile fewer blocks into one cache",
++                            CurrentCodeBuffer->UsableSize());
++          CTX->GetCodeCache().CodeBufferOverflowed = true;
++        }
+         CTX->ClearCodeCache(ThreadState);
+       }
+ 
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 3e52476..914e04d 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -706,10 +706,16 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+     {
+       auto Entry = SyscallHandler->LookupExecutableFileSection(Thread, SyscallHandler->VAFileStart).value();
+ #ifndef _WIN32
+-      CTX->GetCodeCache().SaveData(*Thread, fd, Entry, 0 /* TODO: Use static base address information if available */);
++#define SAVE_BASE 0 /* TODO: Use static base address information if available */
+ #else
+-      CTX->GetCodeCache().SaveData(*Thread, fd, Entry, SyscallHandler->VAFileStart);
++#define SAVE_BASE SyscallHandler->VAFileStart
+ #endif
++      if (!CTX->GetCodeCache().SaveData(*Thread, fd, Entry, SAVE_BASE)) {
++        close(fd);
++        unlink(FilenameNew.c_str());
++        fmt::print(stderr, "  [aot-gen] no cache written for {}: too much code for one code buffer\n", Binary.Filename);
++        std::exit(1);
++      }
+     }
+     close(fd);
+     std::filesystem::rename(FilenameNew.c_str(), Filename.c_str());

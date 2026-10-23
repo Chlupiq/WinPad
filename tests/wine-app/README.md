@@ -153,3 +153,12 @@ vlastního obrazu.
 
 Projekt vzniká v CI (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
 Nic v něm neupravuj ručně, při další verzi se přegeneruje.
+
+## Víc kódu hry najednou
+
+Bez JITu běží rychle jen kód, který je v překladu (`fexaot-game.dylib`). Kód, ke kterému se hra dostane poprvé, iPad interpretuje (pomalu) a zapíše do `Documents/fexcache/codemap/new`; další kolo překladu na Macu ho přidá. Dvě cesty, jak získat víc kódu v jednom kole (potřebují `python3 -m pip install capstone pefile`):
+
+- **Statické hledání v EXE:** `python3 tests/fex-wow64/discover.py ~/Games/NFSU2/SPEED2.EXE MAPA static.bin --check` projde kód hry od vstupního bodu, exportů, nahraných bloků a tabulek adres v datech a zapíše začátky bloků jako code mapu. `MAPA` je kterákoli nahraná mapa (nebo složka map), která hru jmenuje; z ní se vezme záznam souboru. `--check` vypíše, kolik nahraných bloků by hledání našlo samo.
+- **Záznam z Windows PC:** hra na PC pod DynamoRIO (`C:\DynamoRIO\bin32\drrun.exe -t drcov -- SPEED2.EXE`) zapíše každý spuštěný blok do `drcov.SPEED2.EXE.*.log`. `python3 tests/fex-wow64/drcov2codemap.py ~/Games/NFSU2/SPEED2.EXE MAPA pc.bin drcov....log [další logy]` z nich udělá jednu code mapu. Zapíše jen bloky, kterými FEX vstupuje (cíle volání, návratové adresy, nepřímé cíle); se všemi bloky (`--all-blocks`) by překlad přetekl 128 MB kódový buffer offline kompilátoru. Pokryje jen kód samotné hry, ne Wine a DXMT.
+
+Výslednou mapu dej (po `codemap.py halfbarrier`) do `codemap/new` jako mapy z iPadu a spusť `game-aot.sh` jako obvykle. Mapy, záznamy i obraz hry zůstávají jen na Macu.
