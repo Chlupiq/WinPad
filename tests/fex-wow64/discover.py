@@ -22,8 +22,10 @@ exports and the recorded blocks. It follows direct calls and jumps inside
 executable sections and stops at returns, indirect jumps, int3 and anything
 that does not decode. Block starts it writes are function entries (direct
 call targets), return addresses (the instruction after each call), direct
-jump targets that leave the current function (tail calls), and, unless
---no-data-pointers, addresses found as 32-bit values in the image's data
+jump targets that leave the current function (tail calls), immediate
+operands that point into code and decode cleanly to a return or jump (a
+window procedure stored into a WNDCLASS, a thread start routine), and,
+unless --no-data-pointers, addresses found as 32-bit values in the image's data
 (vtables, jump and callback tables) whose code decodes cleanly to a
 return or jump. Conditional branch targets are not written: FEX compiles
 them into the block of the function that holds them.
@@ -112,6 +114,7 @@ class Image:
                 self.data.append(span)
         self.md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
         self.md.skipdata = False
+        self.md.detail = True  # immediate operands
 
     def is_code(self, rva):
         return any(a <= rva < b for a, b in self.code)
@@ -168,6 +171,13 @@ def walk(img, seeds, max_blocks):
                 continue
             if m in ("ret", "retn", "int3", "ud2") or m in PRIVILEGED:
                 break
+            # Code addresses as immediates (mov [wc.lpfnWndProc], proc;
+            # push proc) are entered later through a pointer.
+            for op in insn.operands:
+                if op.type == capstone.x86.X86_OP_IMM:
+                    target = (op.imm & 0xFFFFFFFF) - img.base
+                    if target not in seen and img.is_code(target) and plausible(img, target):
+                        work.append((target, True))
             pc = nxt
     return starts
 
