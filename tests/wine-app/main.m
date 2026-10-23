@@ -184,18 +184,10 @@ static void HardwareKeyboard(void) {
 // Game controllers: a Bluetooth or MFi one, or, when none is connected and
 // the "touchControls" setting is on, one drawn on the screen
 // (GCVirtualController). Their buttons and sticks become keys, which a game
-// reads as it reads a keyboard's; its options can remap them. PadKeys is the
-// mapping, made for a racing game: triggers and the stick drive.
-enum { PadUp, PadDown, PadLeft, PadRight, PadA, PadB, PadX, PadY, PadL1, PadR1, PadL2, PadR2, PadMenu, PadOptions, PadCount };
-static const struct { int input; unsigned short vk; } PadKeys[] = {
-    {PadUp, 0x26},   {PadR2, 0x26},      // accelerate, menu up
-    {PadDown, 0x28}, {PadL2, 0x28},      // brake and reverse, menu down
-    {PadLeft, 0x25}, {PadRight, 0x27},   // steer
-    {PadA, 0x0d},    {PadB, 0x1b},       // Enter, Escape
-    {PadX, 0x20},    {PadY, 'C'},        // Space (handbrake), camera
-    {PadL1, 'Z'},    {PadR1, 'A'},       // gear down, gear up
-    {PadMenu, 0x1b}, {PadOptions, 0x0d},
-};
+// reads as it reads a keyboard's; its options can remap them. pad_keys is the
+// mapping (WinPadPadKeys in Library.m: made for a racing game, triggers and the
+// stick drive, changed in the library's settings).
+static unsigned short pad_keys[PadCount];
 static BOOL pad_down[256];  // the keys the controllers hold down
 static BOOL pad_sent;       // a controller has sent a key
 static GCVirtualController* touch_pad;
@@ -203,8 +195,8 @@ static GCVirtualController* touch_pad;
 // Sends the keys whose state changed with this snapshot of a controller's inputs.
 static void ApplyPad(const BOOL in[PadCount]) {
   BOOL want[256] = {NO};
-  for (size_t i = 0; i < sizeof(PadKeys) / sizeof(PadKeys[0]); i++)
-    if (in[PadKeys[i].input]) want[PadKeys[i].vk] = YES;
+  for (int i = 0; i < PadCount; i++)
+    if (in[i] && pad_keys[i]) want[pad_keys[i]] = YES;
   for (int vk = 0; vk < 256; vk++)
     if (want[vk] != pad_down[vk]) {
       pad_down[vk] = want[vk];
@@ -249,6 +241,7 @@ static void ShowTouchPad(void) {
 }
 
 static void Gamepads(BOOL touch) {
+  WinPadPadKeys(pad_keys);
   void (^attach)(GCController*) = ^(GCController* c) {
     if (!c.extendedGamepad) return;
     const BOOL virtual = c == touch_pad.controller;
@@ -284,9 +277,9 @@ static void Gamepads(BOOL touch) {
 }
 
 // CI's check of the controllers, once the window shows: A on the touch
-// controller, which is Enter. The simulator may give no touch controller or
-// not run its handler for a value set from code; then A goes in through
-// PadKeys directly, and the log says so.
+// controller, which is Enter unless the padKeys setting changed it. The
+// simulator may give no touch controller or not run its handler for a value
+// set from code; then A goes in through pad_keys directly, and the log says so.
 static void PressTestButton(void) {
   GCControllerButtonInput* a = touch_pad.controller.extendedGamepad.buttonA;
   printf("gamepad: pressing A on the touch controller (%s)\n", a ? "connected" : "not connected");
@@ -544,7 +537,7 @@ static NSString* MakePrefix(NSString* bundle) {
                              [log containsString:@"winehost: Wine process exited with code 43"]
                   : game ? [log containsString:@"winehost: Wine process exited with code 0"]
                          : status == 0 && [log containsString:@"winehost: Wine process exited with code 0"] &&
-                               (window && gamepad_test ? [log containsString:@"winehost: key 0xd down"]
+                               (window && gamepad_test ? [log containsString:[NSString stringWithFormat:@"winehost: key %#x down", pad_keys[PadA]]]
                                 : window ? [log containsString:@"winehost: window content changed after the click"]
                                        : [log containsString:@"Hello from x86"]);
   printf("%s, exit %d\n", FinishedMarker.UTF8String, ok ? 0 : 1);

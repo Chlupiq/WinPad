@@ -265,10 +265,12 @@ done
 echo "The x86 program with a window drew it and took the tap in the app on the iPad simulator, from its AOT image with NoJIT"
 
 # The same window, closed by the game controllers' A instead of the tap: the
-# app draws its touch controller and presses A, which is Enter (PadKeys in
-# main.m); the window takes the key, changes colour and the program exits.
-run_app window-gamepad -program window -gamepadTest YES
-for expect in 'gamepad: pressing A on the touch controller' 'winehost: key 0xd down' \
+# app draws its touch controller and presses A, which is Enter by default
+# (WinPadPadKeys in Library.m) and Space here, remapped as the library's
+# settings do (the padKeys setting); the window takes the key, changes colour
+# and the program exits.
+run_app window-gamepad -program window -gamepadTest YES -padKeys '{a = 32;}'
+for expect in 'gamepad: pressing A on the touch controller' 'winehost: key 0x20 down' \
     'winehost: Wine process exited with code 0'; do
     grep -qF "$expect" "$log" || { echo "missing in the app's log (window-gamepad): $expect" >&2; exit 1; }
 done
