@@ -71,6 +71,13 @@ if [ -n "$new_maps" ]; then
     [ $# -gt 0 ] || { echo "no code maps in $new_maps" >&2; exit 1; }
     cp "$@" "$cache_dir/codemap/new/"
     echo "=== $# code maps from the iPad"
+    # They name the game's files by their path in the app's Documents/FOLDER; the
+    # offline compiler opens them here (GAME_AOT_IPAD_FOLDER: the folder's name on
+    # the iPad, if it is not the game folder's name here).
+    game_dir=$(cd "$(dirname "$game")" && pwd)
+    # shellcheck disable=SC2046 # one argument per code map file
+    python3 "$loader/../fex-wow64/codemap.py" rehome "\\??\\Z:$(printf '%s' "$game_dir" | tr / '\\')" \
+        "${GAME_AOT_IPAD_FOLDER:-$(basename "$game_dir")}" $(maps)
 else
     run=1
     while [ $run -le "$runs" ]; do
