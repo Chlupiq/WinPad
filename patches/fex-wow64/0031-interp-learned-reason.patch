@@ -1,0 +1,27 @@
+The interpreter says why it learned a block (FEX 3bec2ac, on top of 0030)
+
+"[interp] learned block A: not in the AOT image" said the same whether no
+loaded code cache had the block or one had it and an invalidation dropped
+it since. NFSU2 on the iPad interprets 64 blocks of SPEED2.EXE that its
+code map has, and which of the two it is decides the fix. As [aot-miss]
+does for a block compiled at run time, the line now names the reason:
+"a code cache had it, and it was dropped since (see [code-inval])" or
+"not in the AOT image".
+
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 02e5ec1..154ac8f 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -2399,7 +2399,11 @@ ContextImpl::GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, u
+     }
+     if (New) {
+       if (Count <= 64) {
+-        LogMan::Msg::EFmt("[interp] learned block {:#x}: not in the AOT image, interpreted", GuestRIP);
++        // WinPad: as [aot-miss], whether a loaded code cache had the block (and an invalidation
++        // dropped it) or none has it.
++        LogMan::Msg::EFmt("[interp] learned block {:#x}: {}, interpreted", GuestRIP,
++                          CodeCache.WasLoadedFromCache(GuestRIP) ? "a code cache had it, and it was dropped since (see [code-inval])" :
++                                                                   "not in the AOT image");
+       }
+       if (CodeMapWriter) {
+         auto Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);

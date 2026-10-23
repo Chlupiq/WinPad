@@ -1,7 +1,8 @@
 /* A 32-bit x86 Windows console program for the SIMD instructions FEX's NoJIT
  * interpreter has to run as its JIT does (patches/fex-wow64/0026): MMX, SSE
  * to SSE4.1 shifts by a register, packs, psadbw, pmulhrsw, psign, haddps,
- * dpps, rounding and conversions. Each instruction runs on inputs from a
+ * dpps, rounding and conversions, and x87 loads, stores and conversions
+ * under each rounding control and precision. Each instruction runs on inputs from a
  * fixed pseudo-random sequence, edge values among them (NaN, infinities,
  * values past the integer range, ties, shift counts past the element size and
  * with high bits set), and a hash of its results is printed per instruction:
@@ -221,6 +222,58 @@ XMM(sqrtps_x, "sqrtps %%xmm1, %%xmm0")
 XMM(minps_x, "minps %%xmm1, %%xmm0")
 XMM(cmpltps_x, "cmpltps %%xmm1, %%xmm0")
 
+
+/* x87, with the rounding control and precision of CW (fldcw) while INSN runs;
+ * %0 = a, %1 = b, %2 = o. libc++'s unordered_map sizes its buckets from a
+ * float through such conversions on i386 (size_t(ceil(float(n) / load))). */
+#define X87(fn, cw, insn)                                                                     \
+  static void fn(const u8* a, const u8* b, u8* o) {                                           \
+    static const unsigned short c = cw, d = 0x037f;                                           \
+    __asm__ volatile("fninit\n fldcw %3\n " insn "\n fldcw %4" ::"r"(a), "r"(b), "r"(o), "m"(c), \
+                     "m"(d)                                                                   \
+                     : "eax", "memory", "st", "st(1)", "st(2)", "cc");                        \
+  }
+#define X87_RC(fn, insn)                \
+  X87(fn##_n, 0x037f, insn)             \
+  X87(fn##_d, 0x077f, insn)             \
+  X87(fn##_u, 0x0b7f, insn)             \
+  X87(fn##_z, 0x0f7f, insn)
+
+X87(fild16_x, 0x037f, "filds (%0)\n fstpl (%2)")
+X87(fild32_x, 0x037f, "fildl (%0)\n fstpl (%2)")
+X87(fild64_x, 0x037f, "fildll (%0)\n fstpl (%2)")
+/* An unsigned 32-bit value with a zero high half, as i386 code makes a float of it. */
+X87(fildu32_x, 0x037f, "movl (%0), %%eax\n movl %%eax, (%2)\n movl $0, 4(%2)\n fildll (%2)\n fstps (%2)")
+X87_RC(fist16f, "flds (%1)\n fistps (%2)")
+X87_RC(fist32f, "flds (%1)\n fistpl (%2)")
+X87_RC(fist64f, "flds (%1)\n fistpll (%2)")
+X87_RC(fist32d, "fldl (%1)\n fistpl (%2)")
+X87_RC(fist64d, "fldl (%1)\n fistpll (%2)")
+X87(fisttp16_x, 0x037f, "fldl (%1)\n fisttps (%2)")
+X87(fisttp32_x, 0x037f, "fldl (%1)\n fisttpl (%2)")
+X87(fisttp64_x, 0x037f, "fldl (%1)\n fisttpll (%2)")
+X87_RC(frndint, "fldl (%1)\n frndint\n fstpl (%2)")
+X87_RC(fdivf, "flds (%0)\n fdivs (%1)\n fstps (%2)")
+X87(fdivf_pc53, 0x027f, "flds (%0)\n fdivs (%1)\n fstps (%2)")
+X87(fdivd_pc53, 0x027f, "fldl (%0)\n fdivl (%1)\n fstpl (%2)")
+X87(fmuld_pc24, 0x007f, "fldl (%0)\n fmull (%1)\n fstpl (%2)")
+X87_RC(faddd, "fldl (%0)\n faddl (%1)\n fstpl (%2)")
+X87(fsqrt_x, 0x037f, "fldl (%1)\n fsqrt\n fstpl (%2)")
+X87(fucomi_x, 0x037f,
+    "flds (%1)\n flds (%0)\n fucomip %%st(1), %%st\n fstp %%st(0)\n pushfl\n popl %%eax\n andl $0x8d5, %%eax\n movl %%eax, (%2)")
+X87(fcomi_x, 0x037f,
+    "fldl (%1)\n fldl (%0)\n fcomip %%st(1), %%st\n fstp %%st(0)\n pushfl\n popl %%eax\n andl $0x8d5, %%eax\n movl %%eax, (%2)")
+X87(fcompp_x, 0x037f, "flds (%1)\n flds (%0)\n fcompp\n fnstsw %%ax\n andl $0x4500, %%eax\n movl %%eax, (%2)")
+X87(ftst_x, 0x037f, "fldl (%1)\n ftst\n fnstsw %%ax\n fstp %%st(0)\n andl $0x4500, %%eax\n movl %%eax, (%2)")
+X87(fxam_x, 0x037f, "fldl (%1)\n fxam\n fnstsw %%ax\n fstp %%st(0)\n andl $0x4700, %%eax\n movl %%eax, (%2)")
+/* libc++'s bucket count for N+1 elements at load factor b: ceil(float(N+1) / b),
+ * rounded up by frndint under RC=up, truncated to 64 bits by fistpll under RC=zero. */
+X87(buckets_x, 0x037f,
+    "movl (%0), %%eax\n shrl $8, %%eax\n incl %%eax\n movl %%eax, (%2)\n movl $0, 4(%2)\n fildll (%2)\n "
+    "fdivs (%1)\n fstps 8(%2)\n flds 8(%2)\n fnstcw 12(%2)\n movw 12(%2), %%ax\n orw $0x0800, %%ax\n "
+    "andw $0xfbff, %%ax\n movw %%ax, 14(%2)\n fldcw 14(%2)\n frndint\n orw $0x0c00, %%ax\n movw %%ax, 14(%2)\n "
+    "fldcw 14(%2)\n fistpll (%2)\n fldcw 12(%2)")
+
 void start(void) {
   out = GetStdHandle(STD_OUTPUT_HANDLE);
   run("psllw", psllw_x, INT, SHIFT, 16);
@@ -290,6 +343,43 @@ void start(void) {
   run("sqrtps", sqrtps_x, FLOAT, FLOAT, 16);
   run("minps", minps_x, FLOAT, FLOAT, 16);
   run("cmpltps", cmpltps_x, FLOAT, FLOAT, 16);
+  run("fild16", fild16_x, INT, INT, 8);
+  run("fild32", fild32_x, INT, INT, 8);
+  run("fild64", fild64_x, INT, INT, 8);
+  run("fild-u32", fildu32_x, INT, INT, 4);
+#define RUN_RC(name, fn, kind, bytes)        \
+  run(name "-nearest", fn##_n, INT, kind, bytes); \
+  run(name "-down", fn##_d, INT, kind, bytes);    \
+  run(name "-up", fn##_u, INT, kind, bytes);      \
+  run(name "-zero", fn##_z, INT, kind, bytes);
+  RUN_RC("fistp16-float", fist16f, FLOAT, 2)
+  RUN_RC("fistp32-float", fist32f, FLOAT, 4)
+  RUN_RC("fistp64-float", fist64f, FLOAT, 8)
+  RUN_RC("fistp32-double", fist32d, DOUBLE, 4)
+  RUN_RC("fistp64-double", fist64d, DOUBLE, 8)
+  run("fisttp16", fisttp16_x, INT, DOUBLE, 2);
+  run("fisttp32", fisttp32_x, INT, DOUBLE, 4);
+  run("fisttp64", fisttp64_x, INT, DOUBLE, 8);
+  RUN_RC("frndint", frndint, DOUBLE, 8)
+#undef RUN_RC
+  run("fdiv-float-nearest", fdivf_n, FLOAT, FLOAT, 4);
+  run("fdiv-float-down", fdivf_d, FLOAT, FLOAT, 4);
+  run("fdiv-float-up", fdivf_u, FLOAT, FLOAT, 4);
+  run("fdiv-float-zero", fdivf_z, FLOAT, FLOAT, 4);
+  run("fdiv-float-pc53", fdivf_pc53, FLOAT, FLOAT, 4);
+  run("fdiv-double-pc53", fdivd_pc53, DOUBLE, DOUBLE, 8);
+  run("fmul-double-pc24", fmuld_pc24, DOUBLE, DOUBLE, 8);
+  run("fadd-double-nearest", faddd_n, DOUBLE, DOUBLE, 8);
+  run("fadd-double-down", faddd_d, DOUBLE, DOUBLE, 8);
+  run("fadd-double-up", faddd_u, DOUBLE, DOUBLE, 8);
+  run("fadd-double-zero", faddd_z, DOUBLE, DOUBLE, 8);
+  run("fsqrt", fsqrt_x, INT, DOUBLE, 8);
+  run("fucomi", fucomi_x, FLOAT, FLOAT, 4);
+  run("fcomi", fcomi_x, DOUBLE, DOUBLE, 4);
+  run("fcompp", fcompp_x, FLOAT, FLOAT, 4);
+  run("ftst", ftst_x, INT, DOUBLE, 4);
+  run("fxam", fxam_x, INT, DOUBLE, 4);
+  run("buckets", buckets_x, INT, FLOAT, 8);
   put("simd: done\n");
   ExitProcess(0);
 }
