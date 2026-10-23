@@ -1,6 +1,7 @@
 /* A 32-bit x86 Windows program with a window, like the smallest game shell:
  * registers a class, opens a window with a menu bar, paints its client area
- * with GDI and changes colour on a click (WM_LBUTTONDOWN). Shortly after
+ * with GDI and changes colour on a click (WM_LBUTTONDOWN) or a key (WM_KEYDOWN,
+ * which the iPad app's game controller check sends). Shortly after
  * it closes the window and exits with 0, so that FEX writes its code map. The x86 code runs under FEX through WoW64, and so
  * does that of the 32-bit user32, gdi32 and win32u it calls. No headers: the
  * types and functions it uses are declared here. */
@@ -44,6 +45,7 @@ typedef struct {
 
 #define WM_DESTROY 0x0002
 #define WM_PAINT 0x000f
+#define WM_KEYDOWN 0x0100
 #define WM_TIMER 0x0113
 #define WM_LBUTTONDOWN 0x0201
 #define WS_OVERLAPPEDWINDOW 0x00cf0000
@@ -99,6 +101,7 @@ static LRESULT __stdcall window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     EndPaint(hwnd, &ps);
     return 0;
   }
+  case WM_KEYDOWN:
   case WM_LBUTTONDOWN:
     clicks++;
     InvalidateRect(hwnd, 0, 1);

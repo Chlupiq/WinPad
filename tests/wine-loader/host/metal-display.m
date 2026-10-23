@@ -115,6 +115,11 @@ static id counting_next_drawable(id self, SEL sel) {
   return drawable;
 }
 
+// For the app's status line: how many frames the program has drawn through Metal so far.
+__attribute__((used, visibility("default"))) long winehost_metal_frames(void) {
+  return __atomic_load_n(&drawables, __ATOMIC_RELAXED);
+}
+
 // The first command buffers committed and how each one ends. (The
 // simulator SDK has no presented handlers for drawables.)
 static void (*commit_buffer)(id, SEL);
