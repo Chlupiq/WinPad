@@ -4,11 +4,34 @@ Testovací aplikace pro iPad. Spustí ve Wine malý 32bitový x86 program pro
 Windows (`hello.exe`) přes WoW64 a FEX, bez JITu: x86 kód běží jen
 z předpřeloženého obrazu (`fexaot.dylib`) a každý modul Wine ze svého dylibu.
 Wine, jeho moduly i obraz jsou už přeložené, zvlášť pro iPad (`iphoneos`)
-a pro simulátor (`iphonesimulator`). Xcode překládá jen `main.m`.
+a pro simulátor (`iphonesimulator`). Xcode překládá jen `main.m` a `Library.m`.
 
 Blok x86 kódu, který v obrazu chybí, spustí interpret FEXu (nic nemapuje
 jako spustitelné) a zapíše ho do kódové mapy v `fexcache/codemap/new`
 v Dokumentech aplikace, takže ho další obraz může mít.
+
+## Herní knihovna
+
+Aplikace se otevře na knihovně her, podobné úvodní obrazovce herní konzole.
+Ukáže každou hru, kterou jsi do aplikace nakopíroval (Finder → iPad →
+Soubory → WinPad Wine), každou ve vlastní složce. Hru vybereš herním
+ovladačem (křížový ovladač nebo levá páčka, A spustí, Y otevře nastavení,
+B ho zavře), šipkami a Enterem na klávesnici, nebo ťuknutím (druhé ťuknutí
+spustí). Ve složce hry může být:
+
+- `winpad.json` s názvem hry a jejím programem, např.
+  `{"title": "Need for Speed Underground 2", "exe": "SPEED2.EXE"}`. Bez něj
+  je názvem jméno složky a programem největší `.exe`, který není instalátor
+  ani pomocný program.
+- `cover.png` nebo `cover.jpg`, obal hry.
+
+Přeložený obraz hry je v projektu `Frameworks/<sdk>/fexaot-SLOŽKA.dylib`
+(jméno složky malými písmeny, ostatní znaky jako `-`), jinak
+`fexaot-game.dylib` z `game-aot.sh`. Knihovna u hry ukáže, jestli ho má.
+Wine jde v aplikaci spustit jen jednou, takže po skončení hry aplikaci
+spusť znovu. V nastavení knihovny je dotykové ovládání, poslední log
+a testovací programy (`hello.exe`, `window.exe`). Nastavení → WinPad Wine →
+Program nebo schémata v Xcode knihovnu přeskočí.
 
 ## Na simulátoru (Mac s Apple Silicon)
 

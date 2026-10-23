@@ -8,6 +8,9 @@ targets:
     platform: iOS
     sources:
       - main.m
+      # The game library the app opens on.
+      - Library.h
+      - Library.m
       # The "program" setting in the Settings app (main.m, ProgramName).
       - Settings.bundle
     postBuildScripts:

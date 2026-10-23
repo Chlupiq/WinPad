@@ -75,7 +75,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Info.plist" "$here/README.md" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Info.plist" "$here/README.md" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
@@ -208,12 +208,41 @@ run_app() {
         echo "ntdll asked a debugger to map page 0 (BRK #0xf00d)" >&2; exit 1
     fi
 }
-# hello.exe, the default.
-run_app hello
+# hello.exe, picked by the "program" setting as a launch argument: without
+# one the app opens on its game library.
+run_app hello -program hello
 for expect in 'Hello from x86' 'WinPad Wine: program hello, AOT image fexaot.dylib'; do
     grep -qF "$expect" "$log" || { echo "missing in the app's log (hello): $expect" >&2; exit 1; }
 done
 echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT image with NoJIT"
+
+# The game library the app opens on (Library.m) finds the games copied into
+# Documents, one per folder. Fake ones here, copies of hello.exe: one named by
+# its winpad.json next to a larger installer, one with only its program, and a
+# folder without one. With libraryTest the app writes what it found to
+# Documents/library.txt, presses right and A, and writes what it would start.
+docs="$data/Documents"
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/library.txt"
+mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty"
+cp "$sim_app/i386-windows/hello.exe" "$docs/Test Game/TEST.EXE"
+cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Test Game/SETUP.EXE"
+printf '{"title": "WinPad Test"}\n' >"$docs/Test Game/winpad.json"
+cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
+echo notes >"$docs/Empty/readme.txt"
+xcrun simctl launch "$udid" "$bundle" -libraryTest YES
+for _ in $(seq 60); do
+    grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
+    sleep 1
+done
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+echo "--- the library's report ---"
+cat "$docs/library.txt" || true
+for expect in 'library: 2 games' 'library: Plain | Plain/GAME.EXE | 32bit | image none' \
+    'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none' 'start: game Test Game/TEST.EXE, image none'; do
+    grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
+done
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty"
+echo "The game library found the games in Documents and started the one picked with the controller's buttons"
 [ -n "$sim_window_aot" ] || exit 0
 
 # window.exe, picked by the "program" setting, given here as a launch argument

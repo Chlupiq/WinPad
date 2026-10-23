@@ -10,9 +10,11 @@
 // out like Madeira's: aarch64-windows, i386-windows, nls and fonts next to
 // the executable, where Madeira's ntdll looks for them.
 //
-// Which program it runs is the "program" setting (ProgramName): hello
-// (hello.exe, the default) or window (tests/wine-i386/window.c, a window
-// drawn with GDI, from its own AOT image Frameworks/fexaot-window.dylib).
+// The app opens on its game library (Library.m), which starts a game the
+// user copied in, or a test program from its settings. The "program" setting
+// (ProgramName) skips the library: hello (hello.exe) or window
+// (tests/wine-i386/window.c, a window drawn with GDI, from its own AOT image
+// Frameworks/fexaot-window.dylib).
 // The window's frames show on screen; 2 s after it shows, the app taps it
 // (as CI does), it changes colour and the program exits.
 //
@@ -42,6 +44,8 @@
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
+
+#import "Library.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -80,12 +84,13 @@ static NSString* ReadLogTail(void) {
 
 // The program to run: WINPAD_PROGRAM (set by an Xcode scheme), else the
 // "program" user default: the Settings app (Settings → WinPad Wine →
-// Program), or a launch argument "-program NAME". Without either, hello.
+// Program), or a launch argument "-program NAME". Without either, library:
+// the game library picks it.
 static NSString* ProgramName(void) {
   const char* env = getenv("WINPAD_PROGRAM");
   if (env && *env) return @(env);
   NSString* setting = [NSUserDefaults.standardUserDefaults stringForKey:@"program"];
-  return setting.length ? setting : @"hello";
+  return setting.length ? setting : @"library";
 }
 
 // Shows the newest frame of the program's window (winehost_frame_hook).
@@ -334,6 +339,7 @@ static NSString* MakePrefix(NSString* bundle) {
 @property(nonatomic, strong) NSTimer* timer;
 @property(atomic, copy) NSString* summary;
 @property(nonatomic, copy) NSString* program;
+@property(nonatomic, strong) WinPadGame* game;  // the game the library started, or nil
 @property(nonatomic, strong) UILabel* status;
 @property(nonatomic, strong) NSDate* started;
 @end
@@ -348,7 +354,7 @@ static NSString* MakePrefix(NSString* bundle) {
   self.text.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
   self.text.textContainerInset = UIEdgeInsetsMake(48, 16, 16, 16);
   [self.view addSubview:self.text];
-  self.program = ProgramName();
+  if (!self.program) self.program = ProgramName();
   const BOOL game = [self.program isEqualToString:@"game"];
   if ([self.program isEqualToString:@"window"] || game) {
     // The window on top, the log below it. (A game's picture, with a status line above.)
@@ -481,19 +487,25 @@ static NSString* MakePrefix(NSString* bundle) {
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
   if (game) {
-    NSString* exe = [NSUserDefaults.standardUserDefaults stringForKey:@"game"];
+    NSString* exe = self.game ? self.game.exe : [NSUserDefaults.standardUserDefaults stringForKey:@"game"];
     program = DocumentsPath(exe.length ? exe : @"NFSU2/SPEED2.EXE");
     // The Ultimate ASI Loader many games carry is a dinput8.dll of their own.
     setenv("WINEDLLOVERRIDES", "dinput8=n,b", 1);
   }
   // The game has an AOT image only where game-aot.sh put one into the
   // project on the Mac it was built on; without it the game runs with the JIT.
-  NSString* game_image = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"fexaot-game.dylib"];
-  if (!cube && (!game || [NSFileManager.defaultManager fileExistsAtPath:game_image])) {
+  // The library picked a game's own image (Library.m), else fexaot-game.dylib.
+  NSString* frameworks = NSBundle.mainBundle.privateFrameworksPath;
+  NSString* game_image = self.game ? self.game.image : [frameworks stringByAppendingPathComponent:@"fexaot-game.dylib"];
+  if (game_image && ![NSFileManager.defaultManager fileExistsAtPath:game_image]) game_image = nil;
+  if (!cube && (!game || game_image)) {
     // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
-    image = [name isEqualToString:@"hello"] ? @"fexaot.dylib" : [NSString stringWithFormat:@"fexaot-%@.dylib", name];
-    setenv("WINEHOST_AOT_IMAGE",
-           [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:image].fileSystemRepresentation, 1);
+    NSString* path = game ? game_image
+                          : [frameworks stringByAppendingPathComponent:[name isEqualToString:@"hello"]
+                                                                           ? @"fexaot.dylib"
+                                                                           : [NSString stringWithFormat:@"fexaot-%@.dylib", name]];
+    image = path.lastPathComponent;
+    setenv("WINEHOST_AOT_IMAGE", path.fileSystemRepresentation, 1);
     setenv("FEX_NOJIT", "1", 1);
     setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
     setenv("FEX_ENABLECODECACHEVALIDATION", "0", 1);
@@ -558,7 +570,31 @@ static NSString* MakePrefix(NSString* bundle) {
 @implementation WineSceneDelegate
 - (void)scene:(UIScene*)scene willConnectToSession:(UISceneSession*)session options:(UISceneConnectionOptions*)options {
   self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
-  self.window.rootViewController = [WineViewController new];
+  if (![ProgramName() isEqualToString:@"library"]) {
+    self.window.rootViewController = [WineViewController new];
+    [self.window makeKeyAndVisible];
+    return;
+  }
+  // The library hands over to Wine, which runs once per process: the app is
+  // started again for the next game. With libraryTest (CI) it only says what
+  // it would run.
+  LibraryViewController* library = [LibraryViewController new];
+  __weak UIWindow* window = self.window;
+  library.start = ^(NSString* program, WinPadGame* game) {
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
+      NSString* path = DocumentsPath(@"library.txt");
+      NSString* report = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
+      report = [report stringByAppendingFormat:@"start: %@ %@, image %@\n%@\n", program, game.exe ?: @"-",
+                                               game.image.lastPathComponent ?: @"none", FinishedMarker];
+      [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+      return;
+    }
+    WineViewController* wine = [WineViewController new];
+    wine.program = program;
+    wine.game = game;
+    window.rootViewController = wine;
+  };
+  self.window.rootViewController = library;
   [self.window makeKeyAndVisible];
 }
 @end

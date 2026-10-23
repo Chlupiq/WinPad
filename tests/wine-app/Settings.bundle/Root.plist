@@ -12,9 +12,10 @@
 			<key>Key</key>
 			<string>program</string>
 			<key>DefaultValue</key>
-			<string>hello</string>
+			<string>library</string>
 			<key>Titles</key>
 			<array>
+				<string>Game library</string>
 				<string>hello.exe (text)</string>
 				<string>window.exe (Win32 window)</string>
 				<string>D3D9 cube (JIT, from Xcode)</string>
@@ -22,6 +23,7 @@
 			</array>
 			<key>Values</key>
 			<array>
+				<string>library</string>
 				<string>hello</string>
 				<string>window</string>
 				<string>d3d9-cube</string>
