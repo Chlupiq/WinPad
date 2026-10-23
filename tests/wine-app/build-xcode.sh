@@ -75,7 +75,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Info.plist" "$here/README.md" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
@@ -154,7 +154,13 @@ build() {
     fi
     echo "$product"
 }
-build iphoneos >/dev/null
+ipad_app=$(build iphoneos)
+# The same build as an unsigned IPA, for AltStore, SideStore or Sideloadly.
+sh "$here/make-ipa.sh" "$ipad_app" "$out/WinPadWine.ipa"
+for f in WinPadWine Frameworks/fexaot.dylib aarch64-windows/ntdll.dll.dylib Settings.bundle/Root.plist; do
+    unzip -l "$out/WinPadWine.ipa" "Payload/WinPadWine.app/$f" >/dev/null ||
+        { echo "the IPA lacks $f" >&2; exit 1; }
+done
 sim_app=$(build iphonesimulator)
 
 # Run the simulator build on an iPad simulator and read the app's log.

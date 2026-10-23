@@ -755,6 +755,13 @@ jobs:
         with:
           name: WinPadWine-xcode
           path: ${{ runner.temp }}/wine-app/WinPadWine-xcode
+      - name: Upload the unsigned IPA of the Wine app
+        if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinPadWine-ipa
+          path: ${{ runner.temp }}/wine-app/WinPadWine.ipa
+          if-no-files-found: error
       - name: FEX code map and code caches of the x86 run
         if: always()
         uses: actions/upload-artifact@v4
