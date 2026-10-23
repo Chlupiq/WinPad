@@ -19,7 +19,14 @@ marked as one that took unaligned atomic faults in a read-only AOT image
 (CodeMap::HalfBarrierTSOBlock, patches/fex-wow64/0030), as such a run
 records it. The offline compiler compiles those blocks with plain loads and
 stores and half barriers, which CI checks without a CPU that faults.
+
+       codemap.py rehome GAME_DIR FOLDER FILE...   Renames, in each map, the
+images the iPad app ran from its Documents/FOLDER (\\??\\Z:\\var\\mobile\\
+Containers\\Data\\Application\\UUID\\Documents\\FOLDER\\...) to the same files
+under GAME_DIR (as FEX names it: \\??\\Z:\\Users\\...), so that the offline
+compiler on the Mac opens them.
 """
+import re
 import struct
 import sys
 
@@ -109,7 +116,45 @@ def halfbarrier(src, dst):
     return 0 if marked else 1
 
 
+def rehome(game_dir, folder, paths):
+    ipad = re.compile(
+        r"^\\\?\?\\Z:\\(?:private\\)?var\\mobile\\Containers\\Data\\Application\\[^\\]+\\Documents\\"
+        + re.escape(folder) + r"\\(.+)$",
+        re.IGNORECASE,
+    )
+    for path in paths:
+        with open(path, "rb") as f:
+            data = f.read()
+        out, pos, renamed = bytearray(), 0, 0
+        while pos + ENTRY.size <= len(data):
+            entry = ENTRY.unpack_from(data, pos)
+            if entry == LIBRARY:
+                start = pos + ENTRY.size + 8
+                end = data.index(b"\0", start)
+                nxt = (end + 1 + 3) & ~3
+                name = data[start:end].decode("utf-8")
+                m = ipad.match(name)
+                if m:
+                    name = game_dir.rstrip("\\") + "\\" + m.group(1)
+                    renamed += 1
+                record = data[pos:start] + name.encode("utf-8") + b"\0"
+                out += record + b"\0" * (-len(record) % 4)
+                pos = nxt
+                continue
+            nxt = pos + ENTRY.size + (8 if entry == SET_MAIN else 0)
+            out += data[pos:nxt]
+            pos = nxt
+        out += data[pos:]
+        if renamed:
+            with open(path, "wb") as f:
+                f.write(out)
+        print(f"{path}: {renamed} images renamed to {game_dir}")
+    return 0
+
+
 def main():
+    if len(sys.argv) >= 5 and sys.argv[1] == "rehome":
+        return rehome(sys.argv[2], sys.argv[3], sys.argv[4:])
     if len(sys.argv) == 4 and sys.argv[1] == "halfbarrier":
         return halfbarrier(sys.argv[2], sys.argv[3])
     if len(sys.argv) >= 4 and sys.argv[1] == "drop" and sys.argv[2] == "--every":

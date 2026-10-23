@@ -7,7 +7,7 @@
 # (default 3), each writing a code map of the x86 code it took; FEX's offline
 # compiler turns their union into code caches; a run with those caches loaded
 # dumps FEX's dispatcher; the caches and the dispatcher are linked into
-# fexaot-game.dylib for the simulator and the iPad, in the Xcode project's
+# fexaot-game.dylib (GAME_AOT_IMAGE) for the simulator and the iPad, in the Xcode project's
 # Frameworks/<platform>/, where the app finds them.
 #
 # The iPad's runs take code the simulator's did not (Metal 3 and BC textures
@@ -30,7 +30,8 @@
 # (default 8, tests/fex-wow64/process-all-batches.sh), GAME_AOT_JIT_POOL_MB:
 # its JIT pool (default 4096), GAME_AOT_COMPILE_SECONDS: how long one such
 # process may take (default 600), REBUILD_CACHES=1: generate every cache again
-# (after a change to FEX's code generation).
+# (after a change to FEX's code generation), GAME_AOT_IMAGE=folder: name the image
+# fexaot-FOLDER.dylib after the game's folder instead of fexaot-game.dylib.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -44,6 +45,14 @@ new_maps=${6:-}
 runs=${RUNS:-3}
 name=$(basename "$game" | tr 'A-Z' 'a-z')
 name=${name%.*}
+# GAME_AOT_IMAGE=folder names the image after the game's folder, as the app's game library
+# looks for it (Library.m's WinPadGameImage), so the app carries several games' images.
+if [ "${GAME_AOT_IMAGE:-game}" = folder ]; then
+    slug=$(basename "$(dirname "$game")" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9][^a-z0-9]*/-/g; s/^-//; s/-$//')
+    image=fexaot-$slug.dylib
+else
+    image=fexaot-game.dylib
+fi
 maps() { find "$cache_dir/codemap/new" -type f -name '*.bin' -size +0 2>/dev/null; }
 
 # As main.m's game program, so the code maps hold the blocks the app's runs take.
@@ -62,6 +71,13 @@ if [ -n "$new_maps" ]; then
     [ $# -gt 0 ] || { echo "no code maps in $new_maps" >&2; exit 1; }
     cp "$@" "$cache_dir/codemap/new/"
     echo "=== $# code maps from the iPad"
+    # They name the game's files by their path in the app's Documents/FOLDER; the
+    # offline compiler opens them here (GAME_AOT_IPAD_FOLDER: the folder's name on
+    # the iPad, if it is not the game folder's name here).
+    game_dir=$(cd "$(dirname "$game")" && pwd)
+    # shellcheck disable=SC2046 # one argument per code map file
+    python3 "$loader/../fex-wow64/codemap.py" rehome "\\??\\Z:$(printf '%s' "$game_dir" | tr / '\\')" \
+        "${GAME_AOT_IPAD_FOLDER:-$(basename "$game_dir")}" $(maps)
 else
     run=1
     while [ $run -le "$runs" ]; do
@@ -100,7 +116,7 @@ fi
 for sdk in iphonesimulator iphoneos; do
     sh "$loader/../fex-wow64/build-aot-image.sh" "$cache_dir" "$cache_dir/image-$sdk/fexaot.dylib" $sdk
     mkdir -p "$proj/Frameworks/$sdk"
-    cp "$cache_dir/image-$sdk/fexaot.dylib" "$proj/Frameworks/$sdk/fexaot-game.dylib"
+    cp "$cache_dir/image-$sdk/fexaot.dylib" "$proj/Frameworks/$sdk/$image"
 done
-echo "fexaot-game.dylib for the simulator and the iPad is in $proj/Frameworks:" \
-    "the scheme \"WinPadWine Game\" now runs $name with NoJIT"
+echo "$image for the simulator and the iPad is in $proj/Frameworks:" \
+    "the game library (and the scheme \"WinPadWine Game\" for fexaot-game.dylib) runs $name with NoJIT"
