@@ -146,5 +146,10 @@ poolu jednoho procesu nevešlo. `RUNS=0` hru s JITem nespouští a obraz postav�
 z map a cache, které už v adresáři jsou. `REBUILD_CACHES=1` vygeneruje všechny
 cache znovu, což je potřeba po změně v generování kódu FEXu.
 
+Víc her v jedné aplikaci: s `GAME_AOT_IMAGE=folder` se obraz jmenuje podle
+složky hry (`NFSU2` → `fexaot-nfsu2.dylib`) a knihovna ho najde u té hry.
+Bez toho je to `fexaot-game.dylib`, který knihovna použije pro hru bez
+vlastního obrazu.
+
 Projekt vzniká v CI (`tests/wine-app/build-xcode.sh` v repu Chlupiq/WinPad).
 Nic v něm neupravuj ručně, při další verzi se přegeneruje.
