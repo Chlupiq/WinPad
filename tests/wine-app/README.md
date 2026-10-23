@@ -53,6 +53,23 @@ přímo z plochy iPadu. Log z posledního běhu je v aplikaci Soubory →
 Na mém iPadu → WinPad Wine (`wine.log`). Když běh aplikaci shodí, ukáže
 log toho běhu při dalším spuštění.
 
+## Jako IPA (AltStore, SideStore, Sideloadly)
+
+Bez Xcode jde aplikace nainstalovat z IPA, které si podepíše instalátor tvým
+Apple ID. CI dává IPA s testovacími programy jako artefakt `WinPadWine-ipa`.
+IPA s hrou si uděláš na Macu, až `game-aot.sh` dá do projektu obraz hry:
+
+    sh WinPadWine-xcode/make-ipa.sh WinPadWine-xcode ~/Desktop/WinPadWine.ipa
+
+Skript projekt postaví pro iPad bez podpisu a zabalí ho. IPA s obrazem hry
+nikam nenahrávej, je v něm přeložený kód hry.
+
+S bezplatným Apple ID vyprší podpis po 7 dnech; AltStore a SideStore ho umí
+obnovit samy. Aplikace má kromě hlavního programu desítky volných knihoven
+(`Frameworks/`, `aarch64-windows/`) a instalátor musí podepsat i ty. Jestli
+to každý z nich udělá, ještě není ověřené na iPadu: když aplikace po instalaci
+spadne hned při startu, je to nejspíš tohle.
+
 ## Program s oknem (`window.exe`)
 
 Aplikace umí spustit místo `hello.exe` i 32bitový x86 program s oknem
