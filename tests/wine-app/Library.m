@@ -133,6 +133,95 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
   return games;
 }
 
+// The controller's inputs: their names in the settings and in the "padKeys" setting, and the keys
+// they are by default: the stick and d-pad steer, R2 accelerates and L2 brakes.
+static NSString* const PadTitles[PadCount] = {
+    @"Nahoru", @"Dolů", @"Doleva", @"Doprava", @"A", @"B", @"X", @"Y", @"L1", @"R1", @"L2", @"R2", @"Menu", @"Options"};
+static NSString* const PadIds[PadCount] = {@"up", @"down", @"left", @"right", @"a",  @"b",    @"x",
+                                           @"y",  @"l1",   @"r1",   @"l2",    @"r2", @"menu", @"options"};
+static const unsigned short PadDefaults[PadCount] = {0x26, 0x28, 0x25, 0x27, 0x0d, 0x1b, 0x20,
+                                                     'C',  'Z',  'A',  0x28, 0x26, 0x1b, 0x0d};
+
+void WinPadPadKeys(unsigned short keys[PadCount]) {
+  NSDictionary* saved = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"padKeys"];
+  for (int i = 0; i < PadCount; i++) {
+    id key = saved[PadIds[i]];
+    keys[i] = [key respondsToSelector:@selector(intValue)] ? (unsigned short)([key intValue] & 0xff) : PadDefaults[i];
+  }
+}
+
+static void SavePadKey(int input, unsigned short vk) {
+  NSMutableDictionary* saved = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"padKeys"] mutableCopy] ?: [NSMutableDictionary new];
+  saved[PadIds[input]] = @(vk);
+  [NSUserDefaults.standardUserDefaults setObject:saved forKey:@"padKeys"];
+}
+
+// The keys an input can be: those a game is most likely to use.
+static NSArray<NSNumber*>* KeyChoices(void) {
+  NSMutableArray* keys = [@[ @0x26, @0x28, @0x25, @0x27, @0x0d, @0x1b, @0x20, @0x10, @0x11, @0x12, @0x09, @0x08 ] mutableCopy];
+  for (int c = 'A'; c <= 'Z'; c++) [keys addObject:@(c)];
+  for (int c = '0'; c <= '9'; c++) [keys addObject:@(c)];
+  for (int f = 0; f < 12; f++) [keys addObject:@(0x70 + f)];
+  [keys addObject:@0];
+  return keys;
+}
+
+static NSString* KeyName(unsigned short vk) {
+  switch (vk) {
+    case 0: return @"Nic";
+    case 0x26: return @"Šipka nahoru";
+    case 0x28: return @"Šipka dolů";
+    case 0x25: return @"Šipka doleva";
+    case 0x27: return @"Šipka doprava";
+    case 0x0d: return @"Enter";
+    case 0x1b: return @"Esc";
+    case 0x20: return @"Mezerník";
+    case 0x10: return @"Shift";
+    case 0x11: return @"Ctrl";
+    case 0x12: return @"Alt";
+    case 0x09: return @"Tab";
+    case 0x08: return @"Backspace";
+  }
+  if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return [NSString stringWithFormat:@"%c", vk];
+  if (vk >= 0x70 && vk < 0x7c) return [NSString stringWithFormat:@"F%d", vk - 0x70 + 1];
+  return [NSString stringWithFormat:@"Klávesa 0x%02x", vk];
+}
+
+// Picks the key of one input.
+@interface WinPadKeyPickerViewController : UITableViewController
+@property(nonatomic) int input;
+@end
+
+@implementation WinPadKeyPickerViewController
+- (instancetype)init {
+  return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.title = PadTitles[self.input];
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  return (NSInteger)KeyChoices().count;
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
+  UITableViewCell* cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+  unsigned short keys[PadCount];
+  WinPadPadKeys(keys);
+  const unsigned short vk = KeyChoices()[path.row].unsignedShortValue;
+  cell.textLabel.text = KeyName(vk);
+  cell.accessoryType = vk == keys[self.input] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+  return cell;
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
+  SavePadKey(self.input, KeyChoices()[path.row].unsignedShortValue);
+  [self.navigationController popViewControllerAnimated:YES];
+}
+@end
+
 // A label with room around its text: the game's tags.
 @interface WinPadTag : UILabel
 @end
@@ -182,7 +271,7 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
   return view;
 }
 
-// The settings: touch controls, the last log, the test programs.
+// The settings: touch controls, the controller's keys, the last log, the test programs.
 @interface WinPadLogViewController : UIViewController
 @end
 
@@ -224,6 +313,12 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
                                                                                          action:@selector(done)];
 }
 
+// Back from a picker, which changed a key.
+- (void)viewWillAppear:(BOOL)animated {
+  [super viewWillAppear:animated];
+  [self.tableView reloadData];
+}
+
 - (void)done {
   [self dismissViewControllerAnimated:YES completion:nil];
 }
@@ -234,22 +329,23 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
-  return 3;
+  return 4;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
-  return section == 0 ? 2 : section == 1 ? (self.hasWindowProgram ? 3 : 2) : 2;
+  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 3 : 2) : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Ovládání", @"Diagnostika", @"O aplikaci" ][section];
+  return @[ @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
-  if (section == 0)
-    return @"Ovladač na obrazovce se ukáže jen tehdy, když není připojený herní ovladač. Páčka a křížový ovladač "
-           @"jsou šipky, R2 plyn, L2 brzda, A Enter, B Esc, X mezerník, Y C, L1/R1 Z/A, Menu Esc.";
-  if (section == 1) return @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
+  if (section == 0) return @"Ovladač na obrazovce se ukáže jen tehdy, když není připojený herní ovladač.";
+  if (section == 1)
+    return @"Klávesa, kterou hra dostane za každé tlačítko ovladače. Nahoru až doprava jsou křížový ovladač "
+           @"i levá páčka. Platí pro všechny hry.";
+  if (section == 2) return @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
   return @"Hry se přidávají ve Finderu: iPad → Soubory → WinPad Wine, každá ve své složce.";
 }
 
@@ -268,7 +364,16 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
     GCController* pad = GCController.controllers.firstObject;
     cell.detailTextLabel.text = pad ? (pad.vendorName ?: @"Připojen") : @"Nepřipojen";
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+  } else if (path.section == 1 && path.row < PadCount) {
+    unsigned short keys[PadCount];
+    WinPadPadKeys(keys);
+    cell.textLabel.text = PadTitles[path.row];
+    cell.detailTextLabel.text = KeyName(keys[path.row]);
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
   } else if (path.section == 1) {
+    cell.textLabel.text = @"Obnovit výchozí mapování";
+    cell.textLabel.textColor = UIColor.systemRedColor;
+  } else if (path.section == 2) {
     cell.textLabel.text = @[ @"Poslední log", @"Spustit hello.exe", @"Spustit window.exe" ][path.row];
     cell.accessoryType = path.row == 0 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
   } else {
@@ -288,7 +393,18 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
   [tableView deselectRowAtIndexPath:path animated:YES];
-  if (path.section != 1) return;
+  if (path.section == 1 && path.row < PadCount) {
+    WinPadKeyPickerViewController* picker = [WinPadKeyPickerViewController new];
+    picker.input = (int)path.row;
+    [self.navigationController pushViewController:picker animated:YES];
+    return;
+  }
+  if (path.section == 1) {
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:@"padKeys"];
+    [tableView reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationNone];
+    return;
+  }
+  if (path.section != 2) return;
   if (path.row == 0) {
     [self.navigationController pushViewController:[WinPadLogViewController new] animated:YES];
     return;
@@ -319,7 +435,7 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 @property(nonatomic, strong) UILabel* empty;
 @property(nonatomic, strong) UILabel* hints;
 @property(nonatomic, strong) NSMutableArray* observers;
-@property(nonatomic) unsigned pad;  // the controller buttons held at the last change (Pad*)
+@property(nonatomic) unsigned pad;  // the controller buttons held at the last change (Nav*)
 @property(nonatomic) BOOL started;
 - (void)reload;
 - (void)showFocus;
@@ -331,7 +447,7 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 - (void)readPad:(GCExtendedGamepad*)pad;
 @end
 
-enum { PadLeft = 1, PadRight = 2, PadA = 4, PadB = 8, PadY = 16 };
+enum { NavLeft = 1, NavRight = 2, NavA = 4, NavB = 8, NavY = 16 };
 // A card's parts; its own tag is the game's index.
 enum { CoverTag = 1001, TitleTag = 1002 };
 
@@ -630,18 +746,18 @@ enum { CoverTag = 1001, TitleTag = 1002 };
 - (void)readPad:(GCExtendedGamepad*)pad {
   float x = pad.dpad.xAxis.value;
   if (fabsf(x) < 0.5f) x = pad.leftThumbstick.xAxis.value;
-  const unsigned now = (x < -0.5f ? PadLeft : 0) | (x > 0.5f ? PadRight : 0) | (pad.buttonA.pressed ? PadA : 0) |
-                       (pad.buttonB.pressed ? PadB : 0) | (pad.buttonY.pressed ? PadY : 0);
+  const unsigned now = (x < -0.5f ? NavLeft : 0) | (x > 0.5f ? NavRight : 0) | (pad.buttonA.pressed ? NavA : 0) |
+                       (pad.buttonB.pressed ? NavB : 0) | (pad.buttonY.pressed ? NavY : 0);
   const unsigned pressed = now & ~self.pad;
   self.pad = now;
   if (self.presentedViewController) {
-    if (pressed & PadB) [self dismissViewControllerAnimated:YES completion:nil];
+    if (pressed & NavB) [self dismissViewControllerAnimated:YES completion:nil];
     return;
   }
-  if (pressed & PadLeft) [self moveFocusBy:-1];
-  if (pressed & PadRight) [self moveFocusBy:1];
-  if (pressed & PadY) [self openSettings];
-  if (pressed & PadA) [self startFocused];
+  if (pressed & NavLeft) [self moveFocusBy:-1];
+  if (pressed & NavRight) [self moveFocusBy:1];
+  if (pressed & NavY) [self openSettings];
+  if (pressed & NavA) [self startFocused];
 }
 
 - (void)pressesBegan:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event {

@@ -97,10 +97,11 @@ dokud ji neukončíš. Ovládá se hardwarovou klávesnicí (Magic Keyboard, Blu
 nebo USB): šipky, Enter, Esc a další klávesy jdou přímo do hry. Funguje i herní
 ovladač (Bluetooth/MFi: Xbox, PlayStation, …), a když žádný není připojený,
 aplikace nakreslí ovladač na obrazovku (Nastavení → WinPad Wine → Touch
-controls). Tlačítka se mění na klávesy (`PadKeys` v `main.m`): páčka a
+controls). Tlačítka se mění na klávesy (`WinPadPadKeys` v `Library.m`): páčka a
 křížový ovladač jsou šipky, R2 plyn (šipka nahoru), L2 brzda (šipka dolů),
 A Enter, B Esc, X mezerník (ruční brzda), Y `C` (kamera), L1/R1 `Z`/`A`
-(řazení), Menu Esc. V nastavení ovládání hry se dají přeřadit.
+(řazení), Menu Esc. Každé tlačítko přeřadíš v nastavení knihovny (Y) →
+Mapování tlačítek.
 `dinput8.dll` ze složky hry (ASI Loader) má přednost
 před Wine (`WINEDLLOVERRIDES=dinput8=n,b`).
 

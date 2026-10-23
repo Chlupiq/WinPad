@@ -14,6 +14,13 @@
 
 NSArray<WinPadGame*>* WinPadFindGames(void);
 
+// The inputs of a game controller that become keys (main.m's Gamepads), in the order the
+// settings list them.
+enum { PadUp, PadDown, PadLeft, PadRight, PadA, PadB, PadX, PadY, PadL1, PadR1, PadL2, PadR2, PadMenu, PadOptions, PadCount };
+// The Windows virtual key of each input (0: none): the defaults, made for a racing game, with the
+// changes made in the settings (the "padKeys" setting: input name → key, e.g. {a = 32;}).
+void WinPadPadKeys(unsigned short keys[PadCount]);
+
 @interface LibraryViewController : UIViewController
 // Runs a program: "game" with the game picked, or a test program (hello, window) with nil.
 @property(nonatomic, copy) void (^start)(NSString* program, WinPadGame* game);
