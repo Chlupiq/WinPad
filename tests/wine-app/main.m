@@ -57,6 +57,27 @@ void winehost_post_key(unsigned short vk, int down);
 extern void (*winehost_frame_hook)(void* hwnd, int width, int height, int stride, const void* bits);
 
 static NSString* const FinishedMarker = @"== finished";
+
+// When the app started (main), for the log's [clock] lines.
+static CFAbsoluteTime app_started;
+
+// Writes a [clock] line to the log every second from now on: the seconds since
+// the app started and how many frames the program has drawn, so a log says how
+// long each part of a start took.
+static void StartLogClock(void) {
+  printf("[clock] %.1f s since the app started: starting Wine\n", CFAbsoluteTimeGetCurrent() - app_started);
+  dispatch_source_t timer =
+      dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+  dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
+  dispatch_source_set_event_handler(timer, ^{
+    // Looked up each time, as the status line does: the host may not be loaded yet.
+    long (*metal_frames)(void) = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
+    printf("[clock] %.1f s, %ld frames\n", CFAbsoluteTimeGetCurrent() - app_started, metal_frames ? metal_frames() : 0);
+  });
+  dispatch_resume(timer);
+  static dispatch_source_t keep;
+  keep = timer;
+}
 static BOOL gamepad_test;  // "gamepadTest": CI presses A on the touch controller (PressTestButton)
 static void PressTestButton(void);
 
@@ -324,6 +345,14 @@ static NSString* MakePrefix(NSString* bundle) {
                              error:nil];
     }
   }
+  // The registry Wine's wineboot would have made: the builtin COM classes
+  // the games need, such as DirectSound's audio device enumerator
+  // (tests/wine-loader/prefix/system.reg, the same as run-host.sh's prefix).
+  // Without it DirectSound has no device, and a game whose video player keeps
+  // time by its sound shows nothing for minutes.
+  [fm copyItemAtPath:[bundle stringByAppendingPathComponent:@"system.reg"]
+              toPath:[prefix stringByAppendingPathComponent:@"system.reg"]
+               error:nil];
   return prefix;
 }
 
@@ -462,6 +491,7 @@ static NSString* MakePrefix(NSString* bundle) {
   dup2(fileno(stdout), fileno(stderr));
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
+  StartLogClock();
 
   // The same environment as CI's NoJIT run of the program
   // (tests/wine-loader/run-host.sh): the AOT image only holds the x86 code
@@ -610,6 +640,7 @@ static NSString* MakePrefix(NSString* bundle) {
 @end
 
 int main(int argc, char* argv[]) {
+  app_started = CFAbsoluteTimeGetCurrent();
   @autoreleasepool {
     return UIApplicationMain(argc, argv, nil, NSStringFromClass([WineAppDelegate class]));
   }

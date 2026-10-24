@@ -33,6 +33,7 @@ targets:
           rm -rf "$app/aarch64-windows" "$app/i386-windows" "$app/nls" "$app/fonts"
           cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/"
           cp -R "$PROJECT_DIR/wine/i386-windows" "$PROJECT_DIR/wine/nls" "$PROJECT_DIR/wine/fonts" "$app/"
+          cp "$PROJECT_DIR/wine/system.reg" "$app/"
           mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
           cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
