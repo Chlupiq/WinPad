@@ -65,13 +65,13 @@ static CFAbsoluteTime app_started;
 // the app started and how many frames the program has drawn, so a log says how
 // long each part of a start took.
 static void StartLogClock(void) {
-  static long (*metal_frames)(void);
-  metal_frames = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
   printf("[clock] %.1f s since the app started: starting Wine\n", CFAbsoluteTimeGetCurrent() - app_started);
   dispatch_source_t timer =
       dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
   dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), NSEC_PER_SEC, NSEC_PER_SEC / 10);
   dispatch_source_set_event_handler(timer, ^{
+    // Looked up each time, as the status line does: the host may not be loaded yet.
+    long (*metal_frames)(void) = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
     printf("[clock] %.1f s, %ld frames\n", CFAbsoluteTimeGetCurrent() - app_started, metal_frames ? metal_frames() : 0);
   });
   dispatch_resume(timer);
@@ -345,6 +345,14 @@ static NSString* MakePrefix(NSString* bundle) {
                              error:nil];
     }
   }
+  // The registry Wine's wineboot would have made: the builtin COM classes
+  // the games need, such as DirectSound's audio device enumerator
+  // (tests/wine-loader/prefix/system.reg, the same as run-host.sh's prefix).
+  // Without it DirectSound has no device, and a game whose video player keeps
+  // time by its sound shows nothing for minutes.
+  [fm copyItemAtPath:[bundle stringByAppendingPathComponent:@"system.reg"]
+              toPath:[prefix stringByAppendingPathComponent:@"system.reg"]
+               error:nil];
   return prefix;
 }
 

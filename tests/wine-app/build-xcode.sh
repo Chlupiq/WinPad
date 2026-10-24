@@ -70,6 +70,8 @@ fi
 cp -R "$work/i386-windows" "$proj/wine/"
 mkdir -p "$proj/wine/nls" "$proj/wine/fonts"
 cp "$work"/madeira/wine/nls/*.nls "$proj/wine/nls/"
+# The registry each launch's prefix starts from (main.m's MakePrefix).
+cp "$root/tests/wine-loader/prefix/system.reg" "$proj/wine/"
 find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*.ttc' -o -name '*.fon' \) \
     -exec cp {} "$proj/wine/fonts/" \;
 echo "Wine files in the project:"
@@ -134,7 +136,7 @@ build() {
         { tail -60 "$out/xcodebuild-$1.log" >&2; exit 1; }
     product="$out/xcode-derived/Build/Products/Debug-$1/WinPadWine.app"
     for f in Frameworks/fexaot.dylib aarch64-windows/ntdll.dll.dylib aarch64-windows/xtajit.dll.dylib \
-        i386-windows/ntdll.dll i386-windows/hello.exe nls/locale.nls; do
+        i386-windows/ntdll.dll i386-windows/hello.exe nls/locale.nls system.reg; do
         test -f "$product/$f" || { echo "the $1 build lacks $f" >&2; exit 1; }
     done
     test -f "$product/Settings.bundle/Root.plist" || { echo "the $1 build lacks its Settings.bundle" >&2; exit 1; }
