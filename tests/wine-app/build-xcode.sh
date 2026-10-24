@@ -217,7 +217,8 @@ run_app() {
 # hello.exe, picked by the "program" setting as a launch argument: without
 # one the app opens on its game library.
 run_app hello -program hello
-for expect in 'Hello from x86' 'WinPad Wine: program hello, AOT image fexaot.dylib'; do
+for expect in 'Hello from x86' 'WinPad Wine: program hello, AOT image fexaot.dylib' \
+    's since the app started: starting Wine' '[clock] '; do
     grep -qF "$expect" "$log" || { echo "missing in the app's log (hello): $expect" >&2; exit 1; }
 done
 echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT image with NoJIT"
