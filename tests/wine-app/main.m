@@ -150,7 +150,9 @@ static CGRect game_rect;
 static BOOL game_has_layer;
 
 __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALayer* layer) {
-  dispatch_async(dispatch_get_main_queue(), ^{
+  // On the main thread (host/metal-display.m), so the layer is placed in the
+  // same transaction that made it.
+  void (^show)(void) = ^{
     CGRect b = metal_view.bounds;
     CGFloat w = MIN(b.size.width - 32, metal_fill ? (b.size.height - 96) * 4 / 3 : 640), h = w * 3 / 4;
     layer.frame = metal_fill ? game_rect : CGRectMake((b.size.width - w) / 2, 64, w, h);
@@ -159,7 +161,9 @@ __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALa
       game_has_layer = YES;
       frame_view.hidden = YES;
     }
-  });
+  };
+  if (NSThread.isMainThread) show();
+  else dispatch_async(dispatch_get_main_queue(), show);
 }
 
 // The Windows virtual key of a key's USB HID usage (what GCKeyCode is), or 0.

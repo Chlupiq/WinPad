@@ -66,26 +66,45 @@ static void release_win_data_impl(struct macdrv_win_data* data) {
 static void* create_metal_device(void) { return (void*)(uintptr_t)1; }
 static void release_metal_device(void* d) { (void)d; }
 
+static void on_main_thread(dispatch_block_t b) {
+  if ([NSThread isMainThread]) b();
+  else dispatch_async(dispatch_get_main_queue(), b);
+}
+
+static void on_main_thread_sync(dispatch_block_t b) {
+  if ([NSThread isMainThread]) b();
+  else dispatch_sync(dispatch_get_main_queue(), b);
+}
+
+// DXMT asks for the layer on one of the program's threads. A layer made or
+// changed there goes into that thread's implicit Core Animation transaction,
+// which only that thread's run loop would commit, and a Wine thread runs
+// none: the layer could stay out of the screen's render tree, its drawables
+// let go unshown (on the iPad 120 presents a second on a 60 Hz panel) and
+// the window black. The layer is made, placed and let go on the
+// main thread, whose transactions are committed.
 static void* create_metal_view(macdrv_view v, void* d) {
   (void)d;
-  CAMetalLayer* layer = [CAMetalLayer layer];
-  layer.frame = CGRectMake(0, 0, 640, 480);
+  __block CAMetalLayer* layer;
+  on_main_thread_sync(^{
+    layer = [CAMetalLayer layer];
+    layer.frame = CGRectMake(0, 0, 640, 480);
+    // An app around the host (tests/wine-app) shows the layer on screen.
+    void (*show)(CAMetalLayer*) = (void (*)(CAMetalLayer*))dlsym(RTLD_DEFAULT, "winehost_show_metal_layer");
+    if (show) show(layer);
+  });
   fprintf(stderr, "winehost: Metal layer %p for window %p\n", (__bridge void*)layer, v);
-  // An app around the host (tests/wine-app) shows the layer on screen.
-  void (*show)(CAMetalLayer*) = (void (*)(CAMetalLayer*))dlsym(RTLD_DEFAULT, "winehost_show_metal_layer");
-  if (show) show(layer);
   return (void*)CFBridgingRetain(layer);
 }
 
 static void* get_metal_layer(void* v) { return v; }
 
 static void release_metal_view(void* v) {
-  if (v) CFBridgingRelease(v);
-}
-
-static void on_main_thread(dispatch_block_t b) {
-  if ([NSThread isMainThread]) b();
-  else dispatch_async(dispatch_get_main_queue(), b);
+  if (!v) return;
+  CALayer* layer = CFBridgingRelease(v);
+  on_main_thread(^{
+    [layer removeFromSuperlayer];
+  });
 }
 
 __attribute__((used, visibility("default"))) struct macdrv_functions_t macdrv_functions = {
