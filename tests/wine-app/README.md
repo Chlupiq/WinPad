@@ -112,12 +112,13 @@ složkou ve složce hry. Jinou hru vybereš v Nastavení → WinPad Wine → Gam
 jako kostka, takže jen z Xcode s debuggerem; okno hry se ukáže v aplikaci,
 dokud ji neukončíš. Ovládá se hardwarovou klávesnicí (Magic Keyboard, Bluetooth
 nebo USB): šipky, Enter, Esc a další klávesy jdou přímo do hry. Funguje i herní
-ovladač (Bluetooth/MFi: Xbox, PlayStation, …), a když žádný není připojený,
-aplikace nakreslí ovladač na obrazovku (Nastavení → WinPad Wine → Touch
-controls). Tlačítka se mění na klávesy (`WinPadPadKeys` v `Library.m`): páčka a
-křížový ovladač jsou šipky, R2 plyn (šipka nahoru), L2 brzda (šipka dolů),
-A Enter, B Esc, X mezerník (ruční brzda), Y `C` (kamera), L1/R1 `Z`/`A`
-(řazení), Menu Esc. Každé tlačítko přeřadíš v nastavení knihovny (Y) →
+ovladač (Bluetooth/MFi: Xbox, PlayStation, …) a aplikace na obrazovku nakreslí
+dotykový ovladač s rozložením Xboxu: dvě páčky, šipkový kříž, A B X Y, LB/RB,
+LT/RT, View a Menu (Nastavení → WinPad Wine → Touch controls). Tlačítka se mění
+na klávesy (`WinPadPadKeys` v `Library.m`): levá páčka a křížový ovladač jsou
+šipky, RT plyn (šipka nahoru), LT brzda (šipka dolů), A Enter, B Esc, X mezerník
+(ruční brzda), Y `C` (kamera), LB/RB `Z`/`A` (řazení), Menu Esc, View Enter;
+pravá páčka nemá výchozí klávesu. Každé tlačítko přeřadíš v nastavení knihovny (Y) →
 Mapování tlačítek.
 `dinput8.dll` ze složky hry (ASI Loader) má přednost
 před Wine (`WINEDLLOVERRIDES=dinput8=n,b`).

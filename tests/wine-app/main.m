@@ -216,21 +216,25 @@ static void HardwareKeyboard(void) {
 }
 
 // Game controllers: a Bluetooth or MFi one and, while the "touchControls"
-// setting is on, one drawn on the screen (GCVirtualController), shown even
-// with another one paired, which the player may not be holding. Their buttons and sticks become keys, which a game
-// reads as it reads a keyboard's; its options can remap them. pad_keys is the
-// mapping (WinPadPadKeys in Library.m: made for a racing game, triggers and the
-// stick drive, changed in the library's settings).
+// setting is on, one drawn on the screen (WinPadTouchPad), shown even with
+// another one paired, which the player may not be holding. Their buttons and
+// sticks become keys, which a game reads as it reads a keyboard's; its options
+// can remap them. pad_keys is the mapping (WinPadPadKeys in Library.m: made for
+// a racing game, triggers and the left stick drive, changed in the library's
+// settings).
 static unsigned short pad_keys[PadCount];
-static BOOL pad_down[256];  // the keys the controllers hold down
-static BOOL pad_sent;       // a controller has sent a key
-static GCVirtualController* touch_pad;
+enum { PadFromController, PadFromTouch };
+static BOOL pad_in[2][PadCount];  // what the controllers and the touch controller hold
+static BOOL pad_down[256];        // the keys the controllers hold down
+static BOOL pad_sent;             // a controller has sent a key
 
-// Sends the keys whose state changed with this snapshot of a controller's inputs.
-static void ApplyPad(const BOOL in[PadCount]) {
+// Sends the keys whose state changed with this snapshot of a controller's
+// inputs; a key is down while either controller holds an input that is it.
+static void ApplyPad(int from, const BOOL in[PadCount]) {
+  memcpy(pad_in[from], in, sizeof pad_in[from]);
   BOOL want[256] = {NO};
   for (int i = 0; i < PadCount; i++)
-    if (in[i] && pad_keys[i]) want[pad_keys[i]] = YES;
+    if ((pad_in[PadFromController][i] || pad_in[PadFromTouch][i]) && pad_keys[i]) want[pad_keys[i]] = YES;
   for (int vk = 0; vk < 256; vk++)
     if (want[vk] != pad_down[vk]) {
       pad_down[vk] = want[vk];
@@ -241,7 +245,7 @@ static void ApplyPad(const BOOL in[PadCount]) {
 
 static void ReadPad(GCExtendedGamepad* pad) {
   const float tilt = 0.5f;  // how far a stick or trigger goes before its key is down
-  GCControllerDirectionPad *dpad = pad.dpad, *stick = pad.leftThumbstick;
+  GCControllerDirectionPad *dpad = pad.dpad, *stick = pad.leftThumbstick, *right = pad.rightThumbstick;
   const BOOL in[PadCount] = {
       [PadUp] = dpad.up.pressed || stick.yAxis.value > tilt,
       [PadDown] = dpad.down.pressed || stick.yAxis.value < -tilt,
@@ -257,34 +261,275 @@ static void ReadPad(GCExtendedGamepad* pad) {
       [PadR2] = pad.rightTrigger.value > tilt,
       [PadMenu] = pad.buttonMenu.pressed,
       [PadOptions] = pad.buttonOptions.pressed,
+      [PadRUp] = right.yAxis.value > tilt,
+      [PadRDown] = right.yAxis.value < -tilt,
+      [PadRLeft] = right.xAxis.value < -tilt,
+      [PadRRight] = right.xAxis.value > tilt,
   };
-  ApplyPad(in);
+  ApplyPad(PadFromController, in);
 }
 
-static void ShowTouchPad(void) {
-  if (!touch_pad) return;
-  [touch_pad connectWithReplyHandler:^(NSError* error) {
-    if (error) printf("gamepad: the touch controller did not show: %s\n", error.localizedDescription.UTF8String);
-  }];
+// One part of the touch controller: a button, a stick or the d-pad. A stick's
+// or the d-pad's input is the first of its four directions (up, down, left,
+// right are consecutive in the Pad enum).
+typedef enum { TouchButton, TouchStick, TouchDpad } TouchKind;
+@interface WinPadTouchPart : NSObject
+@property(nonatomic) TouchKind kind;
+@property(nonatomic) int input;
+@property(nonatomic) CGPoint center;
+@property(nonatomic) CGFloat radius;  // a stick's travel, a d-pad arm's length or half a button's width
+@property(nonatomic, strong) UIView* view;
+@property(nonatomic, strong) UIView* knob;  // a stick's
+@property(nonatomic, strong) NSArray<UIView*>* arms;  // the d-pad's, in direction order
+@end
+@implementation WinPadTouchPart
+@end
+
+// The touch controller, laid out as an Xbox controller over the game: the left
+// stick above the d-pad on the left, A B X Y above the right stick on the right,
+// LT and LB in the top left corner, RT and RB in the top right one, View and
+// Menu between them. Its parts are see-through and take several
+// fingers at once; a finger can slide from button to button. Touches
+// elsewhere go to the views beneath it.
+@interface WinPadTouchPad : UIView
+- (void)press:(int)input down:(BOOL)down;
+@end
+
+@implementation WinPadTouchPad {
+  NSArray<WinPadTouchPart*>* _parts;
+  NSMapTable<UITouch*, WinPadTouchPart*>* _touches;
+  BOOL _pressed[PadCount];  // press:down:, CI's
 }
 
-static void Gamepads(BOOL touch) {
+static UIView* TouchCircle(NSString* text, UIColor* color) {
+  UILabel* label = [UILabel new];
+  label.text = text;
+  label.textAlignment = NSTextAlignmentCenter;
+  label.textColor = color;
+  label.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
+  label.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.45].CGColor;
+  label.layer.borderWidth = 2;
+  label.clipsToBounds = YES;
+  return label;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+  if (!(self = [super initWithFrame:frame])) return nil;
+  self.multipleTouchEnabled = YES;
+  _touches = [NSMapTable strongToStrongObjectsMapTable];
+  NSMutableArray* parts = [NSMutableArray new];
+  WinPadTouchPart* (^add)(TouchKind, int, NSString*, UIColor*) = ^(TouchKind kind, int input, NSString* text, UIColor* color) {
+    WinPadTouchPart* part = [WinPadTouchPart new];
+    part.kind = kind;
+    part.input = input;
+    part.view = TouchCircle(kind == TouchButton ? text : nil, color);
+    part.view.userInteractionEnabled = NO;
+    [self addSubview:part.view];
+    if (kind == TouchStick) {
+      part.knob = TouchCircle(text, color);
+      part.knob.backgroundColor = [UIColor colorWithWhite:1 alpha:0.3];
+      [part.view addSubview:part.knob];
+    } else if (kind == TouchDpad) {
+      part.view.backgroundColor = UIColor.clearColor;
+      part.view.layer.borderWidth = 0;
+      NSMutableArray* arms = [NSMutableArray new];
+      for (NSString* arrow in @[ @"▲", @"▼", @"◀", @"▶" ]) {
+        UIView* arm = TouchCircle(arrow, UIColor.whiteColor);
+        arm.layer.cornerRadius = 8;
+        [part.view addSubview:arm];
+        [arms addObject:arm];
+      }
+      part.arms = arms;
+    }
+    [parts addObject:part];
+    return part;
+  };
+  UIColor* white = UIColor.whiteColor;
+  add(TouchStick, PadUp, @"L", white);
+  add(TouchDpad, PadUp, nil, white);
+  add(TouchStick, PadRUp, @"R", white);
+  add(TouchButton, PadA, @"A", [UIColor colorWithRed:0.45 green:0.85 blue:0.3 alpha:1]);
+  add(TouchButton, PadB, @"B", [UIColor colorWithRed:0.95 green:0.35 blue:0.3 alpha:1]);
+  add(TouchButton, PadX, @"X", [UIColor colorWithRed:0.3 green:0.6 blue:1 alpha:1]);
+  add(TouchButton, PadY, @"Y", [UIColor colorWithRed:1 green:0.8 blue:0.2 alpha:1]);
+  add(TouchButton, PadL2, @"LT", white);
+  add(TouchButton, PadL1, @"LB", white);
+  add(TouchButton, PadR2, @"RT", white);
+  add(TouchButton, PadR1, @"RB", white);
+  add(TouchButton, PadOptions, @"View", white);
+  add(TouchButton, PadMenu, @"Menu", white);
+  _parts = parts;
+  return self;
+}
+
+- (WinPadTouchPart*)part:(int)input kind:(TouchKind)kind {
+  for (WinPadTouchPart* part in _parts)
+    if (part.input == input && part.kind == kind) return part;
+  return nil;
+}
+
+// u is the size of a button: a 13th of the screen's short side.
+- (void)layoutSubviews {
+  [super layoutSubviews];
+  const CGRect b = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
+  const CGFloat u = MIN(b.size.width, b.size.height) / 13, m = 16;
+  const CGFloat left = CGRectGetMinX(b) + m, right = CGRectGetMaxX(b) - m, top = CGRectGetMinY(b) + m,
+                bottom = CGRectGetMaxY(b) - m, mid = CGRectGetMidX(b);
+  void (^place)(WinPadTouchPart*, CGFloat, CGFloat, CGFloat, CGFloat) = ^(WinPadTouchPart* part, CGFloat x, CGFloat y,
+                                                                         CGFloat w, CGFloat h) {
+    part.center = CGPointMake(x, y);
+    part.radius = w / 2;
+    part.view.frame = CGRectMake(x - w / 2, y - h / 2, w, h);
+    part.view.layer.cornerRadius = MIN(w, h) / 2;
+    ((UILabel*)part.view).font = [UIFont systemFontOfSize:MIN(w, h) * 0.38 weight:UIFontWeightBold];
+  };
+  // The sticks: a base of 2.2 u, the knob 1.1 u.
+  for (WinPadTouchPart* stick in @[ [self part:PadUp kind:TouchStick], [self part:PadRUp kind:TouchStick] ]) {
+    const BOOL l = stick.input == PadUp;
+    place(stick, l ? left + 1.1 * u : right - 4.4 * u, l ? bottom - 3.0 * u : bottom - 1.3 * u, 2.2 * u, 2.2 * u);
+    stick.radius = 1.1 * u;
+    stick.knob.frame = CGRectMake(0.55 * u, 0.55 * u, 1.1 * u, 1.1 * u);
+    stick.knob.layer.cornerRadius = 0.55 * u;
+    ((UILabel*)stick.knob).font = [UIFont systemFontOfSize:0.4 * u weight:UIFontWeightBold];
+  }
+  WinPadTouchPart* dpad = [self part:PadUp kind:TouchDpad];
+  place(dpad, left + 3.7 * u, bottom - 1.4 * u, 2.7 * u, 2.7 * u);
+  dpad.radius = 1.35 * u;
+  const CGFloat arm = 0.85 * u, c = 1.35 * u;
+  const CGPoint arms[4] = {{c, c - 0.9 * u}, {c, c + 0.9 * u}, {c - 0.9 * u, c}, {c + 0.9 * u, c}};
+  for (int d = 0; d < 4; d++) {
+    dpad.arms[d].frame = CGRectMake(arms[d].x - arm / 2, arms[d].y - arm / 2, arm, arm);
+    ((UILabel*)dpad.arms[d]).font = [UIFont systemFontOfSize:0.35 * u];
+  }
+  const CGFloat fx = right - 1.6 * u, fy = bottom - 2.6 * u, f = 1.05 * u;
+  place([self part:PadA kind:TouchButton], fx, fy + f, u, u);
+  place([self part:PadB kind:TouchButton], fx + f, fy, u, u);
+  place([self part:PadX kind:TouchButton], fx - f, fy, u, u);
+  place([self part:PadY kind:TouchButton], fx, fy - f, u, u);
+  place([self part:PadL2 kind:TouchButton], left + u, top + 0.4 * u, 2 * u, 0.8 * u);
+  place([self part:PadL1 kind:TouchButton], left + u, top + 1.4 * u, 2 * u, 0.8 * u);
+  place([self part:PadR2 kind:TouchButton], right - u, top + 0.4 * u, 2 * u, 0.8 * u);
+  place([self part:PadR1 kind:TouchButton], right - u, top + 1.4 * u, 2 * u, 0.8 * u);
+  // View and Menu at the top in the middle, as on the controller: at the bottom
+  // they would cover the right stick on a screen held upright.
+  place([self part:PadOptions kind:TouchButton], mid - 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  place([self part:PadMenu kind:TouchButton], mid + 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  [self update];
+}
+
+// The part a finger at p is on: a button within its frame and a bit more, a
+// stick or the d-pad within its reach.
+- (WinPadTouchPart*)partAt:(CGPoint)p buttonsOnly:(BOOL)buttons {
+  for (WinPadTouchPart* part in _parts) {
+    if (part.kind == TouchButton) {
+      if (CGRectContainsPoint(CGRectInset(part.view.frame, -6, -6), p)) return part;
+    } else if (!buttons && hypot(p.x - part.center.x, p.y - part.center.y) < part.radius * 1.3) {
+      return part;
+    }
+  }
+  return nil;
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
+  return [self partAt:point buttonsOnly:NO] != nil;
+}
+
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  for (UITouch* touch in touches) {
+    WinPadTouchPart* part = [self partAt:[touch locationInView:self] buttonsOnly:NO];
+    if (part) [_touches setObject:part forKey:touch];
+  }
+  [self update];
+}
+
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  for (UITouch* touch in touches) {
+    id held = [_touches objectForKey:touch];  // NSNull: a finger that slid off the buttons
+    if ([held isKindOfClass:WinPadTouchPart.class] && ((WinPadTouchPart*)held).kind != TouchButton) continue;
+    // A finger on a button slides onto the next one, or off all of them.
+    WinPadTouchPart* part = [self partAt:[touch locationInView:self] buttonsOnly:YES];
+    if (part) [_touches setObject:part forKey:touch];
+    else [_touches setObject:(id)NSNull.null forKey:touch];
+  }
+  [self update];
+}
+
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  for (UITouch* touch in touches) [_touches removeObjectForKey:touch];
+  [self update];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  [self touchesEnded:touches withEvent:event];
+}
+
+- (void)press:(int)input down:(BOOL)down {
+  _pressed[input] = down;
+  [self update];
+}
+
+// What the fingers hold, sent as the touch controller's inputs and shown.
+- (void)update {
+  BOOL in[PadCount];
+  memcpy(in, _pressed, sizeof in);
+  NSMutableSet* held = [NSMutableSet new];
+  NSMapTable* knobs = [NSMapTable strongToStrongObjectsMapTable];
+  for (UITouch* touch in _touches) {
+    WinPadTouchPart* part = [_touches objectForKey:touch];
+    if (![part isKindOfClass:WinPadTouchPart.class]) continue;
+    [held addObject:part];
+    if (part.kind == TouchButton) {
+      in[part.input] = YES;
+      continue;
+    }
+    const CGPoint p = [touch locationInView:self];
+    CGFloat dx = (p.x - part.center.x) / part.radius, dy = (p.y - part.center.y) / part.radius;
+    const CGFloat length = hypot(dx, dy);
+    if (length > 1) dx /= length, dy /= length;
+    // A stick's key is down past half its travel, as a controller's stick
+    // (ReadPad); the d-pad takes a diagonal when the finger is near one.
+    const CGFloat dead = part.kind == TouchStick ? 0.5 : 0.25, slant = part.kind == TouchStick ? 0 : 0.4;
+    in[part.input + 0] |= dy < -dead && -dy >= fabs(dx) * slant;
+    in[part.input + 1] |= dy > dead && dy >= fabs(dx) * slant;
+    in[part.input + 2] |= dx < -dead && -dx >= fabs(dy) * slant;
+    in[part.input + 3] |= dx > dead && dx >= fabs(dy) * slant;
+    if (part.kind == TouchStick) [knobs setObject:[NSValue valueWithCGPoint:CGPointMake(dx, dy)] forKey:part];
+  }
+  for (WinPadTouchPart* part in _parts) {
+    const BOOL down = [held containsObject:part] || (part.kind == TouchButton && _pressed[part.input]);
+    if (part.kind == TouchButton) {
+      part.view.backgroundColor = [UIColor colorWithWhite:1 alpha:down ? 0.45 : 0.15];
+    } else if (part.kind == TouchStick) {
+      const CGPoint d = [[knobs objectForKey:part] CGPointValue];
+      const CGFloat r = part.radius;
+      part.knob.center = CGPointMake(r + d.x * r * 0.6, r + d.y * r * 0.6);
+      part.knob.backgroundColor = [UIColor colorWithWhite:1 alpha:down ? 0.5 : 0.3];
+    } else {
+      for (int d = 0; d < 4; d++)
+        part.arms[d].backgroundColor = [UIColor colorWithWhite:1 alpha:in[part.input + d] ? 0.45 : 0.15];
+    }
+  }
+  ApplyPad(PadFromTouch, in);
+}
+@end
+
+static WinPadTouchPad* touch_pad;
+
+// Starts the controllers; the touch controller goes on view (nil: none).
+static void Gamepads(UIView* view) {
   WinPadPadKeys(pad_keys);
   void (^attach)(GCController*) = ^(GCController* c) {
     if (!c.extendedGamepad) return;
-    const BOOL virtual = c == touch_pad.controller;
-    printf("gamepad: %s connected\n", virtual ? "the touch controller" : (c.vendorName ?: @"a controller").UTF8String);
+    printf("gamepad: %s connected\n", (c.vendorName ?: @"a controller").UTF8String);
     c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
       ReadPad(pad);
     };
   };
-  if (touch) {
-    GCVirtualControllerConfiguration* config = [GCVirtualControllerConfiguration new];
-    // An Xbox controller's: the stick, A B X Y, the bumpers and the triggers.
-    config.elements = [NSSet setWithObjects:GCInputLeftThumbstick, GCInputButtonA, GCInputButtonB, GCInputButtonX,
-                                            GCInputButtonY, GCInputLeftShoulder, GCInputRightShoulder,
-                                            GCInputLeftTrigger, GCInputRightTrigger, nil];
-    touch_pad = [[GCVirtualController alloc] initWithConfiguration:config];
+  if (view) {
+    touch_pad = [[WinPadTouchPad alloc] initWithFrame:view.bounds];
+    touch_pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [view addSubview:touch_pad];
+    printf("gamepad: the touch controller connected\n");
   }
   for (GCController* c in GCController.controllers) attach(c);
   NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
@@ -299,29 +544,27 @@ static void Gamepads(BOOL touch) {
                        queue:NSOperationQueue.mainQueue
                   usingBlock:^(NSNotification* note) {
                     const BOOL none[PadCount] = {NO};
-                    ApplyPad(none);  // no key stays held by a controller that left
+                    ApplyPad(PadFromController, none);  // no key stays held by a controller that left
                   }];
-  ShowTouchPad();
 }
 
 // CI's check of the controllers, once the window shows: A on the touch
-// controller, which is Enter unless the padKeys setting changed it. The
-// simulator may give no touch controller or not run its handler for a value
-// set from code; then A goes in through pad_keys directly, and the log says so.
+// controller, which is Enter unless the padKeys setting changed it. Without a
+// touch controller, or if it sent no key, A goes in through pad_keys
+// directly, and the log says so.
 static void PressTestButton(void) {
-  GCControllerButtonInput* a = touch_pad.controller.extendedGamepad.buttonA;
-  printf("gamepad: pressing A on the touch controller (%s)\n", a ? "connected" : "not connected");
-  [a setValue:1];
+  printf("gamepad: pressing A on the touch controller (%s)\n", touch_pad ? "connected" : "not connected");
+  [touch_pad press:PadA down:YES];
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-    [a setValue:0];
+    [touch_pad press:PadA down:NO];
     if (pad_sent) return;
     printf("gamepad: no key from the touch controller; pressing A through the mapping\n");
     BOOL in[PadCount] = {NO};
     in[PadA] = YES;
-    ApplyPad(in);
+    ApplyPad(PadFromController, in);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
       const BOOL none[PadCount] = {NO};
-      ApplyPad(none);
+      ApplyPad(PadFromController, none);
     });
   });
 }
@@ -435,13 +678,14 @@ static NSString* MakePrefix(NSString* bundle) {
   if (started || !([self.program isEqualToString:@"game"] || gamepad_test)) return;
   started = YES;
   id touch = [NSUserDefaults.standardUserDefaults objectForKey:@"touchControls"];
-  Gamepads(gamepad_test || !touch || [touch boolValue]);
+  Gamepads(gamepad_test || !touch || [touch boolValue] ? self.view : nil);
 }
 
 - (void)viewDidLayoutSubviews {
   [super viewDidLayoutSubviews];
   if (!frame_view) return;
   CGRect b = self.view.bounds;
+  [self.view bringSubviewToFront:touch_pad];
   if (self.status && game_has_layer) {
     // Once the game draws through Metal its picture fills the screen at 4:3,
     // the status line and the log hidden (the log stays in Documents/wine.log).
