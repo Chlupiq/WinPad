@@ -574,19 +574,25 @@ static NSString* WindowsDir(NSString* path) {
   return [NSString stringWithFormat:@"Z:%@\\", [path stringByReplacingOccurrencesOfString:@"/" withString:@"\\"]];
 }
 
-// A fresh Wine prefix on every launch, as in CI. A 32-bit process's system32
-// is C:\windows\syswow64, with the i386 DLLs; wow64.dll and xtajit.dll are
-// loaded by their C:\windows\system32 paths (madeira_link_syswow64 in
-// Madeira's WineProcessBridge.m). The links point into the bundle, whose
-// path changes with every install.
+// The Wine prefix, kept from launch to launch: what programs write there, such
+// as a game's saves and settings in C:\users and the registry (*.reg), stays.
+// A 32-bit process's system32 is C:\windows\syswow64, with the i386 DLLs;
+// wow64.dll and xtajit.dll are loaded by their C:\windows\system32 paths
+// (madeira_link_syswow64 in Madeira's WineProcessBridge.m). The links point
+// into the bundle, whose path changes with every install, so they are made
+// anew on every launch.
 static NSString* MakePrefix(NSString* bundle) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* prefix = DocumentsPath(@"prefix");
-  [fm removeItemAtPath:prefix error:nil];
   NSDictionary* farms = @{@"syswow64" : @"i386-windows", @"system32" : @"aarch64-windows"};
   for (NSString* farm in farms) {
     NSString* dir = [prefix stringByAppendingPathComponent:[@"drive_c/windows" stringByAppendingPathComponent:farm]];
     [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    for (NSString* name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+      NSString* path = [dir stringByAppendingPathComponent:name];
+      if ([[fm attributesOfItemAtPath:path error:nil].fileType isEqualToString:NSFileTypeSymbolicLink])
+        [fm removeItemAtPath:path error:nil];
+    }
     NSString* src = [bundle stringByAppendingPathComponent:farms[farm]];
     for (NSString* name in [fm contentsOfDirectoryAtPath:src error:nil]) {
       if ([farm isEqualToString:@"syswow64"] && ![name.pathExtension.lowercaseString isEqualToString:@"dll"]) continue;
@@ -600,9 +606,19 @@ static NSString* MakePrefix(NSString* bundle) {
   // (tests/wine-loader/prefix/system.reg, the same as run-host.sh's prefix).
   // Without it DirectSound has no device, and a game whose video player keeps
   // time by its sound shows nothing for minutes.
-  [fm copyItemAtPath:[bundle stringByAppendingPathComponent:@"system.reg"]
-              toPath:[prefix stringByAppendingPathComponent:@"system.reg"]
-               error:nil];
+  // It is copied only into a new prefix, or when the app brings a changed one
+  // (system.reg.app, the copy it last brought): the registry keeps what the
+  // programs wrote to HKEY_LOCAL_MACHINE.
+  NSString* reg = [bundle stringByAppendingPathComponent:@"system.reg"];
+  NSString* brought = [prefix stringByAppendingPathComponent:@"system.reg.app"];
+  if (![fm fileExistsAtPath:[prefix stringByAppendingPathComponent:@"system.reg"]] ||
+      ![fm contentsEqualAtPath:reg andPath:brought]) {
+    if ([fm fileExistsAtPath:brought]) printf("WinPad Wine: the app brings a new system.reg; HKEY_LOCAL_MACHINE starts anew\n");
+    for (NSString* path in @[ [prefix stringByAppendingPathComponent:@"system.reg"], brought ]) {
+      [fm removeItemAtPath:path error:nil];
+      [fm copyItemAtPath:reg toPath:path error:nil];
+    }
+  }
   return prefix;
 }
 
