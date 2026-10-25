@@ -208,10 +208,19 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
   return 1;
 }
 
+// The program's main window: the largest visible one at least 320x200, as
+// Madeira's driver picks it (ios_main_window in driver_ios.c).
+static void* main_window;
+static long main_area;
+
 void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, int cx, int cy,
                          int cw, int ch) {
   fprintf(stderr, "winehost: window %p at %d,%d %dx%d, visible %d, client %d,%d %dx%d\n", hwnd, x,
           y, w, h, visible, cx, cy, cw, ch);
+  if (visible && w >= 320 && h >= 200 && (hwnd == main_window || (long)w * h > main_area)) {
+    main_area = (long)w * h;
+    __atomic_store_n(&main_window, hwnd, __ATOMIC_RELEASE);
+  }
   // The first visible window with a menu bar (which sits right above the
   // client area, its first item at the left) gets the scripted input.
   if (visible && !first_window && cy - y > 30 && cw > 0) {
@@ -299,8 +308,40 @@ static int send_posted_keys(void) {
   }
 }
 
+// From win32u (driver_ios.c, window.c).
+extern void* NtUserGetForegroundWindow(void);
+extern unsigned int get_window_thread(void* hwnd, unsigned int* pid);
+extern int winios_drv_foreground_if_owner(void* hwnd);
+
+// A program whose window is not the foreground one is inactive, and many
+// games pause then (NFSU2 stops drawing on WM_ACTIVATE WA_INACTIVE and waits
+// for WM_ACTIVATE again). Nothing on the iPad makes a window foreground as a
+// click on Windows does, so about once a second, while no window of the
+// program is foreground, its main window's own thread makes it so (Madeira's
+// driver does the same, ios_foreground_check, but only for XInput games).
+static void keep_foreground(void) {
+  static double next;
+  void* main = __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
+  if (!main || now() < next) return;
+  void* fg = NtUserGetForegroundWindow();
+  unsigned int pid = 0, fg_pid = 0;
+  if (!get_window_thread(main, &pid)) return;
+  if (fg && get_window_thread(fg, &fg_pid) && fg_pid == pid) {
+    next = now() + 1;
+    return;
+  }
+  int r = winios_drv_foreground_if_owner(main);  // 0 on another thread: its own thread does it
+  if (!r) return;
+  next = now() + 1;
+  static int logged;
+  if (logged++ < 8)
+    fprintf(stderr, "winehost: made window %p foreground (foreground was %p): %s\n", main, fg,
+            r > 0 ? "ok" : "failed");
+}
+
 int winios_pProcessEvents(unsigned int mask) {
   (void)mask;
+  keep_foreground();
   if (send_posted_keys()) return 1;
   int state = __atomic_load_n(&input_state, __ATOMIC_ACQUIRE);
   if ((state != 1 && state != 3) || now() < state_time + 2) return 0;
