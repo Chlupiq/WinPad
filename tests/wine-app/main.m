@@ -148,6 +148,7 @@ static BOOL metal_fill;
 // and whether it has one yet.
 static CGRect game_rect;
 static BOOL game_has_layer;
+static CALayer* game_layer;
 
 __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALayer* layer) {
   // On the main thread (host/metal-display.m), so the layer is placed in the
@@ -158,8 +159,13 @@ __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALa
     layer.frame = metal_fill ? game_rect : CGRectMake((b.size.width - w) / 2, 64, w, h);
     [metal_view.layer addSublayer:layer];
     if (metal_fill) {
+      // From now on the game has the whole screen (viewDidLayoutSubviews).
       game_has_layer = YES;
+      game_layer = layer;
       frame_view.hidden = YES;
+      [metal_view setNeedsLayout];
+      [metal_view.window.rootViewController setNeedsStatusBarAppearanceUpdate];
+      [metal_view.window.rootViewController setNeedsUpdateOfHomeIndicatorAutoHidden];
     }
   };
   if (NSThread.isMainThread) show();
@@ -439,6 +445,20 @@ static NSString* MakePrefix(NSString* bundle) {
   [super viewDidLayoutSubviews];
   if (!frame_view) return;
   CGRect b = self.view.bounds;
+  if (self.status && game_has_layer) {
+    // Once the game draws through Metal its picture fills the screen at 4:3,
+    // the status line and the log hidden (the log stays in Documents/wine.log).
+    const CGFloat w = MIN(b.size.width, b.size.height * 4 / 3), h = w * 3 / 4;
+    game_rect = CGRectMake((b.size.width - w) / 2, (b.size.height - h) / 2, w, h);
+    self.view.backgroundColor = UIColor.blackColor;
+    self.status.hidden = YES;
+    self.text.hidden = YES;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    game_layer.frame = game_rect;
+    [CATransaction commit];
+    return;
+  }
   if (self.status) {
     // The game's picture as large as fits at 4:3 above a few lines of the log.
     const CGFloat top = self.view.safeAreaInsets.top + 8;
@@ -454,6 +474,14 @@ static NSString* MakePrefix(NSString* bundle) {
   frame_view.frame = CGRectMake(16, top, b.size.width - 32, h);
   self.text.frame = CGRectMake(0, top + h, b.size.width, b.size.height - top - h);
   self.text.textContainerInset = UIEdgeInsetsMake(8, 16, 16, 16);
+}
+
+- (BOOL)prefersStatusBarHidden {
+  return game_has_layer;
+}
+
+- (BOOL)prefersHomeIndicatorAutoHidden {
+  return game_has_layer;
 }
 
 - (void)showLog {
