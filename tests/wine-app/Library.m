@@ -133,14 +133,17 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
   return games;
 }
 
-// The controller's inputs: their names in the settings and in the "padKeys" setting, and the keys
-// they are by default: the stick and d-pad steer, R2 accelerates and L2 brakes.
+// The controller's inputs, named as on an Xbox controller: their names in the settings and in the
+// "padKeys" setting (the first names, kept from before), and the keys they are by default: the
+// left stick and d-pad steer, RT accelerates and LT brakes; the right stick is no key.
 static NSString* const PadTitles[PadCount] = {
-    @"Nahoru", @"Dolů", @"Doleva", @"Doprava", @"A", @"B", @"X", @"Y", @"L1", @"R1", @"L2", @"R2", @"Menu", @"Options"};
-static NSString* const PadIds[PadCount] = {@"up", @"down", @"left", @"right", @"a",  @"b",    @"x",
-                                           @"y",  @"l1",   @"r1",   @"l2",    @"r2", @"menu", @"options"};
-static const unsigned short PadDefaults[PadCount] = {0x26, 0x28, 0x25, 0x27, 0x0d, 0x1b, 0x20,
-                                                     'C',  'Z',  'A',  0x28, 0x26, 0x1b, 0x0d};
+    @"Nahoru", @"Dolů", @"Doleva", @"Doprava", @"A", @"B", @"X", @"Y", @"LB", @"RB", @"LT", @"RT", @"Menu", @"View",
+    @"Pravá páčka nahoru", @"Pravá páčka dolů", @"Pravá páčka doleva", @"Pravá páčka doprava"};
+static NSString* const PadIds[PadCount] = {@"up", @"down", @"left", @"right", @"a",  @"b",    @"x",       @"y",
+                                           @"l1", @"r1",   @"l2",   @"r2",    @"menu", @"options", @"rup", @"rdown",
+                                           @"rleft", @"rright"};
+static const unsigned short PadDefaults[PadCount] = {0x26, 0x28, 0x25, 0x27, 0x0d, 0x1b, 0x20, 'C', 'Z',
+                                                     'A',  0x28, 0x26, 0x1b, 0x0d, 0,    0,    0,    0};
 
 void WinPadPadKeys(unsigned short keys[PadCount]) {
   NSDictionary* saved = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"padKeys"];
