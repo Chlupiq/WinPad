@@ -157,7 +157,10 @@ __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALa
     CGRect b = metal_view.bounds;
     CGFloat w = MIN(b.size.width - 32, metal_fill ? (b.size.height - 96) * 4 / 3 : 640), h = w * 3 / 4;
     layer.frame = metal_fill ? game_rect : CGRectMake((b.size.width - w) / 2, 64, w, h);
-    [metal_view.layer addSublayer:layer];
+    // A game's goes beneath every view, so the controls drawn over it stay
+    // on top (the log is hidden then); the cube's goes over the log.
+    if (metal_fill) [metal_view.layer insertSublayer:layer atIndex:0];
+    else [metal_view.layer addSublayer:layer];
     if (metal_fill) {
       // From now on the game has the whole screen (viewDidLayoutSubviews).
       game_has_layer = YES;
