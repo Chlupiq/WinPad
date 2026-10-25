@@ -288,7 +288,7 @@ typedef enum { TouchButton, TouchStick, TouchDpad } TouchKind;
 // The touch controller, laid out as an Xbox controller over the game: the left
 // stick above the d-pad on the left, A B X Y above the right stick on the right,
 // LT and LB in the top left corner, RT and RB in the top right one, View and
-// Menu at the bottom in the middle. Its parts are see-through and take several
+// Menu between them. Its parts are see-through and take several
 // fingers at once; a finger can slide from button to button. Touches
 // elsewhere go to the views beneath it.
 @interface WinPadTouchPad : UIView
@@ -410,8 +410,10 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
   place([self part:PadL1 kind:TouchButton], left + u, top + 1.4 * u, 2 * u, 0.8 * u);
   place([self part:PadR2 kind:TouchButton], right - u, top + 0.4 * u, 2 * u, 0.8 * u);
   place([self part:PadR1 kind:TouchButton], right - u, top + 1.4 * u, 2 * u, 0.8 * u);
-  place([self part:PadOptions kind:TouchButton], mid - 0.9 * u, bottom - 0.4 * u, 1.2 * u, 0.7 * u);
-  place([self part:PadMenu kind:TouchButton], mid + 0.9 * u, bottom - 0.4 * u, 1.2 * u, 0.7 * u);
+  // View and Menu at the top in the middle, as on the controller: at the bottom
+  // they would cover the right stick on a screen held upright.
+  place([self part:PadOptions kind:TouchButton], mid - 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  place([self part:PadMenu kind:TouchButton], mid + 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
   [self update];
 }
 
