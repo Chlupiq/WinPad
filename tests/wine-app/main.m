@@ -280,7 +280,9 @@ static void Gamepads(BOOL touch) {
   };
   if (touch) {
     GCVirtualControllerConfiguration* config = [GCVirtualControllerConfiguration new];
+    // An Xbox controller's: the stick, A B X Y, the bumpers and the triggers.
     config.elements = [NSSet setWithObjects:GCInputLeftThumbstick, GCInputButtonA, GCInputButtonB, GCInputButtonX,
+                                            GCInputButtonY, GCInputLeftShoulder, GCInputRightShoulder,
                                             GCInputLeftTrigger, GCInputRightTrigger, nil];
     touch_pad = [[GCVirtualController alloc] initWithConfiguration:config];
   }
