@@ -157,7 +157,10 @@ __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALa
     CGRect b = metal_view.bounds;
     CGFloat w = MIN(b.size.width - 32, metal_fill ? (b.size.height - 96) * 4 / 3 : 640), h = w * 3 / 4;
     layer.frame = metal_fill ? game_rect : CGRectMake((b.size.width - w) / 2, 64, w, h);
-    [metal_view.layer addSublayer:layer];
+    // A game's goes beneath every view, so the controls drawn over it stay
+    // on top (the log is hidden then); the cube's goes over the log.
+    if (metal_fill) [metal_view.layer insertSublayer:layer atIndex:0];
+    else [metal_view.layer addSublayer:layer];
     if (metal_fill) {
       // From now on the game has the whole screen (viewDidLayoutSubviews).
       game_has_layer = YES;
@@ -212,9 +215,9 @@ static void HardwareKeyboard(void) {
                                               }];
 }
 
-// Game controllers: a Bluetooth or MFi one, or, when none is connected and
-// the "touchControls" setting is on, one drawn on the screen
-// (GCVirtualController). Their buttons and sticks become keys, which a game
+// Game controllers: a Bluetooth or MFi one and, while the "touchControls"
+// setting is on, one drawn on the screen (GCVirtualController), shown even
+// with another one paired, which the player may not be holding. Their buttons and sticks become keys, which a game
 // reads as it reads a keyboard's; its options can remap them. pad_keys is the
 // mapping (WinPadPadKeys in Library.m: made for a racing game, triggers and the
 // stick drive, changed in the library's settings).
@@ -258,14 +261,8 @@ static void ReadPad(GCExtendedGamepad* pad) {
   ApplyPad(in);
 }
 
-static BOOL PhysicalPadConnected(void) {
-  for (GCController* c in GCController.controllers)
-    if (c.extendedGamepad && c != touch_pad.controller) return YES;
-  return NO;
-}
-
 static void ShowTouchPad(void) {
-  if (!touch_pad || PhysicalPadConnected()) return;
+  if (!touch_pad) return;
   [touch_pad connectWithReplyHandler:^(NSError* error) {
     if (error) printf("gamepad: the touch controller did not show: %s\n", error.localizedDescription.UTF8String);
   }];
@@ -280,7 +277,6 @@ static void Gamepads(BOOL touch) {
     c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
       ReadPad(pad);
     };
-    if (!virtual && touch_pad) [touch_pad disconnect];  // a real one replaces the drawn one
   };
   if (touch) {
     GCVirtualControllerConfiguration* config = [GCVirtualControllerConfiguration new];
@@ -302,7 +298,6 @@ static void Gamepads(BOOL touch) {
                   usingBlock:^(NSNotification* note) {
                     const BOOL none[PadCount] = {NO};
                     ApplyPad(none);  // no key stays held by a controller that left
-                    if (note.object != touch_pad.controller) ShowTouchPad();
                   }];
   ShowTouchPad();
 }
