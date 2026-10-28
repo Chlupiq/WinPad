@@ -1,0 +1,591 @@
+Code a program makes at run time gets code caches by its bytes (FEX 3bec2ac, on top of 0035)
+
+NFSU2 with sound on runs its race at 10-20 FPS on an iPad (44 without).
+EA's sound system (SNDSYS v9.03.04, linked into SPEED2.EXE) loads x86
+modules (mixers, decoders, effects) into the heap: its loader at SPEED2
+0x7212e5 lays out each module, VirtualProtects every section to
+PAGE_EXECUTE_READWRITE (5 modules in the menu, about 57 sections in a
+race) and fixes up addresses in it. That code is in no image, so the AOT
+image had nothing for it and FEX's interpreter ran all of it. The layout
+is the same in every run, at the same addresses.
+
+A range a VirtualProtect makes executable outside the images is now
+remembered with its exact bounds (the notification before the call has
+them; the one after has them rounded to pages, and the rest of a heap
+page is other data). When its first block misses, the frontend asks the
+WoW64 module to prepare it (QueryRuntimeCode, PrepareRuntimeCode; called
+without the invalidation lock). ImageTracker then hashes its bytes with
+its guest address into an id and registers the range as an image named
+rtcode-<guest address>-<id>.fexrc. To FEX it is then an image like any
+other:
+- the code map records its blocks under that id, and the range's bytes
+  go to codemap\new\runtime\<name> next to the new code maps;
+- the offline compiler's process-all moves those files to runtime\ in
+  its cache directory, and compiling the name loads the bytes back at
+  the guest address, executable and writable as they were;
+- the AOT image holds the resulting cache under the id, and a later run
+  loads it when the same bytes are at the same address.
+Other bytes at a known range (another module) give another id. A range
+made non-executable or freed is forgotten.
+
+Writes to other data on a page of such code drop its blocks (the page is
+write-protected while it holds code). A miss in a range whose cache was
+loaded, at a block the cache had, hashes the range again; with the same
+bytes the cache's blocks are registered again ("[rt-code] ... registered
+again after an invalidation"), otherwise the range gets a new id.
+
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index cc7b305..466f40c 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -2151,6 +2151,23 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+     if (auto HostCode = Thread->LookupCache->FindBlock(Thread, GuestRIP)) {
+       return HostCode;
+     }
++
++    // WinPad: a block of code the program made at run time. Its range gets an id from its bytes
++    // (and its code cache from the AOT image, if the image has one) before the first block of it
++    // is compiled or interpreted, so the code map records the block under that id. A miss in a
++    // range whose cache was loaded is a cached block an invalidation dropped: the cache comes
++    // back if the bytes did not change. Registering blocks takes the lookup cache's write lock,
++    // so it happens outside the invalidation lock.
++    using RuntimeCodeState = FEXCore::HLE::SyscallHandler::RuntimeCodeState;
++    const auto RuntimeCode = SyscallHandler->QueryRuntimeCode(Thread, GuestRIP);
++    if (RuntimeCode == RuntimeCodeState::Unprepared || (RuntimeCode == RuntimeCodeState::Cached && CodeCache.WasLoadedFromCache(GuestRIP))) {
++      lk.unlock();
++      SyscallHandler->PrepareRuntimeCode(Thread, GuestRIP);
++      lk.lock();
++      if (auto HostCode = Thread->LookupCache->FindBlock(Thread, GuestRIP)) {
++        return HostCode;
++      }
++    }
+   }
+ #else
+   // Invalidate might take a unique lock on this, to guarantee that during invalidation no code gets compiled
+diff --git a/FEXCore/include/FEXCore/HLE/SyscallHandler.h b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+index d1f4dec..86cfe62 100644
+--- a/FEXCore/include/FEXCore/HLE/SyscallHandler.h
++++ b/FEXCore/include/FEXCore/HLE/SyscallHandler.h
+@@ -67,6 +67,20 @@ public:
+ 
+   virtual void PreCompile() {}
+ 
++  // WinPad: code the program wrote at run time and made executable outside its images (EA's sound
++  // system loads its modules so). The frontend gives such a range an id from its bytes when its
++  // first block misses, so that the code map can record it and the AOT image hold its code cache.
++  enum class RuntimeCodeState {
++    None,       // not in such a range, or its id is known and the AOT image has no cache for it
++    Unprepared, // in such a range that has no id for its current bytes yet
++    Cached,     // in such a range whose code cache was loaded; a miss in it may be an invalidation
++  };
++  virtual RuntimeCodeState QueryRuntimeCode(Core::InternalThreadState* Thread, uint64_t GuestRIP) {
++    return RuntimeCodeState::None;
++  }
++  // Called with no FEXCore lock held.
++  virtual void PrepareRuntimeCode(Core::InternalThreadState* Thread, uint64_t GuestRIP) {}
++
+   virtual SourcecodeResolver* GetSourcecodeResolver() {
+     return nullptr;
+   }
+diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
+index 914e04d..92ace6b 100644
+--- a/Source/Tools/FEXOfflineCompiler/Main.cpp
++++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
+@@ -404,9 +404,43 @@ static void* LoadImageIntoGuestWindow(HANDLE File, std::string_view Filename) {
+ }
+ #endif
+ 
++#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++// WinPad: runtime code (ImageTracker::PrepareRuntimeCode) goes back to the guest address it ran
++// at, from the bytes saved with its code map, and is executable and writable there as it was.
++// Returns its guest address.
++static std::optional<uint64_t> LoadRuntimeCode(FEX::Windows::InvalidationTracker& InvalidationTracker,
++                                               FEX::Windows::ImageTracker& ImageTracker, const FEXCore::ExecutableFileInfo& Info) {
++  const auto Path = fmt::format("{}runtime\\{}", FEX::Config::GetCacheDirectory(), Info.Filename);
++  std::ifstream File(Path.c_str(), std::ios_base::binary);
++  FEX::Windows::RuntimeCodeDumpHeader Header {};
++  if (!File.read(reinterpret_cast<char*>(&Header), sizeof(Header)) || memcmp(Header.Magic, "FXRC", 4) != 0 || Header.Version != 1 ||
++      Header.FileId != Info.FileId || !Header.Size || Header.GuestAddress + Header.Size > IosGuestWindow::Size) {
++    LogMan::Msg::EFmt("Couldn't load runtime code: {}", Path);
++    return std::nullopt;
++  }
++  const uint64_t Host = IosGuestWindow::Base + Header.GuestAddress;
++  const uint64_t PageBegin = Host & FEXCore::Utils::FEX_PAGE_MASK;
++  const uint64_t PageEnd = (Host + Header.Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
++  if (!VirtualAlloc(reinterpret_cast<void*>(PageBegin), PageEnd - PageBegin, MEM_COMMIT, PAGE_EXECUTE_READWRITE) ||
++      !File.read(reinterpret_cast<char*>(Host), static_cast<std::streamsize>(Header.Size))) {
++    LogMan::Msg::EFmt("Couldn't place runtime code at guest {:#x}: {}", Header.GuestAddress, Path);
++    return std::nullopt;
++  }
++  LogMan::Msg::IFmt("Loaded runtime code: {} ({} bytes) @ guest {:X}", Info.Filename, Header.Size, Header.GuestAddress);
++  InvalidationTracker.HandleMemoryProtectionNotification(PageBegin, PageEnd - PageBegin, PAGE_EXECUTE_READWRITE);
++  ImageTracker.AddRuntimeCode(Info.FileId, Info.Filename, Host, Header.Size);
++  return Header.GuestAddress;
++}
++#endif
++
+ // Returns the base address of the mapped image
+ static std::optional<uint64_t> TryMapImage(FEX::Windows::InvalidationTracker& InvalidationTracker, FEX::Windows::ImageTracker& ImageTracker,
+                                            const FEXCore::CodeMapFileId& ID, FEXCore::ExecutableFileInfo& Info) {
++#if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
++  if (IosGuestWindow::Base && Info.Filename.ends_with(".fexrc")) {
++    return LoadRuntimeCode(InvalidationTracker, ImageTracker, Info);
++  }
++#endif
+   {
+     FEX::Windows::ScopedHandle File {CreateFileA(Info.Filename.c_str(), GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+@@ -599,7 +633,8 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+   }
+ #endif
+ 
+-  if (!std::filesystem::exists(Binary.Filename)) {
++  // WinPad: runtime code is not a file under its name (LoadRuntimeCode loaded it).
++  if (!Binary.Filename.ends_with(".fexrc") && !std::filesystem::exists(Binary.Filename)) {
+     fmt::print("File {} does not exist\n", Binary.Filename);
+     // TODO: Pressure vessel hits this
+     return /*EXIT_FAILURE*/ std::nullopt;
+@@ -947,6 +982,22 @@ static int ProcessAll(size_t MaxCaches) {
+   const std::string NewCodeMapDirectory = fmt::format("{}codemap/new", CacheDirectory);
+   const std::string ReadyCodeMapDirectory = fmt::format("{}codemap/ready", CacheDirectory);
+ 
++  // WinPad: the bytes of runtime code come with the new code maps that hold its blocks
++  // (ImageTracker::PrepareRuntimeCode); every later compile loads them from runtime/.
++  {
++    std::error_code ec;
++    const std::string NewRuntimeCode = NewCodeMapDirectory + "/runtime";
++    if (std::filesystem::is_directory(NewRuntimeCode, ec)) {
++      const std::string RuntimeCode = fmt::format("{}runtime", CacheDirectory);
++      std::filesystem::create_directories(RuntimeCode);
++      for (auto& Entry : std::filesystem::directory_iterator(NewRuntimeCode)) {
++        if (Entry.is_regular_file()) {
++          std::filesystem::rename(Entry.path(), std::filesystem::path {RuntimeCode} / Entry.path().filename());
++        }
++      }
++    }
++  }
++
+   // Import new code maps and aggregate them into ready code maps
+   std::filesystem::create_directories(ReadyCodeMapDirectory);
+   AggregateCodeMaps(NewCodeMapDirectory, ReadyCodeMapDirectory);
+diff --git a/Source/Windows/Common/ImageTracker.cpp b/Source/Windows/Common/ImageTracker.cpp
+index 211c81c..88d502d 100644
+--- a/Source/Windows/Common/ImageTracker.cpp
++++ b/Source/Windows/Common/ImageTracker.cpp
+@@ -140,6 +140,12 @@ ImageTracker::MappedImageInfo::MappedImageInfo(std::string_view Path, uint64_t A
+           .Relocations = std::move(Relocations)}
+   , SectionInfo {.FileInfo = Info, .FileStartVA = Address, .BeginVA = Address, .EndVA = Address + Nt->OptionalHeader.SizeOfImage} {}
+ 
++#ifdef FEX_IOS_HOST
++ImageTracker::MappedImageInfo::MappedImageInfo(FEXCore::CodeMapFileId FileId, std::string_view Name, uint64_t Address, uint64_t Size)
++  : Info {.FileId = FileId, .Filename = fextl::string {Name}}
++  , SectionInfo {.FileInfo = Info, .FileStartVA = Address, .BeginVA = Address, .EndVA = Address + Size} {}
++#endif
++
+ FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view Path, uint64_t Address, bool MainImage) {
+   std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
+   const fextl::string ModuleName {BaseName(Path)};
+@@ -390,7 +396,7 @@ void ImageTracker::LoadImageCache(const MappedImageInfo& Image, std::string_view
+ void ImageTracker::EnableLoadedCaches(FEXCore::Core::InternalThreadState* Thread) {
+   std::scoped_lock Lk {LoadedCachesLock};
+   for (auto& Loaded : LoadedCaches) {
+-    if (Loaded.Enabled || !Loaded.Image) {
++    if (Loaded.Enabled || !Loaded.Image || Loaded.RuntimeCode) {
+       continue;
+     }
+     Loaded.Enabled = true;
+@@ -404,7 +410,10 @@ void ImageTracker::ReenableLoadedCaches(FEXCore::Core::InternalThreadState* Thre
+   {
+     std::scoped_lock Lk {LoadedCachesLock};
+     for (auto& Loaded : LoadedCaches) {
+-      Loaded.Enabled = false;
++      // Runtime code comes back on its next miss, once PrepareRuntimeCode checked its bytes.
++      if (!Loaded.RuntimeCode) {
++        Loaded.Enabled = false;
++      }
+     }
+   }
+   LogMan::Msg::EFmt("[aot-cache] registering the loaded code caches again after a DEP change dropped their blocks");
+@@ -449,7 +458,7 @@ void ImageTracker::RevalidateLoadedCaches(FEXCore::Core::InternalThreadState* Th
+ 
+   std::scoped_lock Lk {LoadedCachesLock};
+   for (auto& Loaded : LoadedCaches) {
+-    if (!Loaded.Enabled || !Loaded.Image || End <= Loaded.GuestBegin || Begin >= Loaded.GuestEnd) {
++    if (!Loaded.Enabled || !Loaded.Image || Loaded.RuntimeCode || End <= Loaded.GuestBegin || Begin >= Loaded.GuestEnd) {
+       continue;
+     }
+     RangeCheck Check {&Loaded, GuestBase};
+@@ -472,6 +481,209 @@ void ImageTracker::RevalidateLoadedCaches(FEXCore::Core::InternalThreadState* Th
+     }
+   }
+ }
++
++// WinPad: the id of runtime code, from its bytes and guest address: the AOT image's code for it
++// holds both (guest addresses the code jumps to and loads from are constants in it).
++static FEXCore::CodeMapFileId ComputeRuntimeCodeId(uint64_t HostAddress, uint64_t Size, uint64_t GuestAddress) {
++  auto Id = XXH3_64bits_withSeed(reinterpret_cast<const void*>(HostAddress), Size, GuestAddress ^ (Size << 32));
++  // 0 means "no id yet", and ~0 is no file at all to the code map.
++  return Id == 0 || Id == ~0ULL ? 1 : Id;
++}
++
++void ImageTracker::HandleRuntimeCodeProtect(uint64_t Address, uint64_t Size, bool Executable) {
++  if (!Size) {
++    return;
++  }
++  ForgetRuntimeCode(Address, Address + Size);
++  if (!Executable || IsGeneratingCache || !FEXCore::Config::Get_ENABLECODECACHINGWIP()) {
++    return;
++  }
++  {
++    std::shared_lock Lk {ImagesLock};
++    auto It = MappedImages.upper_bound(Address);
++    if (It != MappedImages.begin() && std::prev(It)->second.SectionInfo.EndVA > Address) {
++      // A page of an image (a hook installer's VirtualProtect): ImageTracker knows it already.
++      return;
++    }
++  }
++  std::unique_lock Lk {RuntimeCodeLock};
++  RuntimeCode[Address] = {Address + Size, 0, false};
++  HasRuntimeCode.store(true, std::memory_order_relaxed);
++}
++
++void ImageTracker::HandleRuntimeCodeFree(uint64_t Address, uint64_t Size) {
++  ForgetRuntimeCode(Address, Address + Size);
++}
++
++void ImageTracker::ForgetRuntimeCode(uint64_t Begin, uint64_t End) {
++  if (!HasRuntimeCode.load(std::memory_order_relaxed)) {
++    return;
++  }
++  fextl::vector<uint64_t> Forgotten;
++  {
++    std::unique_lock Lk {RuntimeCodeLock};
++    auto It = RuntimeCode.upper_bound(Begin);
++    if (It != RuntimeCode.begin() && std::prev(It)->second.End > Begin) {
++      --It;
++    }
++    while (It != RuntimeCode.end() && It->first < End) {
++      if (It->second.FileId) {
++        Forgotten.push_back(It->first);
++      }
++      It = RuntimeCode.erase(It);
++    }
++  }
++  if (Forgotten.empty()) {
++    return;
++  }
++  std::unique_lock Lk {ImagesLock};
++  std::scoped_lock CachesLk {LoadedCachesLock};
++  for (auto Address : Forgotten) {
++    auto It = MappedImages.find(Address);
++    if (It == MappedImages.end()) {
++      continue;
++    }
++    for (auto& Loaded : LoadedCaches) {
++      if (Loaded.Image == &It->second) {
++        Loaded.Image = nullptr;
++      }
++    }
++    MappedImages.erase(It);
++  }
++}
++
++FEXCore::HLE::SyscallHandler::RuntimeCodeState ImageTracker::QueryRuntimeCode(uint64_t Address) {
++  using State = FEXCore::HLE::SyscallHandler::RuntimeCodeState;
++  if (!HasRuntimeCode.load(std::memory_order_relaxed)) {
++    return State::None;
++  }
++  std::shared_lock Lk {RuntimeCodeLock};
++  auto It = RuntimeCode.upper_bound(Address);
++  if (It == RuntimeCode.begin() || std::prev(It)->second.End <= Address) {
++    return State::None;
++  }
++  const auto& Range = std::prev(It)->second;
++  return !Range.FileId ? State::Unprepared : Range.HasCache ? State::Cached : State::None;
++}
++
++void ImageTracker::WriteRuntimeCodeDump(std::string_view Name, FEXCore::CodeMapFileId FileId, uint64_t Address, uint64_t Size) {
++  // Next to the new code maps, which the offline compiler's process-all imports with it.
++  const auto Dir = fmt::format("{}codemap\\new\\runtime\\", FEX::Config::GetCacheDirectory());
++  std::error_code ec;
++  std::filesystem::create_directories(Dir, ec);
++  const auto Path = fmt::format("{}{}", Dir, Name);
++  if (std::filesystem::exists(Path, ec)) {
++    return;
++  }
++  const int FD = _sopen(Path.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_BINARY, _SH_DENYRW, 0644);
++  if (FD == -1) {
++    LogMan::Msg::EFmt("[rt-code] cannot write {}", Path);
++    return;
++  }
++  const RuntimeCodeDumpHeader Header {
++    .Magic = {'F', 'X', 'R', 'C'}, .Version = 1, .GuestAddress = Address - Guest32Base(), .Size = Size, .FileId = FileId};
++  const bool Ok = _write(FD, &Header, sizeof(Header)) == static_cast<int>(sizeof(Header)) &&
++                  _write(FD, reinterpret_cast<const void*>(Address), static_cast<unsigned>(Size)) == static_cast<int>(Size);
++  _close(FD);
++  if (!Ok) {
++    LogMan::Msg::EFmt("[rt-code] short write to {}", Path);
++    std::filesystem::remove(Path, ec);
++  }
++}
++
++void ImageTracker::PrepareRuntimeCode(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) {
++  uint64_t Begin, End;
++  FEXCore::CodeMapFileId OldFileId;
++  {
++    std::shared_lock Lk {RuntimeCodeLock};
++    auto It = RuntimeCode.upper_bound(Address);
++    if (It == RuntimeCode.begin() || std::prev(It)->second.End <= Address) {
++      return;
++    }
++    --It;
++    Begin = It->first;
++    End = It->second.End;
++    OldFileId = It->second.FileId;
++  }
++  for (uint64_t Page = Begin & FEXCore::Utils::FEX_PAGE_MASK; Page < End; Page += FEXCore::Utils::FEX_PAGE_SIZE) {
++    if (!IsReadablePage(Page)) {
++      return;
++    }
++  }
++
++  const uint64_t GuestBase = Guest32Base();
++  const uint64_t GuestBegin = Begin - GuestBase;
++  const uint64_t Size = End - Begin;
++  const auto FileId = ComputeRuntimeCodeId(Begin, Size, GuestBegin);
++  static std::atomic<uint32_t> Reports {0};
++
++  if (FileId == OldFileId) {
++    // An invalidation dropped blocks of the cache (a write to other data on its pages, say), and
++    // the bytes are what they were: the cache is valid, register its blocks again.
++    // ForgetRuntimeCode clears Image under LoadedCachesLock before the image goes.
++    std::scoped_lock CachesLk {LoadedCachesLock};
++    for (auto& Loaded : LoadedCaches) {
++      if (Loaded.RuntimeCode && Loaded.Image && Loaded.Image->Info.FileId == FileId && Loaded.GuestBegin == GuestBegin) {
++        const FEXCore::ExecutableFileSectionInfo Section {Loaded.Image->Info, GuestBegin, GuestBegin, GuestBegin + Size};
++        CTX.GetCodeCache().EnableLoadedSection(Thread, *Loaded.Cache, Section);
++        if (Reports.fetch_add(1, std::memory_order_relaxed) < 64) {
++          LogMan::Msg::EFmt("[rt-code] {}: blocks registered again after an invalidation, bytes unchanged", Loaded.Image->Info.Filename);
++        }
++      }
++    }
++    return;
++  }
++
++  // New code, or other code where earlier code was.
++  ForgetRuntimeCode(Begin, End);
++  const auto Name = fmt::format("rtcode-{:08x}-{:016x}.fexrc", GuestBegin, FileId);
++  const MappedImageInfo* Image;
++  {
++    std::unique_lock Lk {ImagesLock};
++    auto [It, Inserted] = MappedImages.emplace(std::piecewise_construct, std::forward_as_tuple(Begin),
++                                               std::forward_as_tuple(FileId, Name, Begin, Size));
++    if (!Inserted) {
++      return;
++    }
++    Image = &It->second;
++  }
++
++  bool HasCache = false;
++  if (const auto* Entry = FEXCore::AOTIndex::Get() ? FEXCore::AOTIndex::Find(FileId, 0) : nullptr) {
++    auto Cache = CTX.GetCodeCache().LoadLinkedCache(Entry->Meta, Entry->Text, Entry->Data, Image->Info, GuestBegin);
++    if (Cache) {
++      CTX.GetCodeCache().RegisterMappedCodeBuffer(*Cache);
++      const FEXCore::ExecutableFileSectionInfo Section {Image->Info, GuestBegin, GuestBegin, GuestBegin + Size};
++      CTX.GetCodeCache().EnableLoadedSection(Thread, *Cache, Section);
++      std::scoped_lock CachesLk {LoadedCachesLock};
++      LoadedCaches.push_back({std::move(Cache), Image, GuestBegin, GuestBegin + Size, true, {}, true});
++      HasCache = true;
++    }
++  }
++
++  // The offline compiler needs the bytes of code the code map can get blocks of.
++  const bool Recording = !ActiveCodeMapPath.empty();
++  if (Recording && !HasCache) {
++    WriteRuntimeCodeDump(Name, FileId, Begin, Size);
++  }
++
++  {
++    std::unique_lock Lk {RuntimeCodeLock};
++    // Back in the map: ForgetRuntimeCode above took the range out with the old id.
++    RuntimeCode[Begin] = {End, FileId, HasCache};
++  }
++  if (Reports.fetch_add(1, std::memory_order_relaxed) < 64) {
++    LogMan::Msg::EFmt("[rt-code] {} bytes at guest {:#x} made executable at run time: {}, {}", Size, GuestBegin, Name,
++                      HasCache ? "code cache from the AOT image" :
++                      Recording ? "not in the AOT image, its bytes saved with the code map" :
++                                  "not in the AOT image");
++  }
++}
++
++void ImageTracker::AddRuntimeCode(FEXCore::CodeMapFileId FileId, std::string_view Name, uint64_t Address, uint64_t Size) {
++  std::unique_lock Lk {ImagesLock};
++  MappedImages.emplace(std::piecewise_construct, std::forward_as_tuple(Address), std::forward_as_tuple(FileId, Name, Address, Size));
++}
+ #endif
+ 
+ void ImageTracker::LoadAOTImages(MappedImageInfo& ImageInfo) {
+diff --git a/Source/Windows/Common/ImageTracker.h b/Source/Windows/Common/ImageTracker.h
+index 0b609eb..9ba7349 100644
+--- a/Source/Windows/Common/ImageTracker.h
++++ b/Source/Windows/Common/ImageTracker.h
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ #pragma once
+ 
++#include <atomic>
+ #include <cstdint>
+ #include <mutex>
+ #include <map>
+@@ -10,6 +11,7 @@
+ #include <FEXCore/Utils/CompilerDefs.h>
+ #include <FEXCore/Config/Config.h>
+ #include <FEXCore/Core/CodeCache.h>
++#include <FEXCore/HLE/SyscallHandler.h>
+ #include <FEXCore/fextl/memory.h>
+ #include <FEXCore/fextl/vector.h>
+ 
+@@ -35,6 +37,19 @@ using ArchImageLoadConfigDirectory = _IMAGE_LOAD_CONFIG_DIRECTORY32;
+ 
+ FEXCore::CodeMapFileId ComputeCodeMapId(std::string_view FileName, uint32_t TimeDateStamp, uint32_t SizeOfImage);
+ 
++#ifdef FEX_IOS_HOST
++// WinPad: the file ImageTracker writes with the new code maps for a range of runtime code
++// (codemap\new\runtime\NAME), and the offline compiler loads it from (runtime\NAME): this header,
++// then the range's bytes.
++struct RuntimeCodeDumpHeader {
++  char Magic[4]; // FXRC
++  uint32_t Version;
++  uint64_t GuestAddress;
++  uint64_t Size;
++  uint64_t FileId;
++};
++#endif
++
+ /**
+  * @brief Tracks mapped PE code images and handles their volatile metadata
+  */
+@@ -61,6 +76,19 @@ public:
+   // held when the image was mapped. A page the program patched keeps its blocks out.
+   void RevalidateLoadedCaches(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t Size);
+ 
++  // WinPad: code the program wrote at run time and made executable outside its images (EA's sound
++  // system loads its modules into the heap so). A range a VirtualProtect made executable gets, when
++  // its first block misses (PrepareRuntimeCode), an id from its bytes and guest address. It then
++  // looks like an image of that id to FEX: the code map records its blocks under the id, its bytes
++  // go next to the code map for the offline compiler, and the AOT image can hold its code cache,
++  // used whenever the same bytes are at the same address again. Host addresses.
++  void HandleRuntimeCodeProtect(uint64_t Address, uint64_t Size, bool Executable);
++  void HandleRuntimeCodeFree(uint64_t Address, uint64_t Size);
++  FEXCore::HLE::SyscallHandler::RuntimeCodeState QueryRuntimeCode(uint64_t Address);
++  void PrepareRuntimeCode(FEXCore::Core::InternalThreadState* Thread, uint64_t Address);
++  // Offline compiler: registers runtime code loaded from its dump at host Address.
++  void AddRuntimeCode(FEXCore::CodeMapFileId FileId, std::string_view Name, uint64_t Address, uint64_t Size);
++
+   // Guest range [GuestBegin, GuestEnd) of an executable section, a hash for each 64 bytes of it.
+   struct CodeSectionHashes {
+     uint64_t GuestBegin;
+@@ -76,6 +104,10 @@ private:
+ 
+     MappedImageInfo(std::string_view Path, uint64_t Address, ArchImageNtHeaders* Nt,
+                     fextl::robin_map<uint32_t, FEXCore::GuestRelocationType> Relocations);
++#ifdef FEX_IOS_HOST
++    // WinPad: runtime code, a range without PE headers.
++    MappedImageInfo(FEXCore::CodeMapFileId FileId, std::string_view Name, uint64_t Address, uint64_t Size);
++#endif
+   };
+ 
+   struct AOTImageInfo {
+@@ -94,7 +126,22 @@ private:
+     bool Enabled;
+     // Hashes of each 64 bytes of the image's executable sections when it was mapped.
+     fextl::vector<CodeSectionHashes> CodeHashes;
++    // The cache of runtime code: PrepareRuntimeCode enables it after checking the bytes.
++    bool RuntimeCode = false;
+   };
++  // A range of runtime code; FileId is 0 until its first block misses.
++  struct RuntimeCodeRange {
++    uint64_t End;
++    FEXCore::CodeMapFileId FileId;
++    bool HasCache;
++  };
++  // Removes the runtime code ranges overlapping [Begin, End) and what was registered for them.
++  void ForgetRuntimeCode(uint64_t Begin, uint64_t End);
++  void WriteRuntimeCodeDump(std::string_view Name, FEXCore::CodeMapFileId FileId, uint64_t Address, uint64_t Size);
++
++  std::shared_mutex RuntimeCodeLock;
++  std::map<uint64_t, RuntimeCodeRange> RuntimeCode;
++  std::atomic<bool> HasRuntimeCode {false};
+   void LoadImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size);
+   bool LoadLinkedImageCache(const MappedImageInfo& Image, std::string_view ID, uint64_t Address, uint64_t Size);
+ 
+diff --git a/Source/Windows/WOW64/Module.cpp b/Source/Windows/WOW64/Module.cpp
+index 94feeee..3b91472 100644
+--- a/Source/Windows/WOW64/Module.cpp
++++ b/Source/Windows/WOW64/Module.cpp
+@@ -1027,6 +1027,16 @@ public:
+     Wow64ProcessPendingCrossProcessItems();
+   }
+ 
++#ifdef FEX_IOS_HOST
++  RuntimeCodeState QueryRuntimeCode(FEXCore::Core::InternalThreadState*, uint64_t GuestRIP) override {
++    return ImageTracker->QueryRuntimeCode(GuestWindow::ToHost(GuestRIP));
++  }
++
++  void PrepareRuntimeCode(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP) override {
++    ImageTracker->PrepareRuntimeCode(Thread, GuestWindow::ToHost(GuestRIP));
++  }
++#endif
++
+ };
+ 
+ /* MADEIRA ml1430: the syscall entry emitted blocks call (Pointers.SyscallHandlerFunc, set
+@@ -2068,12 +2078,38 @@ void BTCpuNotifyMemoryAlloc(void* Address, SIZE_T Size, ULONG Type, ULONG Prot,
+   }
+ }
+ 
++#ifdef FEX_IOS_HOST
++// WinPad: the range the program asked to protect. The notification after the call has it rounded to
++// pages, and runtime code (ImageTracker::HandleRuntimeCodeProtect) is the exact range: the rest of
++// its pages is other data. Set and read under ThreadCreationMutex, which the two notifications hold.
++static struct {
++  uint64_t Address;
++  uint64_t Size;
++} PendingProtect;
++
++static bool ProtIsExecutable(ULONG Prot) {
++  return Prot & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY);
++}
++#endif
++
+ // HOST: wine/dlls/wow64/virtual.c:558 guest_ptr32_in(); cross-process syscall.c:1605 entry->addr.
+ void BTCpuNotifyMemoryProtect(void* Address, SIZE_T Size, ULONG NewProt, BOOL After, ULONG Status) {
+   if (!After) {
+     ThreadCreationMutex.lock();
++#ifdef FEX_IOS_HOST
++    PendingProtect = {reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size)};
++#endif
+   } else {
+     if (!Status) {
++#ifdef FEX_IOS_HOST
++      {
++        const uint64_t Begin = reinterpret_cast<uint64_t>(Address);
++        const uint64_t End = Begin + Size;
++        const bool Exact = PendingProtect.Size && PendingProtect.Address >= Begin && PendingProtect.Address + PendingProtect.Size <= End;
++        ImageTracker->HandleRuntimeCodeProtect(Exact ? PendingProtect.Address : Begin, Exact ? PendingProtect.Size : Size,
++                                               ProtIsExecutable(NewProt));
++      }
++#endif
+       const bool Dropped =
+         InvalidationTracker->HandleMemoryProtectionNotification(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), NewProt);
+ #ifdef FEX_IOS_HOST
+@@ -2101,6 +2137,9 @@ void BTCpuNotifyMemoryFree(void* Address, SIZE_T Size, ULONG FreeType, BOOL Afte
+   } else {
+     if (!Status) {
+       InvalidationTracker->InvalidateAlignedInterval(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size), true);
++#ifdef FEX_IOS_HOST
++      ImageTracker->HandleRuntimeCodeFree(reinterpret_cast<uint64_t>(Address), static_cast<uint64_t>(Size));
++#endif
+     }
+     ThreadCreationMutex.unlock();
+   }

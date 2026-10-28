@@ -45,6 +45,12 @@ while :; do
     mkdir -p "$cache_dir/codemap/new"
     # shellcheck disable=SC2086 # one argument per code map file
     mv $new "$cache_dir/codemap/new/"
+    # The bytes of code the program made at run time, which those maps hold blocks of
+    # (patches/fex-wow64/0036).
+    if [ -d "$WINEHOST_FEX_CACHE/codemap/new/runtime" ]; then
+        mkdir -p "$cache_dir/codemap/new/runtime"
+        find "$WINEHOST_FEX_CACHE/codemap/new/runtime" -type f -exec mv {} "$cache_dir/codemap/new/runtime/" \;
+    fi
     echo "=== round $round: compiling the blocks the interpreter ran into the image's code caches"
     env -u WINEHOST_CLICK -u WINEHOST_EXPECT_LOG -u WINEHOST_EXPECT_OUTPUT -u WINEHOST_FEX_CODEMAP \
         -u WINEHOST_FEX_ALL_CACHED -u WINEHOST_FEX_DUMP_DISPATCHER -u WINEHOST_FEX_NOJIT -u WINEHOST_AOT_IMAGE \

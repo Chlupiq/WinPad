@@ -14,7 +14,7 @@
 # the import closure of tests/wine-i386/imports.c)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
-# Output: WORK_DIR/i386-windows/*.dll, hello.exe, nodep.exe, hook.exe, unaligned.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
+# Output: WORK_DIR/i386-windows/*.dll, hello.exe, nodep.exe, hook.exe, rtcode.exe, unaligned.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
 # casetest.dll (imports.exe's own DLL).
 set -eu
 
@@ -98,6 +98,11 @@ clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console \
     "$here/hook.c" "$kernel32" -o "$out/hook.exe" -fuse-ld=lld
+# x86 code copied into memory of its own and made executable there, as a
+# game's sound system loads its modules (kernel32 only).
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console \
+    "$here/rtcode.c" "$kernel32" -o "$out/rtcode.exe" -fuse-ld=lld
 # 16- and 32-bit accesses at every byte offset, as a hook installer's pattern
 # scan makes (kernel32 only).
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
