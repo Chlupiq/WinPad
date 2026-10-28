@@ -1,0 +1,200 @@
+The NoJIT interpreter keeps the IR of each block it ran (FEX 3bec2ac, on top of 0033)
+
+With 0019, a block missing from the AOT image went through the frontend,
+the IR passes and a copy into a new InterpreterIR on every visit, and a
+loop in such code paid for all of it on every iteration: ExitFunctionLink
+does not link to an interpreted block, so each visit comes back to
+CompileBlock.
+
+CompileBlock now keeps that IR in ContextImpl::InterpCache by guest entry
+and runs a block it has seen before from there. The IR also records the
+guest pages the block was decoded from (the FrontendDecoder's CodePages),
+and InvalidateCodeBuffersCodeRange, which every invalidation goes through
+(a write to a code page, a protection change, a free or unmap, an untracked
+write), drops each cached block with a page in the range, as it drops
+compiled blocks. When a block's IR is cached, its pages are marked as
+executable ranges (MarkGuestExecutableRange), as a compiled block's are,
+so a write to an RWX page traps and invalidates. The cache is read and
+filled under the shared CodeInvalidationMutex, which invalidation takes
+uniquely, and a block runs from its own reference to the IR, so it can be
+dropped while it runs. A delivery compile (ml455, no invalidation lock
+held) neither reads nor fills the cache, and custom IR is never cached.
+
+The summary at NtTerminateProcess now reads "[interp] fallback ran N
+blocks (M distinct) that are not in the AOT image, H of them from the IR
+cache (B IR builds, D dropped by invalidation)".
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index b738a75..1179029 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -245,7 +245,9 @@ public:
+     // WinPad: the NoJIT interpreter's summary, at the point the process writes its code map.
+     if (const auto Runs = InterpRuns.load(std::memory_order_relaxed); Runs && !InterpSummaryLogged.exchange(true)) {
+       std::scoped_lock lk(InterpLearnedLock);
+-      LogMan::Msg::EFmt("[interp] fallback ran {} blocks ({} distinct) that are not in the AOT image", Runs, InterpLearned.size());
++      LogMan::Msg::EFmt("[interp] fallback ran {} blocks ({} distinct) that are not in the AOT image, {} of them from the IR cache ({} IR builds, {} dropped by invalidation)",
++                        Runs, InterpLearned.size(), InterpCacheHits.load(std::memory_order_relaxed),
++                        InterpCacheBuilds.load(std::memory_order_relaxed), InterpCacheDropped.load(std::memory_order_relaxed));
+     }
+     if (const auto Faults = UnalignedAOTFaults.load(std::memory_order_relaxed)) {
+       std::scoped_lock lk(UnalignedAOTLock);
+@@ -473,8 +475,19 @@ public:
+   // WinPad: NoJIT fallback. Generates the pre-RA IR for a block that is not in the AOT image and
+   // copies it out of the thread's OpDispatcher. Records the block as learned (log line and code
+   // map entry) the first time it is seen, unless Publish is false.
+-  fextl::unique_ptr<CPU::InterpreterIR> GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool Publish);
++  fextl::shared_ptr<CPU::InterpreterIR> GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool Publish);
+   std::atomic<uint64_t> InterpRuns {0};
++  // WinPad: the interpreter's IR of each block it ran, by guest entry, so a block that runs again
++  // is not decoded and optimized again. Looked up and filled under the shared
++  // CodeInvalidationMutex; InvalidateCodeBuffersCodeRange (unique lock) drops every block with a
++  // code page in the range, as it drops compiled blocks. A block runs from its own reference,
++  // so dropping it while it runs is safe.
++  std::mutex InterpCacheLock;
++  fextl::unordered_map<uint64_t, fextl::shared_ptr<const CPU::InterpreterIR>> InterpCache;
++  std::atomic<uint64_t> InterpCacheHits {0};
++  std::atomic<uint64_t> InterpCacheBuilds {0};
++  std::atomic<uint64_t> InterpCacheDropped {0};
++  void InterpCacheInvalidateRange(uint64_t Start, uint64_t Length);
+   std::atomic<bool> InterpSummaryLogged {false};
+   std::mutex InterpLearnedLock;
+   fextl::set<uint64_t> InterpLearned;
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 154ac8f..cc7b305 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -59,6 +59,7 @@ $end_info$
+ #include <FEXHeaderUtils/Syscalls.h>
+ 
+ #include <algorithm>
++#include <limits>
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+@@ -2166,16 +2167,42 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+     // WinPad: the block is not in the AOT image. Run it through the IR interpreter, which needs no
+     // executable memory, and remember it so the next AOT build can include it.
+ #ifdef FEX_IOS_HOST
+-    auto InterpIR = GenerateInterpreterIR(Thread, GuestRIP, !IosUnpublished);
++    const bool Publish = !IosUnpublished;
+ #else
+-    auto InterpIR = GenerateInterpreterIR(Thread, GuestRIP, true);
++    const bool Publish = true;
+ #endif
+-    if (!InterpIR) {
+-      ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image, and the frontend produced no IR to interpret", GuestRIP);
++    // A block the interpreter ran before runs from the IR it got then, unless a code page of it
++    // was invalidated since (InterpCacheInvalidateRange). A delivery compile (ml455) holds no
++    // invalidation lock, so it neither reads nor fills the cache.
++    fextl::shared_ptr<const CPU::InterpreterIR> InterpIR;
++    if (Publish) {
++      std::scoped_lock CacheLock(InterpCacheLock);
++      if (auto It = InterpCache.find(GuestRIP); It != InterpCache.end()) {
++        InterpIR = It->second;
++      }
+     }
+-    if (const char* Unsupported = CPU::InterpreterFindUnsupported(*InterpIR, GuestRIP)) {
+-      ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image, and the interpreter has no implementation of IR op {}",
+-                        GuestRIP, Unsupported);
++    if (InterpIR) {
++      InterpCacheHits.fetch_add(1, std::memory_order_relaxed);
++    } else {
++      auto NewIR = GenerateInterpreterIR(Thread, GuestRIP, Publish);
++      if (!NewIR) {
++        ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image, and the frontend produced no IR to interpret", GuestRIP);
++      }
++      if (const char* Unsupported = CPU::InterpreterFindUnsupported(*NewIR, GuestRIP)) {
++        ERROR_AND_DIE_FMT("NoJIT: guest block {:#x} is not in the AOT image, and the interpreter has no implementation of IR op {}",
++                          GuestRIP, Unsupported);
++      }
++      InterpCacheBuilds.fetch_add(1, std::memory_order_relaxed);
++      if (Publish && !NewIR->CodePages.empty()) {
++        // As for a compiled block: writes to its pages have to reach the invalidation tracker
++        // (an RWX page is write-protected again), or the cached IR could outlive its code.
++        for (auto CodePage : NewIR->CodePages) {
++          SyscallHandler->MarkGuestExecutableRange(Thread, CodePage, FEXCore::Utils::FEX_PAGE_SIZE);
++        }
++        std::scoped_lock CacheLock(InterpCacheLock);
++        InterpCache.insert_or_assign(GuestRIP, NewIR);
++      }
++      InterpIR = std::move(NewIR);
+     }
+     InterpRuns.fetch_add(1, std::memory_order_relaxed);
+ #ifdef FEX_IOS_HOST
+@@ -2368,7 +2395,7 @@ void ContextImpl::NoteUnalignedAOTBlock(FEXCore::Core::InternalThreadState* Thre
+   }
+ }
+ 
+-fextl::unique_ptr<CPU::InterpreterIR>
++fextl::shared_ptr<CPU::InterpreterIR>
+ ContextImpl::GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool Publish) {
+   Thread->PassManager->SkipRA = true;
+   auto Result = GenerateIR(Thread, GuestRIP, false, 0);
+@@ -2379,7 +2406,11 @@ ContextImpl::GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, u
+     return {};
+   }
+ 
+-  auto Copy = fextl::make_unique<CPU::InterpreterIR>();
++  auto Copy = fextl::make_shared<CPU::InterpreterIR>();
++  if (Result.NeedsAddGuestCodeRanges) {
++    const auto& Pages = Thread->FrontendDecoder->GetDecodedBlockInfo()->CodePages;
++    Copy->CodePages.assign(Pages.begin(), Pages.end());
++  }
+   const auto& View = *Result.IRView;
+   Copy->DataSize = View.GetDataSize();
+   Copy->ListSize = View.GetListSize();
+@@ -2441,6 +2472,7 @@ size_t ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Leng
+   FEXCORE_PROFILE_SCOPED("InvalidateCodeBuffersCodeRange");
+ 
+   LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
++  InterpCacheInvalidateRange(Start, Length);
+   std::scoped_lock lk {CodeBufferListLock};
+   size_t Erased = 0;
+   auto it = CodeBufferList.begin();
+@@ -2455,6 +2487,31 @@ size_t ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Leng
+   return Erased;
+ }
+ 
++// WinPad: drops the NoJIT interpreter's IR of every block with a code page in [Start, Start + Length).
++void ContextImpl::InterpCacheInvalidateRange(uint64_t Start, uint64_t Length) {
++  std::scoped_lock lk {InterpCacheLock};
++  if (InterpCache.empty()) {
++    return;
++  }
++  const uint64_t End = Length > std::numeric_limits<uint64_t>::max() - Start ? std::numeric_limits<uint64_t>::max() : Start + Length;
++  uint64_t Dropped = 0;
++  for (auto It = InterpCache.begin(); It != InterpCache.end();) {
++    const auto& Pages = It->second->CodePages;
++    const bool Hit = std::any_of(Pages.begin(), Pages.end(), [&](uint64_t Page) {
++      return Page < End && Page + FEXCore::Utils::FEX_PAGE_SIZE > Start;
++    });
++    if (Hit) {
++      It = InterpCache.erase(It);
++      ++Dropped;
++    } else {
++      ++It;
++    }
++  }
++  if (Dropped) {
++    InterpCacheDropped.fetch_add(Dropped, std::memory_order_relaxed);
++  }
++}
++
+ void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {
+   LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
+ 
+diff --git a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.h b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.h
+index 6e76ca4..b08f6c8 100644
+--- a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.h
++++ b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.h
+@@ -27,6 +27,9 @@ struct InterpreterIR {
+   fextl::vector<uint64_t> List;
+   size_t DataSize {};
+   size_t ListSize {};
++  // WinPad: the guest pages the block was decoded from (FrontendDecoder's CodePages), so the
++  // IR cache drops it when any of them is invalidated. Empty for custom IR: never cached.
++  fextl::vector<uint64_t> CodePages;
+ };
+ 
+ // Returns the name of the first IR op the interpreter cannot run, or nullptr when it can run all of them.

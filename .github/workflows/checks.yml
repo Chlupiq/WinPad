@@ -407,7 +407,10 @@ jobs:
           WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-partial-image
           # Without WINEHOST_FEX_ALL_CACHED the code map has to hold blocks: the learned ones.
           WINEHOST_FEX_CODEMAP: 1
-        run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+        # A block the interpreter runs again runs from its IR cache (patches/fex-wow64/0034).
+        run: |
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
+          sh tests/fex-wow64/interp-cache.sh "$RUNNER_TEMP/wine-loader/host-hello/run.log"
       - name: MMX and SSE instructions give the same results in FEX's NoJIT interpreter as with its JIT, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: "simd: done"
