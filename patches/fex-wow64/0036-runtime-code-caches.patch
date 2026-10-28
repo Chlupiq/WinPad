@@ -88,10 +88,10 @@ index d1f4dec..86cfe62 100644
      return nullptr;
    }
 diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
-index 914e04d..92ace6b 100644
+index 914e04d..e3c1388 100644
 --- a/Source/Tools/FEXOfflineCompiler/Main.cpp
 +++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
-@@ -404,9 +404,43 @@ static void* LoadImageIntoGuestWindow(HANDLE File, std::string_view Filename) {
+@@ -404,9 +404,45 @@ static void* LoadImageIntoGuestWindow(HANDLE File, std::string_view Filename) {
  }
  #endif
  
@@ -112,7 +112,9 @@ index 914e04d..92ace6b 100644
 +  const uint64_t Host = IosGuestWindow::Base + Header.GuestAddress;
 +  const uint64_t PageBegin = Host & FEXCore::Utils::FEX_PAGE_MASK;
 +  const uint64_t PageEnd = (Host + Header.Size + FEXCore::Utils::FEX_PAGE_SIZE - 1) & FEXCore::Utils::FEX_PAGE_MASK;
-+  if (!VirtualAlloc(reinterpret_cast<void*>(PageBegin), PageEnd - PageBegin, MEM_COMMIT, PAGE_EXECUTE_READWRITE) ||
++  // Read-write, as LoadImageIntoGuestWindow commits images: the compiler only reads
++  // the code, and an executable commit leaves the page without write access on iOS.
++  if (!VirtualAlloc(reinterpret_cast<void*>(PageBegin), PageEnd - PageBegin, MEM_COMMIT, PAGE_READWRITE) ||
 +      !File.read(reinterpret_cast<char*>(Host), static_cast<std::streamsize>(Header.Size))) {
 +    LogMan::Msg::EFmt("Couldn't place runtime code at guest {:#x}: {}", Header.GuestAddress, Path);
 +    return std::nullopt;
@@ -135,7 +137,7 @@ index 914e04d..92ace6b 100644
    {
      FEX::Windows::ScopedHandle File {CreateFileA(Info.Filename.c_str(), GENERIC_READ | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_DELETE,
                                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
-@@ -599,7 +633,8 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
+@@ -599,7 +635,8 @@ static std::optional<std::string> GenerateSingleCache(FEXCore::ExecutableFileInf
    }
  #endif
  
@@ -145,7 +147,7 @@ index 914e04d..92ace6b 100644
      fmt::print("File {} does not exist\n", Binary.Filename);
      // TODO: Pressure vessel hits this
      return /*EXIT_FAILURE*/ std::nullopt;
-@@ -947,6 +982,22 @@ static int ProcessAll(size_t MaxCaches) {
+@@ -947,6 +984,22 @@ static int ProcessAll(size_t MaxCaches) {
    const std::string NewCodeMapDirectory = fmt::format("{}codemap/new", CacheDirectory);
    const std::string ReadyCodeMapDirectory = fmt::format("{}codemap/ready", CacheDirectory);
  
