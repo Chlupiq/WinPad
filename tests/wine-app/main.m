@@ -630,7 +630,16 @@ static NSString* MakePrefix(NSString* bundle) {
 @property(nonatomic, strong) WinPadGame* game;  // the game the library started, or nil
 @property(nonatomic, strong) UILabel* status;
 @property(nonatomic, strong) NSDate* started;
+@property(nonatomic, strong) UILabel* fps;  // the FPS overlay over the game, if Settings has it on
+@property(nonatomic, strong) CADisplayLink* fpsLink;
 @end
+
+// The FPS overlay: the display link looks at Metal's frame count every screen
+// refresh and keeps when the last frames came, so a hitch shows up as a long frame.
+enum { FpsTimes = 256 };
+static CFTimeInterval fps_times[FpsTimes];
+static long fps_count, fps_seen;
+static CFTimeInterval fps_shown;
 
 @implementation WineViewController
 - (void)viewDidLoad {
@@ -659,6 +668,16 @@ static NSString* MakePrefix(NSString* bundle) {
     self.status.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold];
     self.status.text = @"Starting the game…";
     [self.view addSubview:self.status];
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"fpsOverlay"]) {
+      self.fps = [UILabel new];
+      self.fps.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold];
+      self.fps.textColor = UIColor.systemYellowColor;
+      self.fps.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+      self.fps.hidden = YES;
+      [self.view addSubview:self.fps];
+      self.fpsLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(countFrames:)];
+      [self.fpsLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
   }
   metal_view = self.view;
   metal_fill = [self.program isEqualToString:@"game"];
@@ -702,6 +721,7 @@ static NSString* MakePrefix(NSString* bundle) {
   if (!frame_view) return;
   CGRect b = self.view.bounds;
   [self.view bringSubviewToFront:touch_pad];
+  if (self.fps) [self.view bringSubviewToFront:self.fps];
   if (self.status && game_has_layer) {
     // Once the game draws through Metal its picture fills the screen at 4:3,
     // the status line and the log hidden (the log stays in Documents/wine.log).
@@ -714,6 +734,7 @@ static NSString* MakePrefix(NSString* bundle) {
     [CATransaction setDisableActions:YES];
     game_layer.frame = game_rect;
     [CATransaction commit];
+    [self placeFps];
     return;
   }
   if (self.status) {
@@ -725,12 +746,54 @@ static NSString* MakePrefix(NSString* bundle) {
     frame_view.frame = game_rect;
     self.text.frame = CGRectMake(0, top + 32 + h, b.size.width, b.size.height - top - 32 - h);
     self.text.textContainerInset = UIEdgeInsetsMake(8, 16, 16, 16);
+    [self placeFps];
     return;
   }
   const CGFloat top = self.view.safeAreaInsets.top + 8, h = MIN(b.size.height * 0.45, 480);
   frame_view.frame = CGRectMake(16, top, b.size.width - 32, h);
   self.text.frame = CGRectMake(0, top + h, b.size.width, b.size.height - top - h);
   self.text.textContainerInset = UIEdgeInsetsMake(8, 16, 16, 16);
+}
+
+- (void)placeFps {
+  if (!self.fps) return;
+  const CGSize size = [self.fps sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)];
+  self.fps.frame = CGRectMake(game_rect.origin.x + 6, game_rect.origin.y + 6, size.width + 12, size.height + 6);
+  self.fps.textAlignment = NSTextAlignmentCenter;
+}
+
+// Every screen refresh: note the time of each new frame the game drew, and twice
+// a second show the frames of the last second, the longest of them and the size.
+- (void)countFrames:(CADisplayLink*)link {
+  static long (*metal_frames)(void), (*frame_size)(void);
+  if (!metal_frames) {
+    metal_frames = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
+    frame_size = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frame_size");
+  }
+  const long frames = metal_frames ? metal_frames() : 0;
+  const CFTimeInterval now = link.timestamp;
+  // Frames that came between two refreshes count with this refresh's time.
+  for (; fps_seen < frames; fps_seen++) fps_times[fps_count++ % FpsTimes] = now;
+  if (now - fps_shown < 0.5 || !frames) return;
+  fps_shown = now;
+  long in_second = 0;
+  CFTimeInterval longest = 0, later = now;
+  for (long i = fps_count - 1; i >= 0 && i >= fps_count - FpsTimes; i--) {
+    const CFTimeInterval t = fps_times[i % FpsTimes];
+    if (now - t > 1) {
+      longest = MAX(longest, later - t);  // the frame that spans the second's start
+      break;
+    }
+    in_second++;
+    longest = MAX(longest, later - t);
+    later = t;
+  }
+  const long size = frame_size ? frame_size() : 0;
+  self.fps.text = size ? [NSString stringWithFormat:@"%ld FPS · max %.0f ms · %ld×%ld", in_second, longest * 1000,
+                                                    size >> 32, size & 0xffffffff]
+                       : [NSString stringWithFormat:@"%ld FPS · max %.0f ms", in_second, longest * 1000];
+  self.fps.hidden = NO;
+  [self placeFps];
 }
 
 - (BOOL)prefersStatusBarHidden {

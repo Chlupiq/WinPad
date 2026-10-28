@@ -121,12 +121,14 @@ __attribute__((used, visibility("default"))) struct macdrv_functions_t macdrv_fu
 // Every drawable DXMT takes to present a frame into.
 static id (*next_drawable)(id, SEL);
 static long drawables;
+static long drawable_size;  // the last drawable's width << 32 | height
 
 static id counting_next_drawable(id self, SEL sel) {
   id<CAMetalDrawable> drawable = next_drawable(self, sel);
   long n = __atomic_add_fetch(&drawables, 1, __ATOMIC_RELAXED);
+  id<MTLTexture> t = drawable.texture;
+  __atomic_store_n(&drawable_size, (long)t.width << 32 | (long)t.height, __ATOMIC_RELAXED);
   if (n <= 3 || n % 60 == 0) {
-    id<MTLTexture> t = drawable.texture;
     fprintf(stderr, "winehost: drawable %ld of Metal layer %p: %lux%lu, pixel format %lu, device %s\n",
             n, (__bridge void*)self, (unsigned long)t.width, (unsigned long)t.height,
             (unsigned long)t.pixelFormat, [[((CAMetalLayer*)self).device name] UTF8String]);
@@ -137,6 +139,11 @@ static id counting_next_drawable(id self, SEL sel) {
 // For the app's status line: how many frames the program has drawn through Metal so far.
 __attribute__((used, visibility("default"))) long winehost_metal_frames(void) {
   return __atomic_load_n(&drawables, __ATOMIC_RELAXED);
+}
+
+// For the app's FPS overlay: the size of the last frame, width << 32 | height (0 before the first).
+__attribute__((used, visibility("default"))) long winehost_metal_frame_size(void) {
+  return __atomic_load_n(&drawable_size, __ATOMIC_RELAXED);
 }
 
 // The first command buffers committed and how each one ends. (The

@@ -120,6 +120,11 @@ na klávesy (`WinPadPadKeys` v `Library.m`): levá páčka a křížový ovlada�
 (ruční brzda), Y `C` (kamera), LB/RB `Z`/`A` (řazení), Menu Esc, View Enter;
 pravá páčka nemá výchozí klávesu. Každé tlačítko přeřadíš v nastavení knihovny (Y) →
 Mapování tlačítek.
+
+Ukazatel FPS (nastavení knihovny → Diagnostika → Ukazatel FPS, nebo Nastavení →
+WinPad Wine → FPS overlay) ukáže v levém horním rohu hry snímky za poslední
+sekundu, nejdelší snímek v ní (zásek) a rozlišení snímku, který hra kreslí přes
+Metal. Snímky počítá `winehost_metal_frames` v `host/metal-display.m`.
 `dinput8.dll` ze složky hry (ASI Loader) má přednost
 před Wine (`WINEDLLOVERRIDES=dinput8=n,b`).
 
