@@ -336,7 +336,7 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
-  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 3 : 2) : 2;
+  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
@@ -348,7 +348,9 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
   if (section == 1)
     return @"Klávesa, kterou hra dostane za každé tlačítko ovladače. Nahoru až doprava jsou křížový ovladač "
            @"i levá páčka. Platí pro všechny hry.";
-  if (section == 2) return @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
+  if (section == 2)
+    return @"Ukazatel FPS ukáže ve hře snímky za sekundu, nejdelší snímek za poslední sekundu a rozlišení. "
+           @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
   return @"Hry se přidávají ve Finderu: iPad → Soubory → WinPad Wine, každá ve své složce.";
 }
 
@@ -376,9 +378,16 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
   } else if (path.section == 1) {
     cell.textLabel.text = @"Obnovit výchozí mapování";
     cell.textLabel.textColor = UIColor.systemRedColor;
+  } else if (path.section == 2 && path.row == 0) {
+    cell.textLabel.text = @"Ukazatel FPS";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = [NSUserDefaults.standardUserDefaults boolForKey:@"fpsOverlay"];
+    [toggle addTarget:self action:@selector(fpsChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
   } else if (path.section == 2) {
-    cell.textLabel.text = @[ @"Poslední log", @"Spustit hello.exe", @"Spustit window.exe" ][path.row];
-    cell.accessoryType = path.row == 0 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+    cell.textLabel.text = @[ @"Poslední log", @"Spustit hello.exe", @"Spustit window.exe" ][path.row - 1];
+    cell.accessoryType = path.row == 1 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
   } else {
     NSDictionary* info = NSBundle.mainBundle.infoDictionary;
     cell.textLabel.text = path.row == 0 ? @"Verze" : @"Hry";
@@ -394,6 +403,10 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"touchControls"];
 }
 
+- (void)fpsChanged:(UISwitch*)toggle {
+  [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"fpsOverlay"];
+}
+
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
   [tableView deselectRowAtIndexPath:path animated:YES];
   if (path.section == 1 && path.row < PadCount) {
@@ -407,12 +420,12 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
     [tableView reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationNone];
     return;
   }
-  if (path.section != 2) return;
-  if (path.row == 0) {
+  if (path.section != 2 || path.row == 0) return;
+  if (path.row == 1) {
     [self.navigationController pushViewController:[WinPadLogViewController new] animated:YES];
     return;
   }
-  NSString* program = path.row == 1 ? @"hello" : @"window";
+  NSString* program = path.row == 2 ? @"hello" : @"window";
   void (^run)(NSString*) = self.run;
   [self dismissViewControllerAnimated:YES completion:^{
     if (run) run(program);
