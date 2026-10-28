@@ -1,0 +1,48 @@
+rpmalloc keeps a few free pages committed, as upstream rpmalloc does (FEX 3bec2ac, rpmalloc 812c2b9, on top of 0032)
+
+On an iPad, a NoJIT x86 run logs a steady stream of
+
+  [vfree] ml842 # base=0x71... size=... type=0x4000      (MEM_DECOMMIT)
+  err:virtual:mprotect_exec mprotect_exec(0x71..., ..., rw-)
+
+for the same 4 MB and 64 KB pages of FEX's host arena: a MEM_DECOMMIT
+and then a commit again, over and over. FEX's rpmalloc ("FEX: Aggressive
+Config", cfc8292 in External/rpmalloc) set global_page_free_overflow and
+global_page_free_retain to {0, 0, 0, 0}, so every page a heap frees is
+decommitted at once (heap_page_free_decommit) and committed again by the
+next allocation of its size class (heap_make_free_page_available).
+
+The WoW64 build now has upstream rpmalloc's values, {16, 8, 2, 0} and
+{4, 2, 1, 0}: up to 15 small (64 KB), 7 medium (4 MB) and 1 large (64 MB)
+free pages stay committed per heap, and when there are more the free list
+is trimmed back to 4, 2 and 1.
+The change is in the rpmalloc submodule; tests/fex-wow64/build.sh restores
+the submodules before it applies the patches.
+
+diff --git a/External/rpmalloc/rpmalloc/rpmalloc.c b/External/rpmalloc/rpmalloc/rpmalloc.c
+--- a/External/rpmalloc/rpmalloc/rpmalloc.c
++++ b/External/rpmalloc/rpmalloc/rpmalloc.c
+@@ -616,11 +616,21 @@ static const size_class_t global_size_class[SIZE_CLASS_COUNT] = {
+     LCLASS(81920),  LCLASS(98304),  LCLASS(114688), LCLASS(131072), LCLASS(163840), LCLASS(196608), LCLASS(229376),
+     LCLASS(262144), LCLASS(327680), LCLASS(393216), LCLASS(458752), LCLASS(524288)};
+ 
++/* WinPad: upstream rpmalloc's thresholds, not FEX's {0, 0, 0, 0} ("FEX:
++ * Aggressive Config"). With 0 every page a heap frees is decommitted at once
++ * (heap_page_free_decommit, VirtualFree MEM_DECOMMIT) and committed again by
++ * the next allocation of its size (heap_make_free_page_available,
++ * VirtualAlloc MEM_COMMIT). Under Madeira's ntdll each commit is an
++ * mprotect_exec of the 64 KB or 4 MB page, and each decommit drops its
++ * contents, so a run that keeps allocating and freeing in the same pages
++ * pays two kernel round trips and fresh pages each time. Up to 15 small
++ * (64 KB), 7 medium (4 MB) and 1 large (64 MB) free pages now stay
++ * committed per heap before the free list is trimmed back to 4, 2 and 1. */
+ //! Threshold number of pages for when free pages are decommitted
+-static uint32_t global_page_free_overflow[4] = {0, 0, 0, 0};
++static uint32_t global_page_free_overflow[4] = {16, 8, 2, 0};
+ 
+ //! Number of pages to retain when free page threshold overflows
+-static uint32_t global_page_free_retain[4] = {0, 0, 0, 0};
++static uint32_t global_page_free_retain[4] = {4, 2, 1, 0};
+ 
+ //! OS huge page support
+ static int os_huge_pages;

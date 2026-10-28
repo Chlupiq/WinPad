@@ -1,0 +1,72 @@
+The NoJIT interpreter reuses its SSA value arrays (FEX 3bec2ac, on top of 0034)
+
+Every interpreted block allocated its own array of SSA values
+(IR.GetSSACount() + 1 values of 32 bytes, about 60 KB for a d3d9 block)
+and freed it at the end of the block. In NFSU2's menu on an iPad, 64
+interpreted blocks (56 in d3d9-emulated.dll) run every frame, which made
+about 40,000 rpmalloc allocations and frees of 0xf000 a second, and with
+rpmalloc decommitting free pages (before 0033) a VirtualAlloc commit and a
+VirtualFree decommit of those pages each time: the main thread's profile
+showed aligned_alloc / aligned_free / os_mmap under Interpreter::Run.
+
+A finished run now hands its array back to a small pool (at most 16,
+under a mutex), and the next run takes one from there and zeroes it with
+assign, which keeps the capacity. A nested run (a syscall that runs guest
+code) takes another array or allocates one. The pool itself is allocated
+once and never freed.
+
+diff --git a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
+index 076bbfd..e3248bb 100644
+--- a/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
++++ b/FEXCore/Source/Interface/Core/Interpreter/IRInterpreter.cpp
+@@ -615,6 +615,19 @@ bool IsSupported(IROps Op) {
+   }
+ }
+ 
++// WinPad: SSA value arrays of finished runs, kept for the next ones. A run used to allocate its own
++// (IR.GetSSACount() + 1 values of 32 bytes, about 60 KB for a typical d3d9 block) and free it at the
++// end, so every interpreted block was an rpmalloc allocation and free, and with rpmalloc's free
++// pages decommitted a commit and decommit of those pages too: about 40,000 a second in NFSU2's
++// menu. A nested run (a syscall that runs guest code) takes another array, or allocates one. The
++// pool is never freed, so no destructor frees into the allocator at process exit.
++std::mutex SpareValsLock;
++fextl::vector<fextl::vector<Val>>& SpareVals() {
++  static auto* Pool = new fextl::vector<fextl::vector<Val>>();
++  return *Pool;
++}
++constexpr size_t MaxSpareVals = 16;
++
+ class Interpreter {
+ public:
+   Interpreter(Context::ContextImpl* CTX, Core::CpuStateFrame* Frame, const InterpreterIR& Copy, uint64_t Entry)
+@@ -624,9 +637,29 @@ public:
+          Copy.DataSize, Copy.ListSize)
+     , Entry {Entry}
+     , GuestBase {CTX->GetGuestBase()} {
+-    Vals.resize(IR.GetSSACount() + 1);
++    {
++      std::scoped_lock lk(SpareValsLock);
++      auto& Pool = SpareVals();
++      if (!Pool.empty()) {
++        Vals = std::move(Pool.back());
++        Pool.pop_back();
++      }
++    }
++    // Zeroed as resize did on a fresh array; keeps the capacity, so no allocation once it is big enough.
++    Vals.assign(IR.GetSSACount() + 1, Val {});
+   }
+ 
++  ~Interpreter() {
++    std::scoped_lock lk(SpareValsLock);
++    auto& Pool = SpareVals();
++    if (Pool.size() < MaxSpareVals) {
++      Pool.push_back(std::move(Vals));
++    }
++  }
++
++  Interpreter(const Interpreter&) = delete;
++  Interpreter& operator=(const Interpreter&) = delete;
++
+   uintptr_t Run();
+ 
+ private:
