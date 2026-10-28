@@ -41,6 +41,7 @@
 // interpreter (patches/fex-wow64/0019) and is written to the code map in
 // Documents/fexcache/codemap/new, so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
+#import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
@@ -899,6 +900,17 @@ static CFTimeInterval fps_shown;
     [NSFileManager.defaultManager removeItemAtPath:DocumentsPath(@"frames") error:nil];
   }
   printf("WinPad Wine: program %s, AOT image %s\n", name.UTF8String, image.UTF8String);
+
+  // Wine's sound goes to a RemoteIO unit, which plays in the app's audio session. Its default
+  // category (solo ambient) is silenced by the iPad's silent mode, so a game's sound was mixed and
+  // played without being heard. Playback is the category games use: it plays in silent mode too.
+  NSError* audio_error = nil;
+  AVAudioSession* audio = AVAudioSession.sharedInstance;
+  if ([audio setCategory:AVAudioSessionCategoryPlayback error:&audio_error] && [audio setActive:YES error:&audio_error])
+    printf("WinPad Wine: audio session playback, output %s, volume %.2f\n",
+           audio.currentRoute.outputs.firstObject.portType.UTF8String ?: "none", audio.outputVolume);
+  else
+    printf("WinPad Wine: audio session failed: %s\n", audio_error.localizedDescription.UTF8String);
 
   if (game && ![NSFileManager.defaultManager fileExistsAtPath:program]) {
     printf("%s, exit 1\n", FinishedMarker.UTF8String);
