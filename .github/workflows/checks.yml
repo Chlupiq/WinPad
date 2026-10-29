@@ -304,6 +304,11 @@ jobs:
           WINEHOST_SYSWOW64: 1
           WINEHOST_JIT: 1
         run: sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" process-all
+      - name: Keep that code map and its caches, which WinPad Translator's jobs compile again on other computers
+        run: |
+          mkdir -p "$RUNNER_TEMP/translator-check/fexcache"
+          cp -R "$RUNNER_TEMP/fexcache/codemap" "$RUNNER_TEMP/fexcache/cache" "$RUNNER_TEMP/translator-check/fexcache/"
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/translator-check/"
       - name: The x86 program runs again with the code caches loaded, in Wine on an iPad simulator
         env:
           WINEHOST_EXPECT_OUTPUT: Hello from x86
@@ -324,6 +329,24 @@ jobs:
         run: |
           sh tests/wine-loader/converge-cache.sh "$RUNNER_TEMP/wine-loader" \
             "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe"
+      - name: WinPad Translator's toolkit (FEX's offline compiler and dispatcher of this build)
+        run: |
+          mkdir -p "$RUNNER_TEMP/translator-toolkit"
+          for d in translator-toolkit translator-check; do
+            cp "$RUNNER_TEMP/fexcache/dispatcher.bin" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" "$RUNNER_TEMP/$d/"
+          done
+      - name: Upload WinPad Translator's toolkit
+        uses: actions/upload-artifact@v4
+        with:
+          name: WinPadTranslator-toolkit
+          path: ${{ runner.temp }}/translator-toolkit
+          if-no-files-found: error
+      - name: Upload the inputs of WinPad Translator's checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: translator-check
+          path: ${{ runner.temp }}/translator-check
+          if-no-files-found: error
       - name: The code caches and FEX's dispatcher are linked into a dylib, as they would be into the app
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot/fexaot.dylib"
       - name: The x86 program runs from the code linked into that dylib with NoJIT, the blocks it lacked compiled in until none is left, in Wine on an iPad simulator
@@ -373,6 +396,30 @@ jobs:
             "$RUNNER_TEMP/fexcache"
       - name: The same AOT image, with the blocks the interpreter learned, links for an iPad
         run: sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexaot-iphoneos/fexaot.dylib" iphoneos
+      - name: The same code caches linked by WinPad Translator with LLVM's lld and no Xcode, as on a Windows PC; the x86 program runs from that dylib with NoJIT
+        env:
+          WINEHOST_EXPECT_OUTPUT: Hello from x86
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-llvm/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          WINEHOST_EXPECT_LOG: |
+            [nojit] no JIT pool: nothing is written to executable memory
+            [aot-image] loaded linked cache for
+            [aot-dispatcher] static code from the AOT image
+            [nojit] no code is generated to run
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-llvm-image
+          WINEHOST_FEX_CODEMAP: 1
+          WINEHOST_FEX_ALL_CACHED: 1
+        run: |
+          PATH="$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH" python3 -I - <<'EOF'
+          import os, sys
+          sys.path.insert(0, "tools/winpad-translator")
+          from winpad_translator import link
+          t = os.environ["RUNNER_TEMP"]
+          tc = link.find_toolchain("llvm")
+          print(f"toolchain: {tc}")
+          link.link_image(f"{t}/fexcache", f"{t}/fexaot-llvm/fexaot.dylib", "iphonesimulator", f"{t}/fexcache/dispatcher.bin", tc)
+          EOF
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe"
       - name: Code caches without every fourth block of that code map, as a run that took other paths would leave them
         env:
           WINEHOST_EXPECT_OUTPUT: Successfully populated cache
@@ -839,6 +886,152 @@ jobs:
         with:
           name: fex-cache-hello
           path: ${{ runner.temp }}/fexcache
+          if-no-files-found: ignore
+
+  winpad-translator:
+    # WinPad Translator (tools/winpad-translator): turns any game's code maps into its AOT image.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tools
+        shell: bash
+        run: |
+          python -m pip install -q xxhash pefile capstone
+          case "$RUNNER_OS" in
+            Linux) sudo apt-get update -q && sudo apt-get install -y -q clang-18 lld-18 ;;
+            macOS) brew install lld ;;
+          esac
+      - name: Unit tests (code maps from an iPad, the IPA, linking the image with LLVM and no Xcode, a whole run)
+        shell: bash
+        env:
+          WINPAD_REQUIRE_LLVM: 1
+        run: python -m unittest discover -s tools/winpad-translator/tests -v
+
+  winpad-translator-app:
+    # The app for Windows and macOS, with the toolkit of this build (the IPA's xtajit.dll
+    # goes with this offline compiler and dispatcher).
+    needs: [wine-loader, winpad-translator]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: WinPadTranslator-windows
+            files: WinPadTranslator.exe
+          - os: macos-15
+            artifact: WinPadTranslator-macos
+            files: WinPadTranslator-macos.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tools
+        run: python -m pip install -q xxhash pefile capstone pyinstaller
+      - name: WinPad Translator's toolkit (wine-loader job)
+        uses: actions/download-artifact@v4
+        with:
+          name: WinPadTranslator-toolkit
+          path: ${{ runner.temp }}/toolkit
+      - name: The app, packed with PyInstaller
+        shell: bash
+        run: python tools/winpad-translator/package.py "$RUNNER_TEMP/dist" "$RUNNER_TEMP/toolkit"
+      - name: The packed app runs, finds its toolkit and links an image
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Windows) app="$RUNNER_TEMP/dist/WinPadTranslator.exe" ;;
+            macOS) app="$RUNNER_TEMP/dist/WinPad Translator.app/Contents/MacOS/WinPad Translator" ;;
+          esac
+          "$app" --version
+          "$app" --help | grep -q -- --ipad-maps
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/dist/${{ matrix.files }}
+          if-no-files-found: error
+
+  translator-compile:
+    # Can FEX's offline compiler, an aarch64 Windows program, make the same code caches
+    # off a Mac? The simulator's caches of hello.exe's code map are compiled again from
+    # that map and the i386 DLLs in the IPA, as WinPad Translator does it for a game,
+    # and compared byte for byte. Experiments for now: their outcome is in the job logs.
+    needs: wine-loader
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux arm64, Wine
+            os: ubuntu-24.04-arm
+            backend: wine
+          - name: Windows on ARM, natively
+            os: windows-11-arm
+            backend: native
+          - name: x86-64 Linux, Wine in an emulated arm64 container (as Docker Desktop on an x86-64 PC)
+            os: ubuntu-24.04
+            backend: docker
+    name: translator-compile (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tools
+        shell: bash
+        run: |
+          python -m pip install -q xxhash || echo "::warning::no xxhash: file ids are not checked"
+          case "${{ matrix.backend }}" in
+            wine)
+              sudo apt-get update -q
+              sudo apt-get install -y -q wine
+              wine --version ;;
+          esac
+      - name: QEMU for arm64 containers
+        if: matrix.backend == 'docker'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: hello.exe's code map, its caches from the simulator, the toolkit (wine-loader job)
+        uses: actions/download-artifact@v4
+        with:
+          name: translator-check
+          path: ${{ runner.temp }}/check
+      - name: The WinPad Wine IPA (wine-loader job)
+        uses: actions/download-artifact@v4
+        with:
+          name: WinPadWine-ipa
+          path: ${{ runner.temp }}/ipa
+      - name: WinPad Translator compiles that code map with FEX's offline compiler, without a Mac
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/game"
+          cp "$RUNNER_TEMP/check/hello.exe" "$RUNNER_TEMP/game/"
+          start=$(date +%s)
+          python tools/winpad-translator/winpad-translator.py --game "$RUNNER_TEMP/game" --work "$RUNNER_TEMP/work" \
+            --ipad-maps "$RUNNER_TEMP/check/fexcache/codemap/ready" --ipa "$RUNNER_TEMP/ipa/WinPadWine.ipa" \
+            --compiler "$RUNNER_TEMP/check/FEXOfflineCompiler.exe" --dispatcher "$RUNNER_TEMP/check/dispatcher.bin" \
+            --backend ${{ matrix.backend }} --no-half-barrier --compile-only
+          echo "::notice::${{ matrix.name }}: compiled in $(( $(date +%s) - start )) s"
+      - name: The caches are the simulator's, byte for byte
+        shell: bash
+        run: python tools/winpad-translator/tests/compare_caches.py "$RUNNER_TEMP/check/fexcache" "$RUNNER_TEMP/work/fexcache"
+      - name: Upload what the compiler made
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: translator-compile-${{ matrix.backend }}
+          path: ${{ runner.temp }}/work
           if-no-files-found: ignore
 
   fexcore-ios:

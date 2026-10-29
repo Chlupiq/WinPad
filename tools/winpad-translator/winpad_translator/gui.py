@@ -1,0 +1,182 @@
+"""The window of WinPad Translator (Tk, so the same code runs on macOS and Windows)."""
+import os
+import queue
+import threading
+import traceback
+
+from . import __version__, compile as fexcompile, project
+
+
+def main():
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+    from tkinter.scrolledtext import ScrolledText
+
+    root = tk.Tk()
+    root.title(f"WinPad Translator {__version__}")
+    root.minsize(760, 640)
+    p = project.Project()
+    lines = queue.Queue()
+
+    frame = ttk.Frame(root, padding=12)
+    frame.pack(fill="both", expand=True)
+    frame.columnconfigure(1, weight=1)
+    row = 0
+    entries = {}
+
+    def path_row(label, key, kind, hint=""):
+        nonlocal row
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
+        var = tk.StringVar(value=getattr(p, key))
+        ttk.Entry(frame, textvariable=var).grid(row=row, column=1, sticky="ew", padx=6)
+
+        def browse():
+            if kind == "dir":
+                v = filedialog.askdirectory()
+            elif kind == "save":
+                v = filedialog.asksaveasfilename(defaultextension=".ipa", filetypes=[("IPA", "*.ipa")])
+            else:
+                v = filedialog.askopenfilename(filetypes=kind)
+            if v:
+                var.set(v)
+
+        ttk.Button(frame, text="…", width=3, command=browse).grid(row=row, column=2)
+        entries[key] = var
+        row += 1
+        if hint:
+            ttk.Label(frame, text=hint, foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
+            row += 1
+
+    def list_row(label, key, kind, hint):
+        nonlocal row
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="nw", pady=2)
+        box = tk.Listbox(frame, height=3)
+        box.grid(row=row, column=1, sticky="ew", padx=6)
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=row, column=2, sticky="n")
+
+        def add():
+            if kind == "dir":
+                v = filedialog.askdirectory()
+                values = [v] if v else []
+            else:
+                values = filedialog.askopenfilenames(filetypes=kind)
+            for v in values:
+                box.insert("end", v)
+
+        def remove():
+            for i in reversed(box.curselection()):
+                box.delete(i)
+
+        ttk.Button(buttons, text="+", width=3, command=add).pack()
+        ttk.Button(buttons, text="−", width=3, command=remove).pack()
+        entries[key] = box
+        row += 1
+        ttk.Label(frame, text=hint, foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
+        row += 1
+
+    path_row("Game folder", "game_dir", "dir", "the game as it is in WinPad Wine's Documents on the iPad")
+    list_row("iPad code maps", "ipad_maps", "dir",
+             "folders copied off the iPad: WinPad Wine › fexcache › codemap › new")
+    list_row("PC drcov logs", "drcov_logs", [("drcov log", "*.log"), ("all", "*")],
+             "optional: drrun -t drcov -- GAME.EXE on a Windows PC, played for a while")
+    discover = tk.BooleanVar(value=False)
+    ttk.Checkbutton(frame, text="Also find the game's code statically (more code, bigger image)",
+                    variable=discover).grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
+    path_row("WinPad Wine IPA", "ipa", [("IPA", "*.ipa")], "the app the iPad runs (its Wine DLLs must match)")
+    path_row("Write IPA with image", "output_ipa", "save", "optional: sign and install it with AltStore/SideStore/Sideloadly")
+    path_row("Image folder", "output_dir", "dir")
+
+    ttk.Label(frame, text="Compiler runs").grid(row=row, column=0, sticky="w", pady=2)
+    backend = tk.StringVar(value=fexcompile.default_backend())
+    ttk.Combobox(frame, textvariable=backend, values=fexcompile.BACKENDS, state="readonly", width=12).grid(
+        row=row, column=1, sticky="w", padx=6)
+    row += 1
+
+    advanced = ttk.LabelFrame(frame, text="Advanced", padding=6)
+    advanced.grid(row=row, column=0, columnspan=3, sticky="ew", pady=6)
+    advanced.columnconfigure(1, weight=1)
+    row += 1
+    adv = {}
+    for i, (label, key) in enumerate([("FEXOfflineCompiler.exe", "compiler"), ("dispatcher.bin", "dispatcher"),
+                                       ("Work folder", "work_dir"), ("Simulator build dir", "sim_work_dir"),
+                                       ("Xcode project", "xcode_project")]):
+        ttk.Label(advanced, text=label).grid(row=i, column=0, sticky="w")
+        var = tk.StringVar(value=getattr(p, key))
+        ttk.Entry(advanced, textvariable=var).grid(row=i, column=1, sticky="ew", padx=6)
+        adv[key] = var
+    half = tk.BooleanVar(value=True)
+    rebuild = tk.BooleanVar(value=False)
+    ttk.Checkbutton(advanced, text="Half barriers for new blocks (iPad faults on unaligned atomics)",
+                    variable=half).grid(row=5, column=1, sticky="w", padx=6)
+    ttk.Checkbutton(advanced, text="Generate every cache again", variable=rebuild).grid(row=6, column=1, sticky="w", padx=6)
+
+    log = ScrolledText(frame, height=14, font=("TkFixedFont", 10))
+    log.grid(row=row + 1, column=0, columnspan=3, sticky="nsew", pady=(6, 0))
+    frame.rowconfigure(row + 1, weight=1)
+    run_button = ttk.Button(frame, text="Translate")
+    run_button.grid(row=row, column=2, sticky="e")
+
+    def collect():
+        for key, var in entries.items():
+            if isinstance(var, tk.Listbox):
+                setattr(p, key, list(var.get(0, "end")))
+            else:
+                setattr(p, key, var.get().strip())
+        for key, var in adv.items():
+            setattr(p, key, var.get().strip())
+        p.discover, p.half_barrier, p.rebuild = discover.get(), half.get(), rebuild.get()
+        p.backend = backend.get()
+        p.simulator_image = bool(p.xcode_project)
+
+    def work():
+        try:
+            project.run(p, log=lines.put)
+        except project.KNOWN_ERRORS as e:
+            lines.put(f"error: {e}")
+        except Exception as e:  # noqa: BLE001 - shown in the window, with where it happened
+            lines.put(f"error: {e}")
+            lines.put(traceback.format_exc())
+        lines.put(None)
+
+    def start():
+        collect()
+        log.delete("1.0", "end")
+        run_button.state(["disabled"])
+        threading.Thread(target=work, daemon=True).start()
+
+    def pump():
+        try:
+            while True:
+                line = lines.get_nowait()
+                if line is None:
+                    run_button.state(["!disabled"])
+                    continue
+                log.insert("end", line + "\n")
+                log.see("end")
+        except queue.Empty:
+            pass
+        root.after(100, pump)
+
+    def load_settings(game_dir):
+        path = os.path.join(project.default_work_dir(game_dir), project.SETTINGS)
+        if not os.path.isfile(path):
+            return
+        loaded = project.Project.load(path)
+        for key, var in list(entries.items()) + list(adv.items()):
+            value = getattr(loaded, key)
+            if isinstance(var, tk.Listbox):
+                var.delete(0, "end")
+                for v in value:
+                    var.insert("end", v)
+            else:
+                var.set(value)
+        backend.set(loaded.backend or backend.get())
+
+    entries["game_dir"].trace_add("write", lambda *_: load_settings(entries["game_dir"].get())
+                                  if os.path.isdir(entries["game_dir"].get()) else None)
+    run_button.configure(command=start)
+    pump()
+    root.mainloop()
+    return 0
