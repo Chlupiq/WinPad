@@ -1034,12 +1034,18 @@ jobs:
       - name: The caches are the simulator's, byte for byte
         shell: bash
         run: python tools/winpad-translator/tests/compare_caches.py "$RUNNER_TEMP/check/fexcache" "$RUNNER_TEMP/work/fexcache"
+      - name: What the compiler printed
+        if: failure()
+        shell: bash
+        run: tail -n 80 "$RUNNER_TEMP/work/fexcache/compiler.log" || true
       - name: Upload what the compiler made
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: translator-compile-${{ matrix.backend }}
-          path: ${{ runner.temp }}/work
+          path: |
+            ${{ runner.temp }}/work
+            !${{ runner.temp }}/work/fexcache/wineprefix
           if-no-files-found: ignore
 
   fexcore-ios:

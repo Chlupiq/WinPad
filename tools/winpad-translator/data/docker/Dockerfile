@@ -4,4 +4,4 @@
 FROM ubuntu:24.04
 RUN apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends wine \
     && rm -rf /var/lib/apt/lists/*
-RUN WINEDEBUG=-all wineboot -i && wineserver -w
+RUN WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml= wineboot -i && wineserver -w

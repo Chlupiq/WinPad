@@ -26,7 +26,7 @@ from . import paths
 
 BACKENDS = ("simulator", "wine", "native", "docker")
 PROGRESS = re.compile(r"\[process-all\] (\d+) caches generated \((\d+) failed\), (\d+) left")
-DOCKER_IMAGE = "winpad-translator-wine:1"
+DOCKER_IMAGE = "winpad-translator-wine:2"
 
 
 class CompileError(Exception):
@@ -153,6 +153,8 @@ class Wine(Backend):
         env = super().environment()
         env.setdefault("WINEDEBUG", "-all")
         env.setdefault("WINEPREFIX", os.path.join(self.cache_dir, "wineprefix"))
+        # A new prefix would otherwise wait on a dialog offering Wine Mono and Gecko.
+        env.setdefault("WINEDLLOVERRIDES", "mscoree,mshtml=")
         return env
 
 
@@ -189,7 +191,8 @@ class Docker(Backend):
             cmd += ["-v", f"{m}:{self.container_path(m)}"]
         cache = "Z:" + self.container_path(self.cache_dir).replace("/", "\\") + "\\"
         # The image's own Wine prefix, made when it was built (data/docker/Dockerfile).
-        cmd += ["-e", f"FEX_APP_CACHE_LOCATION={cache}", "-e", "WINEDEBUG=-all", DOCKER_IMAGE,
+        cmd += ["-e", f"FEX_APP_CACHE_LOCATION={cache}", "-e", "WINEDEBUG=-all", "-e", "WINEDLLOVERRIDES=mscoree,mshtml=",
+                DOCKER_IMAGE,
                 "wine", self.container_path(self.compiler)]
         return cmd + args
 
