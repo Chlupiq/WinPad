@@ -960,6 +960,39 @@ jobs:
           path: ${{ runner.temp }}/dist/${{ matrix.files }}
           if-no-files-found: error
 
+  wine-arm64-probe:
+    # Why Wine on the arm64 Linux runner never finishes making a prefix (wineboot: "boot event
+    # wait timed out", also under Xvfb) while the same Ubuntu Wine in an emulated arm64 container
+    # does it in 20 s: the host's Wine with logging, and the same in arm64 containers run natively
+    # (Ubuntu's Wine 9 and Debian's newer one). Quick, needs no other job.
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: The runner
+        run: |
+          uname -a; getconf PAGESIZE; nproc; cat /proc/cpuinfo | grep -m3 -i "features\|CPU part"
+          cat /proc/sys/vm/mmap_min_addr; ulimit -a | head -20
+      - name: Host Wine, with what it does
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q wine >/dev/null
+          export WINEPREFIX=$RUNNER_TEMP/p1 WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=+timestamp,+process,+loaddll,+seh,err+all
+          timeout 120 wineboot -i > $RUNNER_TEMP/host.log 2>&1; echo "exit $?"
+          wc -l $RUNNER_TEMP/host.log; head -n 60 $RUNNER_TEMP/host.log; echo ...; tail -n 80 $RUNNER_TEMP/host.log
+          ps -eo pid,stat,wchan:30,etime,cmd | grep -i wine | head -20
+          wineserver -k || true
+      - name: Ubuntu's Wine in an arm64 container, natively
+        run: |
+          docker build --platform linux/arm64 -t probe-ubuntu tools/winpad-translator/data/docker 2>&1 | tail -n 15
+          echo "build exit ${PIPESTATUS[0]}"
+      - name: Debian's Wine in an arm64 container, natively
+        run: |
+          docker run --rm --platform linux/arm64 debian:trixie sh -c '
+            apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends wine64 wine >/dev/null 2>&1;
+            wine --version; WINEDLLOVERRIDES="mscoree,mshtml=" timeout 120 wineboot -i; echo "wineboot exit $?";
+            timeout 60 wine cmd /c ver; echo "cmd exit $?"' 2>&1 | tail -n 30
+
   translator-compile:
     # Can FEX's offline compiler, an aarch64 Windows program, make the same code caches
     # off a Mac? The simulator's caches of hello.exe's code map are compiled again from
