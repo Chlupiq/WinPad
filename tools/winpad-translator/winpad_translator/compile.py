@@ -182,8 +182,11 @@ class Docker(Backend):
         if subprocess.run([self.docker, "image", "inspect", DOCKER_IMAGE], capture_output=True).returncode == 0:
             return
         self.log(f"=== building the container image {DOCKER_IMAGE} (once; it needs the network)")
-        subprocess.run([self.docker, "build", "--platform", "linux/arm64", "-t", DOCKER_IMAGE,
-                        os.path.join(paths.DATA, "docker")], check=True)
+        try:
+            subprocess.run([self.docker, "build", "--platform", "linux/arm64", "-t", DOCKER_IMAGE,
+                            os.path.join(paths.DATA, "docker")], check=True, timeout=3600)
+        except subprocess.TimeoutExpired:
+            raise CompileError("building the container image took more than an hour") from None
 
     def command(self, args):
         cmd = [self.docker, "run", "--rm", "--platform", "linux/arm64"]

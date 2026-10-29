@@ -1033,6 +1033,14 @@ jobs:
             echo "wineboot under Xvfb: exit $? after $(( $(date +%s) - start )) s"; tail -n 40 "$RUNNER_TEMP/wineboot-x.log"
           fi
           timeout 120 wine cmd /c ver; echo "wine cmd: exit $?"
+      - name: The arm64 container with Wine, emulated, and what its build says
+        if: matrix.backend == 'docker'
+        shell: bash
+        run: |
+          start=$(date +%s)
+          timeout 1800 docker build --progress plain --platform linux/arm64 -t winpad-translator-wine:2 \
+            tools/winpad-translator/data/docker 2>&1 | tail -n 60
+          echo "::notice::container build: $(( $(date +%s) - start )) s"
       - name: WinPad Translator compiles that code map with FEX's offline compiler, without a Mac
         shell: bash
         run: |
