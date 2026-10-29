@@ -26,7 +26,7 @@ from . import paths
 
 BACKENDS = ("simulator", "wine", "native", "docker")
 PROGRESS = re.compile(r"\[process-all\] (\d+) caches generated \((\d+) failed\), (\d+) left")
-DOCKER_IMAGE = "winpad-translator-wine:2"
+DOCKER_IMAGE = "winpad-translator-wine:3"
 
 
 class CompileError(Exception):

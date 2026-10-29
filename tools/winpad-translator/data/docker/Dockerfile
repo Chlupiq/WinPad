@@ -4,4 +4,6 @@
 FROM ubuntu:24.04
 RUN apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends wine \
     && rm -rf /var/lib/apt/lists/*
-RUN WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml= wineboot -i && wineserver -w
+# wineboot is done when it returns; the services it started (explorer, plugplay...) would keep
+# wineserver -w waiting for ever, so they are stopped, which also writes the registry out.
+RUN WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml= wineboot -i && wineserver -k && sleep 2
