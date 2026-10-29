@@ -37,6 +37,9 @@ class Project:
     sim_work_dir: str = ""
     # A WinPad checkout, for the simulator backend's scripts (the packaged app has none).
     winpad_repo: str = ""
+    # The iPad's CPU features (FEX_MADEIRA_HOSTPROBE, from hostprobe.txt next to its code maps):
+    # the code is compiled for them.
+    host_features: str = ""
     caches_per_run: int = 8
     compile_timeout: int = 0
     half_barrier: bool = True
@@ -153,9 +156,20 @@ def run(p, log=print):
     for i, folder in enumerate(p.ipad_maps):
         tag = f"ipad{i}-{os.path.basename(os.path.normpath(folder))}"
         log(f"=== {codemaps.import_maps(folder, cache_dir, tag)} code maps from {folder}")
+        probe = codemaps.host_probe(folder)
+        if probe and probe != p.host_features:
+            if p.host_features and link.caches_in(cache_dir):
+                log(f"  the iPad's CPU features changed ({p.host_features} -> {probe}): every cache is made again")
+                p.rebuild = True
+            p.host_features = probe
+    if p.host_features:
+        log(f"=== compiling for the iPad's CPU features {p.host_features}")
+    else:
+        log("=== no hostprobe.txt with the iPad's CPU features: compiling for FEX's assumption (newest Apple cores)")
 
     backend = fexcompile.make_backend(
         p.backend, p.compiler, cache_dir, log=log, per_run=p.caches_per_run, timeout=p.compile_timeout or None,
+        host_features=p.host_features,
         wine=p.wine, work_dir=p.sim_work_dir, repo=p.winpad_repo or None, mounts=[m for m in (p.game_dir, system_dir) if m])
 
     maps = codemaps.map_files(new)

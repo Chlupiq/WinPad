@@ -78,6 +78,21 @@ def import_maps(source, cache_dir, tag):
     return len(maps)
 
 
+HOST_PROBE = "hostprobe.txt"
+
+
+def host_probe(folder):
+    """The CPU features of the iPad whose code maps are under FOLDER (the app writes them next to
+    the maps as FEX_MADEIRA_HOSTPROBE's value), or None."""
+    for dirpath, _, filenames in os.walk(folder):
+        if HOST_PROBE in filenames:
+            with open(os.path.join(dirpath, HOST_PROBE), encoding="utf-8", errors="replace") as f:
+                value = f.read().strip()
+            if value:
+                return value
+    return None
+
+
 def records(data):
     """Yields (kind, start, end, value) for each record of a map: kind "image" with
     (file id, name), "main" with the file id, "block" with (file id, offset)."""

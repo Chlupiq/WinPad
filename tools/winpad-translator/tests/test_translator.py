@@ -228,6 +228,8 @@ import test_translator as t
 loc = os.environ["FEX_APP_CACHE_LOCATION"]
 cache = "/" + loc[3:].replace("\\", "/") if loc[1] == ":" and os.name != "nt" else loc
 new, ready = os.path.join(cache, "codemap", "new"), os.path.join(cache, "codemap", "ready")
+with open(os.path.join(cache, "hostprobe-seen.txt"), "w") as f:
+    f.write(os.environ.get("FEX_MADEIRA_HOSTPROBE", ""))
 os.makedirs(ready, exist_ok=True)
 for n in os.listdir(new):
     if n.endswith(".bin"):
@@ -251,6 +253,7 @@ class RunTest(unittest.TestCase):
             write_map(os.path.join(maps, "x.bin"), [(file_id(exe), IPAD.format("Some Game", "game.exe"), [0x1000])],
                       main=file_id(exe))
             os.makedirs(os.path.join(maps, "runtime"))
+            write(os.path.join(maps, "hostprobe.txt"), b"AFP=1,FLAGM=1,FLAGM2=1\n")
             write(os.path.join(maps, "runtime", "rtcode-1.fexrc"), b"x")
             src = os.path.join(t, "WinPadWine.ipa")
             with zipfile.ZipFile(src, "w") as z:
@@ -274,6 +277,10 @@ class RunTest(unittest.TestCase):
             # The settings are kept for the next round, without the maps already taken.
             again = project.Project.load(os.path.join(t, "work", project.SETTINGS))
             self.assertEqual((again.game_dir, again.ipad_maps), (game, []))
+            # The compiler compiled for the iPad's CPU features, which the app wrote next to its maps.
+            self.assertEqual(again.host_features, "AFP=1,FLAGM=1,FLAGM2=1")
+            with open(os.path.join(t, "work", "fexcache", "hostprobe-seen.txt")) as f:
+                self.assertEqual(f.read(), "AFP=1,FLAGM=1,FLAGM2=1")
 
 
 if __name__ == "__main__":

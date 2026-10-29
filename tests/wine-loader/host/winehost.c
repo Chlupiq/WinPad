@@ -398,7 +398,26 @@ static unsigned pe_machine(const char* path) {
 
 // FEX's WoW64 module cannot call sysctl; the app hands it the CPU features
 // it needs in FEX_MADEIRA_HOSTPROBE (WineProcessBridge.m, the same keys).
+// FEX's code depends on them, so code caches made elsewhere (WinPad
+// Translator) are made for the features of the device that runs them:
+// WINEHOST_HOSTPROBE_FILE gets this device's features, WINEHOST_HOSTPROBE
+// sets them in place of this computer's.
+static void save_host_probe(const char* probe) {
+  const char* file = getenv("WINEHOST_HOSTPROBE_FILE");
+  FILE* f = file && *file ? fopen(file, "w") : NULL;
+  if (!f) return;
+  fprintf(f, "%s\n", probe);
+  fclose(f);
+}
+
 static void publish_host_probe(void) {
+  const char* fixed = getenv("WINEHOST_HOSTPROBE");
+  if (fixed && *fixed) {
+    setenv("FEX_MADEIRA_HOSTPROBE", fixed, 1);
+    printf("winehost: FEX host features %s (given)\n", fixed);
+    save_host_probe(fixed);
+    return;
+  }
   static const struct { const char *key, *sysctl; } probes[] = {
       {"AFP", "hw.optional.arm.FEAT_AFP"},       {"FLAGM", "hw.optional.arm.FEAT_FlagM"},
       {"FLAGM2", "hw.optional.arm.FEAT_FlagM2"}, {"FCMA", "hw.optional.arm.FEAT_FCMA"},
@@ -419,6 +438,7 @@ static void publish_host_probe(void) {
   }
   setenv("FEX_MADEIRA_HOSTPROBE", buf, 1);
   printf("winehost: FEX host features %s\n", buf);
+  save_host_probe(buf);
 }
 
 // FEX translates x86 code at run time and Madeira's ntdll copies plain PE

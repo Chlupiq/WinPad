@@ -33,6 +33,8 @@ def parser():
     ap.add_argument("--winpad-repo", help="a WinPad checkout, for --backend simulator")
     ap.add_argument("--compile-only", dest="link", action="store_false", default=None,
                     help="stop after compiling the code caches")
+    ap.add_argument("--host-features", help="the iPad's CPU features as FEX_MADEIRA_HOSTPROBE "
+                    "(default: hostprobe.txt next to the iPad's code maps)")
     ap.add_argument("--caches-per-run", type=int, help="caches one compiler process makes (default 8)")
     ap.add_argument("--compile-timeout", type=int, help="seconds one compiler process may take")
     ap.add_argument("--no-half-barrier", dest="half_barrier", action="store_false", default=None,

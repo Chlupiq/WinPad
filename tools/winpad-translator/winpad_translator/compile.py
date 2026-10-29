@@ -53,12 +53,16 @@ def windows_path(local):
 class Backend:
     name = ""
 
-    def __init__(self, compiler, cache_dir, log=print, per_run=8, timeout=None):
+    def __init__(self, compiler, cache_dir, log=print, per_run=8, timeout=None, host_features=""):
         self.compiler = compiler
         self.cache_dir = os.path.abspath(cache_dir)
         self.log = log
         self.per_run = per_run
         self.timeout = timeout
+        # The iPad's CPU features (FEX_MADEIRA_HOSTPROBE, which the app saves as hostprobe.txt next
+        # to its code maps): FEX's code depends on them, so the compiler takes the iPad's, not this
+        # computer's. Empty: FEX's assumption, the newest Apple cores.
+        self.host_features = host_features
 
     def image_name(self, local):
         """The name the compiler opens LOCAL by: an NT path as FEX writes them."""
@@ -74,6 +78,9 @@ class Backend:
     def environment(self):
         env = dict(os.environ)
         env["FEX_APP_CACHE_LOCATION"] = windows_path(self.cache_dir) + "\\"
+        env.pop("FEX_MADEIRA_HOSTPROBE", None)
+        if self.host_features:
+            env["FEX_MADEIRA_HOSTPROBE"] = self.host_features
         return env
 
     def run_once(self):
@@ -194,6 +201,8 @@ class Docker(Backend):
             cmd += ["-v", f"{m}:{self.container_path(m)}"]
         cache = "Z:" + self.container_path(self.cache_dir).replace("/", "\\") + "\\"
         # The image's own Wine prefix, made when it was built (data/docker/Dockerfile).
+        if self.host_features:
+            cmd += ["-e", f"FEX_MADEIRA_HOSTPROBE={self.host_features}"]
         cmd += ["-e", f"FEX_APP_CACHE_LOCATION={cache}", "-e", "WINEDEBUG=-all", "-e", "WINEDLLOVERRIDES=mscoree,mshtml=",
                 DOCKER_IMAGE,
                 "wine", self.container_path(self.compiler)]
@@ -228,7 +237,8 @@ class Simulator(Backend):
         for k in ("WINEHOST_EXPECT_EXIT", "WINEHOST_DLLOVERRIDES", "WINEHOST_EXPECT_OUTPUT"):
             env.pop(k, None)
         env.update(WINEHOST_FEX_CACHE=self.cache_dir, WINEHOST_SECONDS=str(self.timeout or 1800),
-                   WINEHOST_SYSWOW64="1", WINEHOST_JIT="1", WINEHOST_JIT_POOL_MB=str(self.jit_pool_mb))
+                   WINEHOST_SYSWOW64="1", WINEHOST_JIT="1", WINEHOST_JIT_POOL_MB=str(self.jit_pool_mb),
+                   WINEHOST_HOSTPROBE=self.host_features)
         cmd = ["sh", self.script, self.work_dir, self.compiler, str(self.per_run)]
         self.log("$ " + " ".join(cmd))
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -245,7 +255,7 @@ def make_backend(name, compiler, cache_dir, log=print, **options):
         raise CompileError(f"unknown backend {name}; one of {', '.join(BACKENDS)}")
     if not compiler or not os.path.isfile(compiler):
         raise CompileError(f"FEXOfflineCompiler.exe not found: {compiler}")
-    common = {k: options[k] for k in ("per_run", "timeout") if options.get(k)}
+    common = {k: options[k] for k in ("per_run", "timeout", "host_features") if options.get(k)}
     if name == "native":
         return Native(compiler, cache_dir, log=log, **common)
     if name == "wine":

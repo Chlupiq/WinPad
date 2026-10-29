@@ -55,6 +55,16 @@ Sideloadly, or the image copied into a `WinPadWine-xcode` project.
    (`clang`/`llvm-mc` + `ld64.lld`, a libSystem stub in place of the SDK)
    anywhere else.
 
+## The iPad's CPU features
+
+FEX's code depends on the CPU features it may use (FEAT_AFP, FlagM, LRCPC...).
+The app writes the iPad's features (`FEX_MADEIRA_HOSTPROBE`) as `hostprobe.txt`
+next to its code maps, and the translator compiles for those, not for the
+computer it runs on: the simulator on a Mac would otherwise compile for that
+Mac's chip (an M1 has no FEAT_AFP, an M2 iPad has). Without the file it
+compiles for FEX's assumption, the newest Apple cores (`--host-features` sets
+them by hand). When they change, every cache is made again.
+
 ## Where the offline compiler runs
 
 `FEXOfflineCompiler.exe` is an **aarch64 Windows** program. It only generates
