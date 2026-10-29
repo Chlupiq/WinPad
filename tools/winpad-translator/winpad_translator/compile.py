@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 
 from . import paths
 
@@ -80,19 +81,39 @@ class Backend:
         self.log("$ " + " ".join(cmd))
         proc = subprocess.Popen(cmd, env=self.environment(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, errors="replace")
-        last = None
-        for line in proc.stdout:
-            line = line.rstrip()
-            m = PROGRESS.search(line)
-            if m:
-                last = tuple(int(x) for x in m.groups())
-            if m or "error" in line.lower() or "Couldn't" in line or "Successfully" in line:
-                self.log("  " + line)
-        proc.stdout.close()
-        proc.wait(timeout=self.timeout)
-        if last is None:
+        progress = []
+
+        # Read in a thread: under Wine the wineserver it starts can hold the pipe open after the
+        # compiler has ended, so the end of the output is not when to stop waiting.
+        # All of it in the cache directory, for when something goes wrong.
+        full = open(os.path.join(self.cache_dir, "compiler.log"), "a", encoding="utf-8")
+
+        def read():
+            for line in proc.stdout:
+                full.write(line)
+                line = line.rstrip()
+                m = PROGRESS.search(line)
+                if m:
+                    progress.append(tuple(int(x) for x in m.groups()))
+                if m or "error" in line.lower() or "Couldn't" in line or "Successfully" in line:
+                    self.log("  " + line)
+
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        try:
+            proc.wait(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            raise CompileError(f"the offline compiler took longer than {self.timeout} s and was stopped")
+        finally:
+            reader.join(timeout=10)
+            if not reader.is_alive():
+                proc.stdout.close()
+                full.close()
+        if not progress:
             raise CompileError(f"the offline compiler ended (exit {proc.returncode}) without its [process-all] line")
-        return last
+        return progress[-1]
 
     def compile(self):
         prev = None

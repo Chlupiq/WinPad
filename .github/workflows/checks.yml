@@ -1021,7 +1021,7 @@ jobs:
           python tools/winpad-translator/winpad-translator.py --game "$RUNNER_TEMP/game" --work "$RUNNER_TEMP/work" \
             --ipad-maps "$RUNNER_TEMP/check/fexcache/codemap/ready" --ipa "$RUNNER_TEMP/ipa/WinPadWine.ipa" \
             --compiler "$RUNNER_TEMP/check/FEXOfflineCompiler.exe" --dispatcher "$RUNNER_TEMP/check/dispatcher.bin" \
-            --backend ${{ matrix.backend }} --no-half-barrier --compile-only
+            --backend ${{ matrix.backend }} --no-half-barrier --compile-only --compile-timeout 1500
           echo "::notice::${{ matrix.name }}: compiled in $(( $(date +%s) - start )) s"
       - name: Where the compiler stops, if it does, on Windows on ARM (a minimal debugger)
         if: failure() && matrix.backend == 'native'
