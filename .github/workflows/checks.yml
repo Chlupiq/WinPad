@@ -983,17 +983,18 @@ jobs:
           wc -l $RUNNER_TEMP/host.log; head -n 60 $RUNNER_TEMP/host.log; echo ...; tail -n 80 $RUNNER_TEMP/host.log
           ps -eo pid,stat,wchan:30,etime,cmd | grep -i wine | head -20
           wineserver -k || true
-      - name: Ubuntu's Wine in an arm64 container, natively
-        run: |
-          set +e
-          docker build --platform linux/arm64 -t probe-ubuntu tools/winpad-translator/data/docker 2>&1 | tail -n 15
-          echo "build exit ${PIPESTATUS[0]}"
       - name: Debian's Wine in an arm64 container, natively
+        timeout-minutes: 12
         run: |
           docker run --rm --platform linux/arm64 debian:trixie sh -c '
             apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends wine64 wine >/dev/null 2>&1;
             wine --version; WINEDLLOVERRIDES="mscoree,mshtml=" timeout 120 wineboot -i; echo "wineboot exit $?";
             timeout 60 wine cmd /c ver; echo "cmd exit $?"' 2>&1 | tail -n 30
+      - name: Ubuntu's Wine in an arm64 container, natively
+        run: |
+          set +e
+          timeout 300 docker build --platform linux/arm64 -t probe-ubuntu tools/winpad-translator/data/docker 2>&1 | tail -n 15
+          echo "build exit ${PIPESTATUS[0]}"
 
   translator-compile:
     # Can FEX's offline compiler, an aarch64 Windows program, make the same code caches
