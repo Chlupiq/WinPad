@@ -976,7 +976,8 @@ jobs:
           cat /proc/sys/vm/mmap_min_addr; ulimit -a | head -20
       - name: Host Wine, with what it does
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q wine >/dev/null
+          set +e
+          sudo apt-get update -q >/dev/null && sudo apt-get install -y -q wine >/dev/null
           export WINEPREFIX=$RUNNER_TEMP/p1 WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=+timestamp,+process,+loaddll,+seh,err+all
           timeout 120 wineboot -i > $RUNNER_TEMP/host.log 2>&1; echo "exit $?"
           wc -l $RUNNER_TEMP/host.log; head -n 60 $RUNNER_TEMP/host.log; echo ...; tail -n 80 $RUNNER_TEMP/host.log
@@ -984,6 +985,7 @@ jobs:
           wineserver -k || true
       - name: Ubuntu's Wine in an arm64 container, natively
         run: |
+          set +e
           docker build --platform linux/arm64 -t probe-ubuntu tools/winpad-translator/data/docker 2>&1 | tail -n 15
           echo "build exit ${PIPESTATUS[0]}"
       - name: Debian's Wine in an arm64 container, natively
