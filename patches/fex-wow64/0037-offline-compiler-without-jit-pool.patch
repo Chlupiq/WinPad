@@ -1,0 +1,72 @@
+FEX's offline compiler runs without the JIT pool on Windows on ARM and Wine (FEX 3bec2ac, on top of 0036)
+
+Without winehost there is no dual-mapped JIT pool (WINE_IOS_JIT_*), and a
+native aarch64 Windows process refuses the EC_CODE executable allocation
+FEXCore's iOS-host allocator asks for, so the compiler died at its first
+code buffer ("[jit-pool] dispatcher code buffer allocation failed", seen as
+STATUS_ILLEGAL_INSTRUCTION from the trap on windows-11-arm). The compiler
+only writes code, never runs it: without the pool it takes plain read-write
+memory for its code buffers (DualMap::CodeNeverRuns). WinPad Translator
+uses this to compile code maps on a Windows on ARM PC and under Wine on
+arm64 Linux, without a Mac.
+
+diff --git a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+index 509750c..79949b6 100644
+--- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
++++ b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: MIT
+ #pragma once
+ #include <FEXCore/Utils/CompilerDefs.h>
++#include <FEXCore/Utils/DualMap.h>
+ #include <FEXCore/Utils/EnumOperators.h>
+ #include <FEXCore/Utils/LogManager.h>
+ 
+@@ -154,6 +155,10 @@ inline void* VirtualAlloc(void* Base, size_t Size, bool Execute = false, bool Co
+ #if defined(FEX_IOS_HOST) && !defined(ARCHITECTURE_arm64ec)
+   void* Ret = ::VirtualAlloc2(nullptr, Base, Size, Flags, Execute ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE,
+                               Execute ? &Parameter : nullptr, Execute ? 1 : 0);
++  if (Execute && !Ret && FEXCore::DualMap::CodeNeverRuns) {
++    // A native aarch64 process (no ARM64EC) refuses EC_CODE: the offline compiler's code is only written
++    Ret = ::VirtualAlloc2(nullptr, Base, Size, Flags, PAGE_READWRITE, nullptr, 0);
++  }
+   /* An executable allocation outside the JIT pool is unusable, and silently so: it is not
+    * executable on iOS and its `+ WriteOffset` alias does not exist, so the first emit would store
+    * into nothing. Refuse it here, at the one place every code buffer comes from. */
+diff --git a/FEXCore/include/FEXCore/Utils/DualMap.h b/FEXCore/include/FEXCore/Utils/DualMap.h
+index 4bc880d..4130e46 100644
+--- a/FEXCore/include/FEXCore/Utils/DualMap.h
++++ b/FEXCore/include/FEXCore/Utils/DualMap.h
+@@ -17,6 +17,11 @@ namespace FEXCore::DualMap {
+ // (before InitCore, so dispatcher emit picks it up).
+ extern int64_t WriteOffset;
+ 
++// WinPad: true in FEX's offline compiler when it runs without the JIT pool (natively on Windows on
++// ARM, under Wine on arm64 Linux): it only generates code and never runs it, so its code buffers
++// may be plain read-write memory where an executable allocation is refused.
++inline bool CodeNeverRuns = false;
++
+ inline void* WriteAddr(void* RXAddr) {
+   return reinterpret_cast<uint8_t*>(RXAddr) + WriteOffset;
+ }
+diff --git a/Source/Tools/FEXOfflineCompiler/IosOfflineStubs.cpp b/Source/Tools/FEXOfflineCompiler/IosOfflineStubs.cpp
+index a23de35..094a679 100644
+--- a/Source/Tools/FEXOfflineCompiler/IosOfflineStubs.cpp
++++ b/Source/Tools/FEXOfflineCompiler/IosOfflineStubs.cpp
+@@ -9,6 +9,7 @@
+ #ifdef FEX_IOS_HOST
+ #include <cstdint>
+ #include <cstdlib>
++#include <FEXCore/Utils/DualMap.h>
+ 
+ namespace FEXCore::DualMap {
+ int64_t WriteOffset = 0;
+@@ -48,6 +49,8 @@ struct JitPoolFromEnvironment {
+     const char* RX = getenv("WINE_IOS_JIT_RX");
+     const char* Size = getenv("WINE_IOS_JIT_SIZE");
+     if (!RW || !RX) {
++      // No winehost (Windows on ARM, Wine on arm64 Linux): code buffers need not be executable
++      FEXCore::DualMap::CodeNeverRuns = true;
+       return;
+     }
+     const uint64_t RWBase = strtoull(RW, nullptr, 16);
