@@ -1022,8 +1022,10 @@ jobs:
         shell: bash
         run: |
           start=$(date +%s)
+          base=$(cd tools/winpad-translator && python -c "from winpad_translator.compile import docker_wine_base; print(docker_wine_base())")
+          echo "container: $base"
           timeout 1800 docker build --progress plain --platform linux/arm64 -t winpad-translator-wine:4 \
-            tools/winpad-translator/data/docker 2>&1 | tail -n 60
+            --build-arg WINE_BASE=$base tools/winpad-translator/data/docker 2>&1 | tail -n 60
           echo "::notice::container build: $(( $(date +%s) - start )) s"
       - name: WinPad Translator compiles that code map with FEX's offline compiler, without a Mac
         shell: bash

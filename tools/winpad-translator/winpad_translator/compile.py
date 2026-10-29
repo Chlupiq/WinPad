@@ -16,6 +16,7 @@ Every backend runs process-all a few caches at a time (patches/fex-wow64/0028),
 until no code map is left to compile.
 """
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -27,6 +28,14 @@ from . import paths
 BACKENDS = ("simulator", "wine", "native", "docker")
 PROGRESS = re.compile(r"\[process-all\] (\d+) caches generated \((\d+) failed\), (\d+) left")
 DOCKER_IMAGE = "winpad-translator-wine:4"
+
+
+def docker_wine_base(machine=None):
+    """The container's distribution: Debian's Wine 10 on an arm64 computer, where Ubuntu's Wine 9
+    hangs on CPUs with pointer authentication; Ubuntu's Wine 9 where Docker emulates arm64 with
+    QEMU, under which Wine 10's wineboot never returns."""
+    machine = (machine or platform.machine()).lower()
+    return "ubuntu:24.04" if machine in ("x86_64", "amd64", "i386", "i686", "x86") else "debian:trixie"
 
 
 class CompileError(Exception):
@@ -191,6 +200,7 @@ class Docker(Backend):
         self.log(f"=== building the container image {DOCKER_IMAGE} (once; it needs the network)")
         try:
             subprocess.run([self.docker, "build", "--platform", "linux/arm64", "-t", DOCKER_IMAGE,
+                            "--build-arg", "WINE_BASE=" + docker_wine_base(),
                             os.path.join(paths.DATA, "docker")], check=True, timeout=3600)
         except subprocess.TimeoutExpired:
             raise CompileError("building the container image took more than an hour") from None
