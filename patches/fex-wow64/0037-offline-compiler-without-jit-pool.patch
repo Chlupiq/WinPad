@@ -6,10 +6,28 @@ FEXCore's iOS-host allocator asks for, so the compiler died at its first
 code buffer ("[jit-pool] dispatcher code buffer allocation failed", seen as
 STATUS_ILLEGAL_INSTRUCTION from the trap on windows-11-arm). The compiler
 only writes code, never runs it: without the pool it takes plain read-write
-memory for its code buffers (DualMap::CodeNeverRuns). WinPad Translator
+memory for its code buffers (DualMap::CodeNeverRuns), and the dispatcher
+skips its inline dc cvau/ic ivau flush, which Windows on ARM traps in user
+mode (STATUS_ILLEGAL_INSTRUCTION; FEX's other flushes go through
+NtFlushInstructionCache or __clear_cache). WinPad Translator
 uses this to compile code maps on a Windows on ARM PC and under Wine on
 arm64 Linux, without a Mac.
 
+diff --git a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+index e8cc73a..e75aa46 100644
+--- a/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
++++ b/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp
+@@ -890,7 +890,9 @@ void Dispatcher::EmitDispatcher() {
+   // 2026-07-02: stride hardcoded to 64 bytes (true for all Apple Silicon).
+   // Reading CTR_EL0 faults on iOS 27 when executed from JIT-pool memory —
+   // see the matching comment in JIT.cpp.
+-  {
++  // WinPad: not in the offline compiler without the JIT pool, where nothing runs this code and
++  // Windows on ARM traps cache maintenance instructions in user mode (STATUS_ILLEGAL_INSTRUCTION).
++  if (!FEXCore::DualMap::CodeNeverRuns) {
+     auto DispatchSize = End - reinterpret_cast<uint64_t>(DispatchPtr);
+     auto* RWPtr = WritePtr(reinterpret_cast<uint8_t*>(DispatchPtr));
+     auto* RXPtr = reinterpret_cast<uint8_t*>(DispatchPtr);
 diff --git a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h b/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
 index 509750c..79949b6 100644
 --- a/FEXCore/include/FEXCore/Utils/AllocatorHooks.h
