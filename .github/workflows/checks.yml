@@ -1023,6 +1023,13 @@ jobs:
             --compiler "$RUNNER_TEMP/check/FEXOfflineCompiler.exe" --dispatcher "$RUNNER_TEMP/check/dispatcher.bin" \
             --backend ${{ matrix.backend }} --no-half-barrier --compile-only
           echo "::notice::${{ matrix.name }}: compiled in $(( $(date +%s) - start )) s"
+      - name: Where the compiler stops, if it does, on Windows on ARM (a minimal debugger)
+        if: failure() && matrix.backend == 'native'
+        shell: bash
+        run: |
+          FEX_APP_CACHE_LOCATION="$(cygpath -w "$RUNNER_TEMP/work/fexcache")\\" \
+            python tools/winpad-translator/tests/first_fault.py "$(cygpath -w "$RUNNER_TEMP/check/FEXOfflineCompiler.exe")" \
+            process-all --max-caches 8
       - name: The caches are the simulator's, byte for byte
         shell: bash
         run: python tools/winpad-translator/tests/compare_caches.py "$RUNNER_TEMP/check/fexcache" "$RUNNER_TEMP/work/fexcache"
