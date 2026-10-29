@@ -960,42 +960,6 @@ jobs:
           path: ${{ runner.temp }}/dist/${{ matrix.files }}
           if-no-files-found: error
 
-  wine-arm64-probe:
-    # Why Wine on the arm64 Linux runner never finishes making a prefix (wineboot: "boot event
-    # wait timed out", also under Xvfb) while the same Ubuntu Wine in an emulated arm64 container
-    # does it in 20 s: the host's Wine with logging, and the same in arm64 containers run natively
-    # (Ubuntu's Wine 9 and Debian's newer one). Quick, needs no other job.
-    runs-on: ubuntu-24.04-arm
-    continue-on-error: true
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - name: The runner
-        run: |
-          uname -a; getconf PAGESIZE; nproc; cat /proc/cpuinfo | grep -m3 -i "features\|CPU part"
-          cat /proc/sys/vm/mmap_min_addr; ulimit -a | head -20
-      - name: Host Wine, with what it does
-        run: |
-          set +e
-          sudo apt-get update -q >/dev/null && sudo apt-get install -y -q wine >/dev/null
-          export WINEPREFIX=$RUNNER_TEMP/p1 WINEDLLOVERRIDES="mscoree,mshtml=" WINEDEBUG=+timestamp,+process,+loaddll,+seh,err+all
-          timeout 120 wineboot -i > $RUNNER_TEMP/host.log 2>&1; echo "exit $?"
-          wc -l $RUNNER_TEMP/host.log; head -n 60 $RUNNER_TEMP/host.log; echo ...; tail -n 80 $RUNNER_TEMP/host.log
-          ps -eo pid,stat,wchan:30,etime,cmd | grep -i wine | head -20
-          wineserver -k || true
-      - name: Debian's Wine in an arm64 container, natively
-        timeout-minutes: 12
-        run: |
-          docker run --rm --platform linux/arm64 debian:trixie sh -c '
-            apt-get update -q >/dev/null && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends wine64 wine >/dev/null 2>&1;
-            wine --version; WINEDLLOVERRIDES="mscoree,mshtml=" timeout 120 wineboot -i; echo "wineboot exit $?";
-            timeout 60 wine cmd /c ver; echo "cmd exit $?"' 2>&1 | tail -n 30
-      - name: Ubuntu's Wine in an arm64 container, natively
-        run: |
-          set +e
-          timeout 300 docker build --platform linux/arm64 -t probe-ubuntu tools/winpad-translator/data/docker 2>&1 | tail -n 15
-          echo "build exit ${PIPESTATUS[0]}"
-
   translator-compile:
     # Can FEX's offline compiler, an aarch64 Windows program, make the same code caches
     # off a Mac? The simulator's caches of hello.exe's code map are compiled again from
@@ -1007,9 +971,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux arm64, Wine
+          # Not the runner's own Wine: Ubuntu 24.04's Wine 9 hangs making a prefix on its
+          # Neoverse N2 (pointer authentication); Debian's Wine 10 in the container does not.
+          - name: Linux arm64, Wine in a Debian container run natively
             os: ubuntu-24.04-arm
-            backend: wine
+            backend: docker
           - name: Windows on ARM, natively
             os: windows-11-arm
             backend: native
@@ -1037,7 +1003,7 @@ jobs:
               echo "WINEPREFIX=$RUNNER_TEMP/wineprefix" >> "$GITHUB_ENV" ;;
           esac
       - name: QEMU for arm64 containers
-        if: matrix.backend == 'docker'
+        if: matrix.backend == 'docker' && matrix.os == 'ubuntu-24.04'
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
@@ -1051,30 +1017,12 @@ jobs:
         with:
           name: WinPadWine-ipa
           path: ${{ runner.temp }}/ipa
-      - name: A Wine prefix on arm64 Linux, and what Wine says while it makes one
-        if: matrix.backend == 'wine'
-        shell: bash
-        env:
-          WINEDLLOVERRIDES: "mscoree,mshtml="
-        run: |
-          set +e
-          start=$(date +%s)
-          timeout 300 wineboot -i > "$RUNNER_TEMP/wineboot.log" 2>&1
-          echo "wineboot: exit $? after $(( $(date +%s) - start )) s"; tail -n 40 "$RUNNER_TEMP/wineboot.log"
-          if [ ! -f "$WINEPREFIX/system.reg" ] || ! timeout 120 wine cmd /c ver; then
-            echo "::warning::wineboot without a display did not finish; again under Xvfb"
-            wineserver -k; rm -rf "$WINEPREFIX"
-            start=$(date +%s)
-            timeout 300 xvfb-run -a wineboot -i > "$RUNNER_TEMP/wineboot-x.log" 2>&1
-            echo "wineboot under Xvfb: exit $? after $(( $(date +%s) - start )) s"; tail -n 40 "$RUNNER_TEMP/wineboot-x.log"
-          fi
-          timeout 120 wine cmd /c ver; echo "wine cmd: exit $?"
-      - name: The arm64 container with Wine, emulated, and what its build says
+      - name: The arm64 container with Wine, and what its build says
         if: matrix.backend == 'docker'
         shell: bash
         run: |
           start=$(date +%s)
-          timeout 1800 docker build --progress plain --platform linux/arm64 -t winpad-translator-wine:3 \
+          timeout 1800 docker build --progress plain --platform linux/arm64 -t winpad-translator-wine:4 \
             tools/winpad-translator/data/docker 2>&1 | tail -n 60
           echo "::notice::container build: $(( $(date +%s) - start )) s"
       - name: WinPad Translator compiles that code map with FEX's offline compiler, without a Mac
@@ -1110,7 +1058,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: translator-compile-${{ matrix.backend }}
+          name: translator-compile-${{ matrix.os }}-${{ matrix.backend }}
           path: |
             ${{ runner.temp }}/work
             !${{ runner.temp }}/work/fexcache/wineprefix

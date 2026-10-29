@@ -76,8 +76,9 @@ Backends (`--backend`):
 |---|---|---|
 | `simulator` | Mac with Xcode: Wine in an iPad simulator, as `game-aot.sh` | what NFSU2's images were made with; needs a WinPad checkout and its `tests/wine-loader` build (`--sim-work-dir`, `--winpad-repo`) |
 | `native` | Windows on ARM (Snapdragon) | CI job `translator-compile` checks it on `windows-11-arm` against the simulator's caches |
-| `wine` | arm64 Linux with Wine (also a Raspberry Pi 5, an Ampere box) | CI checks it on `ubuntu-24.04-arm` |
-| `docker` | any x86-64 PC or Mac with Docker (Desktop): Wine in an arm64 container, emulated by QEMU | CI checks it on `ubuntu-24.04`; slow (emulated), but needs nothing else |
+| `wine` | arm64 Linux with Wine 10 or newer (Debian 13, Fedora...; also a Raspberry Pi 5, an Ampere box) | Ubuntu 24.04's Wine 9 hangs on CPUs with pointer authentication (Neoverse N2, Graviton 4...), as on CI's `ubuntu-24.04-arm`: use `docker` there |
+| `docker` on arm64 Linux | the same Debian container, run natively | CI checks it on `ubuntu-24.04-arm` |
+| `docker` | any x86-64 PC or Mac with Docker (Desktop): Wine (Debian's) in an arm64 container, emulated by QEMU | CI checks it on `ubuntu-24.04`; slow (emulated), but needs nothing else |
 
 An x86-64 Windows PC therefore compiles through Docker Desktop (the default
 there); the linking step runs natively with LLVM (`winget install LLVM.LLVM`).
