@@ -153,14 +153,12 @@ def find_ci(folder, relative):
     for part in relative.replace("\\", "/").split("/"):
         if not part:
             continue
-        exact = os.path.join(path, part)
-        if os.path.exists(exact):
-            path = exact
-            continue
+        # The name as it is on disk, also where the volume would open it in any case.
         try:
-            hit = [n for n in os.listdir(path) if n.lower() == part.lower()]
+            names = os.listdir(path)
         except OSError:
             return None
+        hit = [n for n in names if n == part] or [n for n in names if n.lower() == part.lower()]
         if not hit:
             return None
         path = os.path.join(path, hit[0])
