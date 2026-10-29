@@ -50,17 +50,46 @@ def explain(path_a, path_b, limit=24):
         info = None
     words = [off for off in range(0, min(len(a), len(b)) - 3, 4) if a[off:off + 4] != b[off:off + 4]]
     print(f"    {len(words)} differing 32-bit words")
-    blocks = sorted((blk["host"], blk["guest"]) for blk in info["block_list"]) if info else []
-    for off in words[:limit]:
+    if not info:
+        return
+    # Blocks whose code starts at another offset or is another size: the first of them is where
+    # the two compilers part.
+    other = {}
+    try:
+        other = {blk["guest"]: blk["host"] for blk in fxcc_inspect.parse(b)["block_list"]}
+    except fxcc_inspect.FormatError:
+        pass
+    by_host = sorted((blk["host"], blk["guest"]) for blk in info["block_list"])
+    ends = {g: (by_host[i + 1][0] if i + 1 < len(by_host) else info["code_bytes"]) - h for i, (h, g) in enumerate(by_host)}
+    other_sorted = sorted((h, g) for g, h in other.items())
+    other_ends = {g: (other_sorted[i + 1][0] if i + 1 < len(other_sorted) else info["code_bytes"]) - h
+                  for i, (h, g) in enumerate(other_sorted)}
+    moved = [(h, g) for h, g in by_host if other.get(g) != h or other_ends.get(g) != ends[g]]
+    print(f"    {len(moved)} of {len(by_host)} blocks at another offset or of another size")
+    for h, g in moved[:6]:
+        print(f"      guest {g:#x}: code+{h:#x} {ends[g]} bytes | "
+              f"code+{other.get(g, -1):#x} {other_ends.get(g, -1)} bytes")
+    if moved:
+        # The first such block side by side, from the start of its code
+        h, g = moved[0]
+        hb = other.get(g)
+        n = max(ends[g], other_ends.get(g, 0)) // 4
+        print(f"    guest {g:#x}, both compilers' code:")
+        for i in range(min(n, 160)):
+            oa, ob = info["code_offset"] + h + 4 * i, info["code_offset"] + (hb or 0) + 4 * i
+            wa = struct.unpack_from("<I", a, oa)[0] if 4 * i < ends[g] else None
+            wb = struct.unpack_from("<I", b, ob)[0] if hb is not None and 4 * i < other_ends.get(g, 0) else None
+            ta = f"{wa:08x} {disasm(wa, h + 4 * i)}" if wa is not None else ""
+            tb = f"{wb:08x} {disasm(wb, hb + 4 * i)}" if wb is not None else ""
+            print(f"      {'  ' if wa == wb else '! '}+{4 * i:#05x} {ta:44} | {tb}")
+    code = [off for off in words if off >= info["code_offset"]]
+    print(f"    {len(words) - len(code)} differing words in the header and tables, {len(code)} in the code")
+    for off in code[:limit]:
         wa, wb = struct.unpack_from("<I", a, off)[0], struct.unpack_from("<I", b, off)[0]
-        where = "header/tables"
-        if info and off >= info["code_offset"]:
-            code = off - info["code_offset"]
-            owner = [g for h, g in blocks if h <= code]
-            where = f"code+{code:#x}" + (f" (block of guest {owner[-1]:#x})" if owner else "")
-            print(f"    {where}: {wa:08x} {disasm(wa, code):32} | {wb:08x} {disasm(wb, code)}")
-        else:
-            print(f"    {where} @{off:#x}: {wa:08x} | {wb:08x}")
+        rel = off - info["code_offset"]
+        owner = [g for h, g in by_host if h <= rel]
+        where = f"code+{rel:#x}" + (f" (block of guest {owner[-1]:#x})" if owner else "")
+        print(f"    {where}: {wa:08x} {disasm(wa, rel):32} | {wb:08x} {disasm(wb, rel)}")
 
 
 def main(argv):
