@@ -79,8 +79,8 @@ class Backend:
     def run_once(self):
         cmd = self.command(["process-all", "--max-caches", str(self.per_run)])
         self.log("$ " + " ".join(cmd))
-        proc = subprocess.Popen(cmd, env=self.environment(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace")
+        proc = subprocess.Popen(cmd, env=self.environment(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace")
         progress = []
 
         # Read in a thread: under Wine the wineserver it starts can hold the pipe open after the

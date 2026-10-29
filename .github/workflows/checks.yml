@@ -995,8 +995,10 @@ jobs:
           case "${{ matrix.backend }}" in
             wine)
               sudo apt-get update -q
-              sudo apt-get install -y -q wine
-              wine --version ;;
+              sudo apt-get install -y -q wine xvfb
+              wine --version
+              # Outside the work folder, whose upload would follow the prefix's z: drive into /
+              echo "WINEPREFIX=$RUNNER_TEMP/wineprefix" >> "$GITHUB_ENV" ;;
           esac
       - name: QEMU for arm64 containers
         if: matrix.backend == 'docker'
@@ -1013,6 +1015,24 @@ jobs:
         with:
           name: WinPadWine-ipa
           path: ${{ runner.temp }}/ipa
+      - name: A Wine prefix on arm64 Linux, and what Wine says while it makes one
+        if: matrix.backend == 'wine'
+        shell: bash
+        env:
+          WINEDLLOVERRIDES: "mscoree,mshtml="
+        run: |
+          set +e
+          start=$(date +%s)
+          timeout 300 wineboot -i > "$RUNNER_TEMP/wineboot.log" 2>&1
+          echo "wineboot: exit $? after $(( $(date +%s) - start )) s"; tail -n 40 "$RUNNER_TEMP/wineboot.log"
+          if [ ! -f "$WINEPREFIX/system.reg" ] || ! timeout 120 wine cmd /c ver; then
+            echo "::warning::wineboot without a display did not finish; again under Xvfb"
+            wineserver -k; rm -rf "$WINEPREFIX"
+            start=$(date +%s)
+            timeout 300 xvfb-run -a wineboot -i > "$RUNNER_TEMP/wineboot-x.log" 2>&1
+            echo "wineboot under Xvfb: exit $? after $(( $(date +%s) - start )) s"; tail -n 40 "$RUNNER_TEMP/wineboot-x.log"
+          fi
+          timeout 120 wine cmd /c ver; echo "wine cmd: exit $?"
       - name: WinPad Translator compiles that code map with FEX's offline compiler, without a Mac
         shell: bash
         run: |
