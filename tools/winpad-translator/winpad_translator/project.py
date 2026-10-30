@@ -325,7 +325,7 @@ def into_game_folder(p, image, log=print, run=subprocess.run):
     build = app_build(p)
     stamp = os.path.join(p.game_dir, GAME_FOLDER_BUILD)
     if build:
-        with open(stamp, "w") as f:
+        with open(stamp, "w", newline="\n") as f:
             f.write(build + "\n")
     elif os.path.exists(stamp):
         os.remove(stamp)
