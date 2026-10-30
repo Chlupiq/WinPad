@@ -1049,6 +1049,18 @@ jobs:
           FEX_APP_CACHE_LOCATION="$(cygpath -w "$RUNNER_TEMP/work/fexcache")\\" \
             python tools/winpad-translator/tests/first_fault.py "$(cygpath -w "$RUNNER_TEMP/check/FEXOfflineCompiler.exe")" \
             process-all --max-caches 8
+      - name: Where the compiler stops, if it does, in the container (Wine's exception log)
+        if: failure() && matrix.backend == 'docker'
+        shell: bash
+        run: |
+          set +e
+          w=$RUNNER_TEMP/work
+          timeout 600 docker run --rm --platform linux/arm64 -v "$RUNNER_TEMP/check:/c" -v "$w/fexcache:/f" -v "$w/i386-windows:/i" \
+            -e FEX_MADEIRA_HOSTPROBE="$(cat "$RUNNER_TEMP/check/fexcache/codemap/new/hostprobe.txt")" -e 'FEX_APP_CACHE_LOCATION=Z:\f\' \
+            -e WINEDEBUG=+seh,+loaddll,+virtual,err+all -e WINEDLLOVERRIDES=mscoree,mshtml= winpad-translator-wine:4 \
+            wine /c/FEXOfflineCompiler.exe process-all --max-caches 8 > "$RUNNER_TEMP/seh.log" 2>&1
+          echo "exit $?"; wc -l "$RUNNER_TEMP/seh.log"; grep -v "trace:virtual" "$RUNNER_TEMP/seh.log" | tail -n 120
+          grep "trace:virtual" "$RUNNER_TEMP/seh.log" | tail -n 30
       - name: The caches are the simulator's, byte for byte
         shell: bash
         run: python tools/winpad-translator/tests/compare_caches.py "$RUNNER_TEMP/check/fexcache" "$RUNNER_TEMP/work/fexcache"
