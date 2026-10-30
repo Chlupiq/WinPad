@@ -30,6 +30,9 @@ PROGRESS = re.compile(r"\[process-all\] (\d+) caches generated \((\d+) failed\),
 DOCKER_IMAGE = "winpad-translator-wine:4"
 
 
+EMULATED_CPU = "neoverse-n1"
+
+
 def docker_emulated(machine=None):
     """Docker runs the arm64 container under QEMU on an x86 computer."""
     return (machine or platform.machine()).lower() in ("x86_64", "amd64", "i386", "i686", "x86")
@@ -211,6 +214,7 @@ class Docker(Backend):
         try:
             subprocess.run([self.docker, "build", "--platform", "linux/arm64", "-t", DOCKER_IMAGE,
                             "--build-arg", "WINE_BASE=" + docker_wine_base(),
+                            "--build-arg", "EMULATED_CPU=" + (EMULATED_CPU if docker_emulated() else ""),
                             os.path.join(paths.DATA, "docker")], check=True, timeout=3600)
         except subprocess.TimeoutExpired:
             raise CompileError("building the container image took more than an hour") from None
@@ -226,7 +230,7 @@ class Docker(Backend):
         if docker_emulated():
             # QEMU's default CPU has pointer authentication, which Ubuntu's Wine 9 cannot unwind
             # through; the compiler only writes code, so a plain ARMv8.2 core with LSE will do.
-            cmd += ["-e", "QEMU_CPU=neoverse-n1"]
+            cmd += ["-e", "QEMU_CPU=" + EMULATED_CPU]
         cmd += ["-e", f"FEX_APP_CACHE_LOCATION={cache}", "-e", "WINEDEBUG=-all", "-e", "WINEDLLOVERRIDES=mscoree,mshtml=",
                 DOCKER_IMAGE,
                 "wine", self.container_path(self.compiler)]

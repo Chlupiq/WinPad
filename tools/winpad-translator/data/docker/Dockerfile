@@ -12,4 +12,7 @@ RUN apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --
     && rm -rf /var/lib/apt/lists/*
 # wineboot is done when it returns; the services it started (explorer, plugplay...) would keep
 # wineserver -w waiting for ever, so they are stopped, which also writes the registry out.
-RUN WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml= timeout 900 wineboot -i && wineserver -k && sleep 2
+# Under QEMU the CPU it emulates (EMULATED_CPU, as the translator passes QEMU_CPU when it runs).
+ARG EMULATED_CPU=
+RUN if [ -n "$EMULATED_CPU" ]; then export QEMU_CPU=$EMULATED_CPU; fi; \
+    WINEDEBUG=-all WINEDLLOVERRIDES=mscoree,mshtml= timeout 900 wineboot -i && wineserver -k && sleep 2
