@@ -1,4 +1,4 @@
-Code a program makes at run time gets code caches by its bytes (FEX 3bec2ac, on top of 0035)
+Code a program makes at run time gets code caches by its bytes (FEX 21ad9d8, on top of 0035)
 
 NFSU2 with sound on runs its race at 10-20 FPS on an iPad (44 without).
 EA's sound system (SNDSYS v9.03.04, linked into SPEED2.EXE) loads x86
@@ -33,6 +33,15 @@ write-protected while it holds code). A miss in a range whose cache was
 loaded, at a block the cache had, hashes the range again; with the same
 bytes the cache's blocks are registered again ("[rt-code] ... registered
 again after an invalidation"), otherwise the range gets a new id.
+
+The ready map of an executable lists the libraries process-all compiles
+with it. A runtime range is recorded as a library of the executable that
+loaded it, and each run's code map lists the ranges of that run (other
+addresses or bytes give other ids), so the ready map now keeps the
+libraries of every code map imported for it and of its previous version,
+and is rewritten when a code map brings a new library even without new
+blocks. Before, only the last code map's libraries were kept and ranges
+of other runs were never compiled.
 
 diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
 index cc7b305..466f40c 100644
@@ -88,7 +97,7 @@ index d1f4dec..86cfe62 100644
      return nullptr;
    }
 diff --git a/Source/Tools/FEXOfflineCompiler/Main.cpp b/Source/Tools/FEXOfflineCompiler/Main.cpp
-index 914e04d..e3c1388 100644
+index 914e04d..0501380 100644
 --- a/Source/Tools/FEXOfflineCompiler/Main.cpp
 +++ b/Source/Tools/FEXOfflineCompiler/Main.cpp
 @@ -404,9 +404,45 @@ static void* LoadImageIntoGuestWindow(HANDLE File, std::string_view Filename) {
@@ -147,7 +156,69 @@ index 914e04d..e3c1388 100644
      fmt::print("File {} does not exist\n", Binary.Filename);
      // TODO: Pressure vessel hits this
      return /*EXIT_FAILURE*/ std::nullopt;
-@@ -947,6 +984,22 @@ static int ProcessAll(size_t MaxCaches) {
+@@ -889,8 +926,10 @@ static std::map<FEXCore::CodeMapFileId, ParsedContentsAndDependencies> ImportPen
+     // WinPad: a ready code map of a library (as written by WriteNewCodeMap) has no executable
+     // marker, only its own library load. Such maps come back here when they are re-imported, e.g.
+     // after codemap.py halfbarrier marked their blocks; they carry no dependencies to record.
++    // WinPad: several code maps of one executable (several runs, e.g. a game's runtime code at
++    // other addresses each run) each list the libraries of their run; keep all of them.
+     if (ExecutableFileId) {
+-      Result.at(*ExecutableFileId).Dependencies = std::move(Dependencies);
++      Result.at(*ExecutableFileId).Dependencies.merge(Dependencies);
+     }
+ 
+     // Delete imported code map
+@@ -915,23 +954,42 @@ static void AggregateCodeMaps(const std::string& NewCodeMapDirectory, const std:
+     const auto BinaryName = std::string {FEXCore::CodeMap::GetBaseFilename(File, false)};
+     auto OutputName = fmt::format("{}/{}", ReadyCodeMapDirectory, BinaryName);
+ 
++    // WinPad: the ready map of an executable keeps the libraries it listed before. Without them a
++    // run that used other libraries (runtime code at other addresses) dropped the earlier ones,
++    // and process-all compiles only the libraries its executable's ready map lists.
++    std::map<FEXCore::CodeMapFileId, fextl::string> DependencyNames;
++    for (auto& Dependency : Contents.Dependencies) {
++      DependencyNames.emplace(Dependency, IncomingCodeMap.at(Dependency).Filename);
++    }
+     if (auto ReferenceCodeMap = std::ifstream(OutputName, std::ios_base::binary)) {
+-      auto PreviousBlocks = FEXCore::CodeMap::ParseCodeMap(ReferenceCodeMap).at(File.FileId).Blocks;
++      auto Previous = FEXCore::CodeMap::ParseCodeMap(ReferenceCodeMap);
++      auto PreviousBlocks = std::move(Previous.at(File.FileId).Blocks);
+       auto NumPreviousBlocks = PreviousBlocks.size();
+       Contents.Blocks.merge(std::move(PreviousBlocks));
+-      if (Contents.Blocks.size() == NumPreviousBlocks) {
+-        // No new blocks => skip updating
++      size_t NewDependencies = 0;
++      if (Contents.IsExecutable) {
++        for (auto& [Dependency, Previously] : Previous) {
++          if (Dependency != File.FileId) {
++            DependencyNames.emplace(Dependency, Previously.Filename);
++          }
++        }
++        for (auto& Dependency : Contents.Dependencies) {
++          NewDependencies += !Previous.contains(Dependency);
++        }
++      }
++      if (Contents.Blocks.size() == NumPreviousBlocks && !NewDependencies) {
++        // No new blocks or libraries => skip updating
+         continue;
+       } else {
+-        fmt::println("  Found {} new blocks ({} total) in code map {} for {}", Contents.Blocks.size() - NumPreviousBlocks,
+-                     Contents.Blocks.size(), BinaryName, File.Filename);
++        fmt::println("  Found {} new blocks ({} total) and {} new libraries in code map {} for {}",
++                     Contents.Blocks.size() - NumPreviousBlocks, Contents.Blocks.size(), NewDependencies, BinaryName, File.Filename);
+       }
+     }
+ 
+     // Update code map
+     std::set<FEXCore::ExecutableFileInfo> Dependencies;
+-    for (auto& Dependency : Contents.Dependencies) {
+-      Dependencies.emplace(nullptr, Dependency, IncomingCodeMap.at(Dependency).Filename);
++    for (auto& [Dependency, Filename] : DependencyNames) {
++      Dependencies.emplace(nullptr, Dependency, Filename);
+     }
+     WriteNewCodeMap(File, OutputName, Contents.Blocks, Contents.IsExecutable, Dependencies);
+   }
+@@ -947,6 +1005,22 @@ static int ProcessAll(size_t MaxCaches) {
    const std::string NewCodeMapDirectory = fmt::format("{}codemap/new", CacheDirectory);
    const std::string ReadyCodeMapDirectory = fmt::format("{}codemap/ready", CacheDirectory);
  
