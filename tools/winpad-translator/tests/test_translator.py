@@ -2,6 +2,7 @@
 LLVM (when it is installed) and a whole run with a stand-in for FEX's offline compiler."""
 import importlib.util
 import os
+import plistlib
 import struct
 import sys
 import tempfile
@@ -190,6 +191,27 @@ class IpaTest(unittest.TestCase):
                 self.assertEqual(z.read("Payload/WinPadWine.app/Frameworks/fexaot-game.dylib"), b"new")
                 self.assertEqual(z.read("Payload/WinPadWine.app/WinPadWine"), b"app")
                 self.assertEqual(len(z.namelist()), 4)
+
+    def test_app_name(self):
+        with tempfile.TemporaryDirectory() as t:
+            src = os.path.join(t, "WinPadWine.ipa")
+            info = {"CFBundleDisplayName": "WinPad Wine", "CFBundleIdentifier": "com.example.winpad"}
+            with zipfile.ZipFile(src, "w") as z:
+                z.writestr("Payload/WinPadWine.app/Info.plist", plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+            out = os.path.join(t, "out.ipa")
+            ipa.add_images(src, out, [], app_name="Moje hra")
+            with zipfile.ZipFile(out) as z:
+                data = z.read("Payload/WinPadWine.app/Info.plist")
+            # Still binary, as the installer got it; only the name under the icon changed.
+            self.assertTrue(data.startswith(b"bplist"))
+            self.assertEqual(plistlib.loads(data), dict(info, CFBundleDisplayName="Moje hra"))
+            project_plist = os.path.join(t, "Info.plist")
+            write(project_plist, plistlib.dumps({"CFBundleDisplayName": "WinPad Wine",
+                                                 "CFBundleExecutable": "$(EXECUTABLE_NAME)"}))
+            ipa.rename_app(project_plist, "Moje hra")
+            with open(project_plist, "rb") as f:
+                self.assertEqual(plistlib.load(f), {"CFBundleDisplayName": "Moje hra",
+                                                    "CFBundleExecutable": "$(EXECUTABLE_NAME)"})
 
 
 @unittest.skipUnless(toolchain(), "needs LLVM (clang or llvm-mc, and lld)")

@@ -94,8 +94,13 @@ Python 3.10+ with Tk; `pip install xxhash pefile capstone`).
 
 ```
 winpad-translator --game "D:\Games\My Game" --ipad-maps "D:\from-ipad\new" \
-    --ipa WinPadWine.ipa --out-ipa WinPadWine-mygame.ipa
+    --ipa WinPadWine.ipa --out-ipa WinPadWine-mygame.ipa --app-name "My Game"
 ```
+
+`--app-name` (App name in the window) sets the name under the app's icon
+(CFBundleDisplayName) in the IPA written, or in the Info.plist of
+`--xcode-project`. The bundle identifier stays, so the renamed app replaces
+WinPad Wine on the iPad and keeps its Documents.
 
 Then copy the game folder into WinPad Wine's Documents on the iPad and install
 the new IPA. The settings of a game are kept in its work folder

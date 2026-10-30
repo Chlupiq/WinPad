@@ -7,6 +7,7 @@ in WinPadWine.app/Frameworks, for AltStore, SideStore or Sideloadly to sign and
 install.
 """
 import os
+import plistlib
 import shutil
 import zipfile
 
@@ -42,19 +43,39 @@ def extract_system_dlls(ipa, folder):
     return count
 
 
-def add_images(ipa, out, images):
+def renamed_plist(data, app_name):
+    """Info.plist DATA (XML or binary) with APP_NAME as the name under the app's icon."""
+    info = plistlib.loads(data)
+    info["CFBundleDisplayName"] = app_name
+    return plistlib.dumps(info, fmt=plistlib.FMT_BINARY if data.startswith(b"bplist") else plistlib.FMT_XML)
+
+
+def rename_app(info_plist, app_name):
+    """Sets the name under the app's icon in an Info.plist file (of a WinPadWine-xcode project)."""
+    with open(info_plist, "rb") as f:
+        data = renamed_plist(f.read(), app_name)
+    with open(info_plist, "wb") as f:
+        f.write(data)
+
+
+def add_images(ipa, out, images, app_name=""):
     """Copies IPA to OUT with each of IMAGES (paths) in the app's Frameworks, replacing a
-    file of the same name. The installer signs them with the rest of the app."""
+    file of the same name, and APP_NAME, if given, under its icon. The installer signs
+    them with the rest of the app."""
     names = {os.path.basename(p) for p in images}
     with zipfile.ZipFile(ipa) as src:
-        prefix = app_prefix(src.namelist()) + "Frameworks/"
+        app = app_prefix(src.namelist())
+        prefix = app + "Frameworks/"
         tmp = out + ".tmp"
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as dst:
             for info in src.infolist():
                 if info.filename.startswith(prefix) and info.filename[len(prefix):] in names:
                     continue
                 with src.open(info) as f:
-                    dst.writestr(info, f.read())
+                    data = f.read()
+                if app_name and info.filename == app + "Info.plist":
+                    data = renamed_plist(data, app_name)
+                dst.writestr(info, data)
             for p in images:
                 info = zipfile.ZipInfo(prefix + os.path.basename(p))
                 info.external_attr = 0o100755 << 16

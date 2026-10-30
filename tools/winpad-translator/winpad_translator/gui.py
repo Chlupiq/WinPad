@@ -88,6 +88,14 @@ def main():
     path_row("Write IPA with image", "output_ipa", "save", "optional: sign and install it with AltStore/SideStore/Sideloadly")
     path_row("Image folder", "output_dir", "dir")
 
+    ttk.Label(frame, text="App name").grid(row=row, column=0, sticky="w", pady=2)
+    entries["app_name"] = tk.StringVar(value=p.app_name)
+    ttk.Entry(frame, textvariable=entries["app_name"]).grid(row=row, column=1, sticky="ew", padx=6)
+    row += 1
+    ttk.Label(frame, text="optional: the name under the icon on the iPad, e.g. the game's",
+              foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
+
     ttk.Label(frame, text="Compiler runs").grid(row=row, column=0, sticky="w", pady=2)
     backend = tk.StringVar(value=fexcompile.default_backend())
     ttk.Combobox(frame, textvariable=backend, values=fexcompile.BACKENDS, state="readonly", width=12).grid(

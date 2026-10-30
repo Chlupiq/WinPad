@@ -43,6 +43,7 @@ def parser():
     ap.add_argument("--simulator-image", action="store_true", default=None, help="also link an image for the iPad simulator")
     ap.add_argument("--out", dest="output_dir", help="folder to put the image in")
     ap.add_argument("--out-ipa", dest="output_ipa", help="write a copy of --ipa with the image in it")
+    ap.add_argument("--app-name", help="the name under the app's icon on the iPad, e.g. the game's (default: WinPad Wine)")
     ap.add_argument("--xcode-project", help="put the image into this WinPadWine-xcode project's Frameworks")
     return ap
 

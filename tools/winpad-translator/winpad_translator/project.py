@@ -51,6 +51,8 @@ class Project:
     output_dir: str = ""
     output_ipa: str = ""
     xcode_project: str = ""
+    # The name under the app's icon on the iPad (in the IPA or Xcode project written); empty: WinPad Wine.
+    app_name: str = ""
 
     def folder_name(self):
         return os.path.basename(os.path.normpath(self.game_dir))
@@ -252,6 +254,9 @@ def run(p, log=print):
             os.makedirs(dest, exist_ok=True)
             shutil.copyfile(out, os.path.join(dest, p.image_name()))
             log(f"  -> {dest}")
+    if p.xcode_project and p.app_name and os.path.isfile(os.path.join(p.xcode_project, "Info.plist")):
+        ipamod.rename_app(os.path.join(p.xcode_project, "Info.plist"), p.app_name)
+        log(f"  app name in {p.xcode_project}: {p.app_name}")
     device = made[0][1]
     if p.output_dir:
         os.makedirs(p.output_dir, exist_ok=True)
@@ -260,7 +265,7 @@ def run(p, log=print):
     if p.output_ipa:
         if not p.ipa:
             raise TranslateError("an IPA with the image needs the IPA it is made from")
-        ipamod.add_images(p.ipa, p.output_ipa, [device])
+        ipamod.add_images(p.ipa, p.output_ipa, [device], p.app_name)
         log(f"=== {p.output_ipa}: the app with {p.image_name()}, for AltStore, SideStore or Sideloadly")
     # The maps and logs are in the cache directory now; the next run takes only new ones.
     p.ipad_maps, p.drcov_logs, p.rebuild = [], [], False
