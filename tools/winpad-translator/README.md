@@ -107,4 +107,40 @@ the new IPA. The settings of a game are kept in its work folder
 (`winpad-translator.json`, `--settings`), so the next round only needs the new
 code maps.
 
+## Several games in one app
+
+The app's game library (tests/wine-app/Library.m) starts each game folder in
+its Documents with that game's own image, `Frameworks/fexaot-<folder>.dylib`,
+so one app holds any number of games. The translator keeps a library of them
+(`~/WinPadTranslator/library.json`, the "Game library" tab in the window):
+
+```
+winpad-translator --library --add-game ~/Games/NFSU2 --add-game ~/Games/OtherGame
+winpad-translator --library --build --ipad-maps ~/from-ipad/new \
+    --ipa WinPadWine.ipa --out-ipa WinPad.ipa
+```
+
+The app keeps the code maps of all its games in one folder; each game takes
+its own from it (the maps naming files in its folder on the iPad). Only games
+with new maps are compiled again; the others keep their image. The IPA written
+has every game's image and is called WinPad (`--app-name`). Install it over the
+old app (same bundle identifier, so its Documents and games stay). `--ipa` is
+the IPA from CI, never one the library wrote, so a game taken off the list
+(`--remove-game`) is gone from the next one. A game that was not played yet
+has no maps and no image: it runs in FEX's interpreter until then.
+
+### Without a new install (Mac, experimental)
+
+Executable code on an iPad must be signed. With `--sign-identity auto` (or an
+identity's name; "Sign into game folder" in the window) the translator signs
+each image on the Mac with the Apple Development identity of the keychain and
+puts it into the game folder as `fexaot.dylib`, with `fexaot.build` naming the
+app build it was made for (the IPA's `winpad-build.txt`, which
+tests/wine-app/build-xcode.sh writes). Copy the folder to the iPad and the app
+loads the image from there, no new install. It takes the image only for the
+same build of the app, and falls back to the one in its Frameworks if iOS
+refuses it (a signature from another team than the app's: install the app from
+Xcode with the same Apple ID). Code maps themselves cannot be turned into code
+on the iPad: that would take a JIT.
+
 Tests: `python3 -m unittest discover -s tools/winpad-translator/tests`.

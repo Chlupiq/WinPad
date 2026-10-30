@@ -877,6 +877,13 @@ static CFTimeInterval fps_shown;
   // The library picked a game's own image (Library.m), else fexaot-game.dylib.
   NSString* frameworks = NSBundle.mainBundle.privateFrameworksPath;
   NSString* game_image = self.game ? self.game.image : [frameworks stringByAppendingPathComponent:@"fexaot-game.dylib"];
+  if (self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
+  // An image in the game folder loads only if it is signed by the app's team; else the bundle's.
+  if (self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
+    printf("WinPad Wine: the game folder's image did not load (%s), taking %s\n", dlerror(),
+           self.game.bundleImage ? self.game.bundleImage.lastPathComponent.UTF8String : "none");
+    game_image = self.game.bundleImage;
+  }
   if (game_image && ![NSFileManager.defaultManager fileExistsAtPath:game_image]) game_image = nil;
   if (!cube && (!game || game_image)) {
     // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
@@ -884,7 +891,8 @@ static CFTimeInterval fps_shown;
                           : [frameworks stringByAppendingPathComponent:[name isEqualToString:@"hello"]
                                                                            ? @"fexaot.dylib"
                                                                            : [NSString stringWithFormat:@"fexaot-%@.dylib", name]];
-    image = path.lastPathComponent;
+    image = [path hasPrefix:frameworks] ? path.lastPathComponent
+                                        : [self.game.folder stringByAppendingPathComponent:path.lastPathComponent];
     setenv("WINEHOST_AOT_IMAGE", path.fileSystemRepresentation, 1);
     setenv("FEX_NOJIT", "1", 1);
     setenv("FEX_ENABLECODECACHINGWIP", "1", 1);

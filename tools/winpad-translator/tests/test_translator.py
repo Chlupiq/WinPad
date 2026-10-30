@@ -5,13 +5,15 @@ import os
 import plistlib
 import struct
 import sys
+import subprocess
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, ".."))
-from winpad_translator import codemaps, ipa, link, project  # noqa: E402
+from winpad_translator import codemaps, ipa, library, link, project  # noqa: E402
 from winpad_translator import compile as fexcompile  # noqa: E402
 
 sys.path.insert(0, os.path.join(here, "..", "..", "fxcc-inspect"))
@@ -214,6 +216,56 @@ class IpaTest(unittest.TestCase):
                                                     "CFBundleExecutable": "$(EXECUTABLE_NAME)"})
 
 
+class LibraryTest(unittest.TestCase):
+    def test_own_maps_only(self):
+        with tempfile.TemporaryDirectory() as t:
+            maps = os.path.join(t, "new")
+            write_map(os.path.join(maps, "a.bin"), [(1, IPAD.format("Game A", "a.exe"), [0x1000])])
+            write_map(os.path.join(maps, "b.bin"), [(2, IPAD.format("Game B", "b.exe"), [0x1000])])
+            write_map(os.path.join(maps, "sys.bin"), [(3, "\\??\\C:\\windows\\syswow64\\ntdll.dll", [0x10])])
+            self.assertEqual(codemaps.import_maps(maps, os.path.join(t, "a"), "x", "game a"), 2)
+            self.assertEqual(codemaps.import_maps(maps, os.path.join(t, "all"), "x"), 3)
+
+    def test_add_and_remove(self):
+        with tempfile.TemporaryDirectory() as t:
+            lib = library.Library()
+            for name in ("Game A", "Game B"):
+                pe(os.path.join(t, name, "game.exe"))
+                lib.add(os.path.join(t, name), work_dir=os.path.join(t, "work", name))
+            with self.assertRaises(project.TranslateError):  # the same image name as Game A's
+                os.makedirs(os.path.join(t, "other", "game-a"))
+                lib.add(os.path.join(t, "other", "game-a"), work_dir=os.path.join(t, "work", "x"))
+            path = os.path.join(t, "library.json")
+            lib.save(path)
+            again = library.Library.load(path)
+            self.assertEqual([p.image_name() for p in again.projects()], ["fexaot-game-a.dylib", "fexaot-game-b.dylib"])
+            again.remove("Game A")
+            self.assertEqual([p.folder_name() for p in again.projects()], ["Game B"])
+
+    def test_signed_into_game_folder(self):
+        with tempfile.TemporaryDirectory() as t:
+            game = os.path.join(t, "Game")
+            os.makedirs(game)
+            image = os.path.join(t, "fexaot-game.dylib")
+            write(image, b"image")
+            src = os.path.join(t, "WinPadWine.ipa")
+            with zipfile.ZipFile(src, "w") as z:
+                z.writestr("Payload/WinPadWine.app/winpad-build.txt", b"abc123\n")
+            calls = []
+
+            def run(cmd, **_):
+                calls.append(cmd)
+                out = '  1) 0123ABCD "Apple Development: Someone (TEAM)"\n' if cmd[0] == "security" else ""
+                return subprocess.CompletedProcess(cmd, 0, out, "")
+
+            p = project.Project(game_dir=game, ipa=src, sign_identity="auto")
+            with mock.patch.object(project.sys, "platform", "darwin"):
+                project.into_game_folder(p, image, log=lambda _: None, run=run)
+            self.assertEqual(calls[1][:4], ["codesign", "--force", "--sign", "Apple Development: Someone (TEAM)"])
+            self.assertEqual(read(os.path.join(game, "fexaot.dylib")), b"image")
+            self.assertEqual(read(os.path.join(game, "fexaot.build")), b"abc123\n")
+
+
 @unittest.skipUnless(toolchain(), "needs LLVM (clang or llvm-mc, and lld)")
 class LinkTest(unittest.TestCase):
     def test_dylib_for_both_sdks(self):
@@ -303,6 +355,46 @@ class RunTest(unittest.TestCase):
             self.assertEqual(again.host_features, "AFP=1,FLAGM=1,FLAGM2=1")
             with open(os.path.join(t, "work", "fexcache", "hostprobe-seen.txt")) as f:
                 self.assertEqual(f.read(), "AFP=1,FLAGM=1,FLAGM2=1")
+
+    def test_library_to_one_ipa(self):
+        with tempfile.TemporaryDirectory() as t:
+            maps = os.path.join(t, "from-ipad", "new")
+            lib = library.Library(ipa=os.path.join(t, "WinPadWine.ipa"), output_ipa=os.path.join(t, "out.ipa"))
+            for i, name in enumerate(("Game A", "Game B", "Game C")):
+                exe = pe(os.path.join(t, name, "game.exe"), stamp=0x1000 + i)
+                # Game C was not played yet: no maps, no image.
+                if name != "Game C":
+                    write_map(os.path.join(maps, f"{i}.bin"), [(file_id(exe), IPAD.format(name, "game.exe"), [0x1000])],
+                              main=file_id(exe))
+                lib.add(os.path.join(t, name), work_dir=os.path.join(t, "work", name))
+            with zipfile.ZipFile(lib.ipa, "w") as z:
+                z.writestr("Payload/WinPadWine.app/i386-windows/ntdll.dll", b"MZ")
+                z.writestr("Payload/WinPadWine.app/Info.plist", plistlib.dumps({"CFBundleDisplayName": "WinPad Wine"}))
+            compiler = os.path.join(t, "fake-compiler")
+            with open(compiler, "w") as f:
+                f.write(FAKE_COMPILER.format(tests=here))
+            os.chmod(compiler, 0o755)
+            dispatcher = os.path.join(t, "dispatcher.bin")
+            write(dispatcher, b"\x1f\x20\x03\xd5" * 8)
+            lib.settings = {"compiler": compiler, "dispatcher": dispatcher, "backend": "native"}
+            lines = []
+            images = library.build(lib, [maps], log=lines.append)
+            self.assertEqual([os.path.basename(i) for i in images], ["fexaot-game-a.dylib", "fexaot-game-b.dylib"])
+            with zipfile.ZipFile(lib.output_ipa) as z:
+                frameworks = sorted(n for n in z.namelist() if "/Frameworks/" in n)
+                info = plistlib.loads(z.read("Payload/WinPadWine.app/Info.plist"))
+            self.assertEqual(frameworks, ["Payload/WinPadWine.app/Frameworks/fexaot-game-a.dylib",
+                                          "Payload/WinPadWine.app/Frameworks/fexaot-game-b.dylib"])
+            self.assertEqual(info["CFBundleDisplayName"], "WinPad")
+            # Each game compiled only its own maps.
+            for name in ("Game A", "Game B"):
+                ready = os.path.join(t, "work", name, "fexcache", "codemap", "ready")
+                self.assertEqual(len(codemaps.map_files(ready)), 1, name)
+            # Nothing new: the images stay, no compile.
+            lines.clear()
+            library.build(lib, [], log=lines.append)
+            self.assertTrue(any("its image fexaot-game-a.dylib stays" in line for line in lines), lines)
+            self.assertFalse(any("=== compiling" in line for line in lines))
 
 
 if __name__ == "__main__":

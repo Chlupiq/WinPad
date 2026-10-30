@@ -3,7 +3,7 @@ import argparse
 import os
 import sys
 
-from . import __version__, compile as fexcompile, project
+from . import __version__, compile as fexcompile, library, project
 
 
 def parser():
@@ -45,7 +45,47 @@ def parser():
     ap.add_argument("--out-ipa", dest="output_ipa", help="write a copy of --ipa with the image in it")
     ap.add_argument("--app-name", help="the name under the app's icon on the iPad, e.g. the game's (default: WinPad Wine)")
     ap.add_argument("--xcode-project", help="put the image into this WinPadWine-xcode project's Frameworks")
+    ap.add_argument("--sign-identity", help="Mac: also sign the image with this identity (auto: your Apple Development "
+                    "one) into the game folder as fexaot.dylib, which the app loads without a new install")
+    lib = ap.add_argument_group("a library of games: several games in one app")
+    lib.add_argument("--library", nargs="?", const=library.default_path(), metavar="FILE",
+                     help=f"work on the library in FILE (default {library.default_path()}); --ipa, --out-ipa, "
+                     "--xcode-project, --app-name and the compiler settings are kept in it")
+    lib.add_argument("--add-game", action="append", default=[], metavar="FOLDER",
+                     help="add a game folder (--exe, --ipad-folder apply to it)")
+    lib.add_argument("--remove-game", action="append", default=[], metavar="NAME", help="take a game off the list")
+    lib.add_argument("--list-games", action="store_true", help="list the games")
+    lib.add_argument("--build", action="store_true",
+                     help="translate the games with new code maps in --ipad-maps and write the app with all of them")
     return ap
+
+
+PATH_KEYS = ("winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project")
+
+
+def library_main(args):
+    path = os.path.abspath(args.library)
+    lib = library.Library.load(path)
+    for key in ("ipa", "output_ipa", "xcode_project", "app_name"):
+        if getattr(args, key) is not None:
+            setattr(lib, key, getattr(args, key))
+    for key in library.SHARED:
+        value = getattr(args, key, None)
+        if value is not None:
+            lib.settings[key] = value
+    for folder in args.add_game:
+        p = lib.add(folder, exe=args.exe or "", ipad_folder=args.ipad_folder or "")
+        print(f"added {p.folder_name()} (image {p.image_name()}, work folder {p.work_dir})")
+    for name in args.remove_game:
+        print(f"removed {lib.remove(name).folder_name()}")
+    lib.save(path)
+    if args.list_games or not (args.add_game or args.remove_game or args.build):
+        for p in lib.projects():
+            state = "image ready" if os.path.isfile(library.image_of(p)) else "no image yet"
+            print(f"{p.folder_name()}: {p.game_dir} ({p.image_name()}, {state})")
+    if args.build:
+        library.build(lib, args.ipad_maps, rebuild=bool(args.rebuild))
+        lib.save(path)
 
 
 def main(argv=None):
@@ -54,14 +94,24 @@ def main(argv=None):
         from . import gui
         return gui.main()
     args = parser().parse_args(argv)
-    p = project.Project.load(args.settings) if args.settings else project.Project()
     for key, value in vars(args).items():
-        if key == "settings" or value in (None, []):
+        if key in ("remove_game", "library") or value in (None, []):
             continue
         if isinstance(value, list):
-            value = [os.path.abspath(v) for v in value]
-        elif key.endswith("_dir") or key in ("winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project"):
-            value = os.path.abspath(value)
+            setattr(args, key, [os.path.abspath(v) for v in value])
+        elif key.endswith("_dir") or key in PATH_KEYS:
+            setattr(args, key, os.path.abspath(value))
+    if args.library:
+        try:
+            library_main(args)
+        except Exception as e:  # noqa: BLE001 - one line for the user, not a traceback
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        return 0
+    p = project.Project.load(args.settings) if args.settings else project.Project()
+    for key, value in vars(args).items():
+        if key in ("settings", "library", "add_game", "remove_game", "list_games", "build") or value in (None, []):
+            continue
         setattr(p, key, value)
     try:
         project.run(p)

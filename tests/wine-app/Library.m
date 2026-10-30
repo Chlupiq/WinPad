@@ -6,7 +6,14 @@
 // and its largest .exe that is no installer or helper is the program. Its
 // cover is cover.png or cover.jpg in the folder. A game's AOT image is
 // Frameworks/fexaot-FOLDER.dylib (WinPadGameImage), else fexaot-game.dylib,
-// the one tests/wine-app/game-aot.sh makes.
+// the one tests/wine-app/game-aot.sh makes. So one app holds the images of
+// any number of games (WinPad Translator's library writes them into one IPA).
+// An image in the game folder itself, fexaot.dylib, comes first: WinPad
+// Translator signs it on the Mac with the developer identity the app is
+// signed with (--sign-identity), so a game is added without installing the
+// app again. It is used only when its fexaot.build names this build of the
+// app (winpad-build.txt in the bundle), and main.m falls back to the bundle's
+// image if iOS refuses to load it.
 //
 // The focused game shows large above the row of all of them. A game
 // controller (the d-pad or left stick picks, A starts, Y opens the
@@ -57,6 +64,30 @@ static NSString* WinPadGameImage(NSString* folder) {
     if ([NSFileManager.defaultManager fileExistsAtPath:path]) return path;
   }
   return nil;
+}
+
+// The build of this app (build-xcode.sh's winpad-build.txt), or nil.
+static NSString* AppBuild(void) {
+  NSString* path = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"winpad-build.txt"];
+  NSString* build = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+  build = [build stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  return build.length ? build : nil;
+}
+
+// The game folder's own image, if it is for this build of the app; else nil, with why in *note.
+static NSString* FolderImage(NSString* dir, NSString** note) {
+  NSString* image = [dir stringByAppendingPathComponent:@"fexaot.dylib"];
+  if (![NSFileManager.defaultManager fileExistsAtPath:image]) return nil;
+  NSString* app = AppBuild();
+  NSString* made = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"fexaot.build"]
+                                             encoding:NSUTF8StringEncoding
+                                                error:nil];
+  made = [made stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (app && ![made isEqualToString:app]) {
+    *note = [NSString stringWithFormat:@"fexaot.dylib is for app build %@, this is %@", made.length ? made : @"?", app];
+    return nil;
+  }
+  return image;
 }
 
 // An installer, an uninstaller, a settings tool and the like, by its name.
@@ -121,7 +152,12 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     NSString* title = [info[@"title"] isKindOfClass:NSString.class] ? info[@"title"] : nil;
     game.title = title.length ? title : folder;
     game.arch = ProgramArch([docs stringByAppendingPathComponent:game.exe]);
-    game.image = WinPadGameImage(folder);
+    game.bundleImage = WinPadGameImage(folder);
+    NSString* note = nil;
+    NSString* own = FolderImage(dir, &note);
+    game.image = own ?: game.bundleImage;
+    game.imageInFolder = own != nil;
+    game.folderImageNote = note;
     for (NSString* f in files) {
       if ([@[ @"cover.png", @"cover.jpg", @"cover.jpeg" ] containsObject:f.lowercaseString]) {
         game.cover = [UIImage imageWithContentsOfFile:[dir stringByAppendingPathComponent:f]];
@@ -590,8 +626,8 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   tested = YES;
   NSMutableString* report = [NSMutableString stringWithFormat:@"library: %lu games\n", (unsigned long)self.games.count];
   for (WinPadGame* game in self.games)
-    [report appendFormat:@"library: %@ | %@ | %@ | image %@\n", game.title, game.exe, game.arch ?: @"?",
-                         game.image.lastPathComponent ?: @"none"];
+    [report appendFormat:@"library: %@ | %@ | %@ | image %@%@\n", game.title, game.exe, game.arch ?: @"?",
+                         game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @""];
   [report writeToFile:[Documents() stringByAppendingPathComponent:@"library.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
     [self moveFocusBy:1];
@@ -655,8 +691,11 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   self.heroTitle.text = game.title;
   for (UIView* tag in self.tags.arrangedSubviews) [tag removeFromSuperview];
   [self.tags addArrangedSubview:Tag(game.arch ? [@"Windows · " stringByAppendingString:game.arch] : @"Windows", 0xB4BDCA, 0x171B22)];
-  [self.tags addArrangedSubview:game.image ? Tag(@"Přeloženo pro iPad", 0x7DDC9A, 0x16301F)
-                                           : Tag(@"Nepřeloženo: jen s JITem z Xcode", 0xF2C46D, 0x332A14)];
+  [self.tags addArrangedSubview:game.imageInFolder ? Tag(@"Přeloženo (obraz ve složce hry)", 0x7DDC9A, 0x16301F)
+                                 : game.image      ? Tag(@"Přeloženo pro iPad", 0x7DDC9A, 0x16301F)
+                                                   : Tag(@"Nepřeloženo: jen s JITem z Xcode", 0xF2C46D, 0x332A14)];
+  if (game.folderImageNote)
+    [self.tags addArrangedSubview:Tag(@"Obraz ve složce je pro jiné sestavení aplikace", 0xF2C46D, 0x332A14)];
   if (self.focus < (NSInteger)self.cards.count) {
     const CGRect card = self.cards[self.focus].frame;
     [self.row scrollRectToVisible:CGRectInset(card, -24, 0) animated:YES];

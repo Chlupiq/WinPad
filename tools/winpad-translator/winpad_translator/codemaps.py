@@ -56,12 +56,24 @@ def map_files(folder):
     return found
 
 
-def import_maps(source, cache_dir, tag):
+def map_folders(path):
+    """The iPad Documents folders (games) the images of the map at PATH are in."""
+    with open(path, "rb") as f:
+        names = parse(f.read())[0]
+    return ipad_folders(names.values())
+
+
+def import_maps(source, cache_dir, tag, folder=None):
     """Copies the code maps under SOURCE (an iPad's codemap/new, copied off it) and the
-    runtime code ranges next to them into CACHE_DIR/codemap/new. Returns how many maps."""
+    runtime code ranges next to them into CACHE_DIR/codemap/new. With FOLDER, the maps of
+    other games are left out: one that names an image in another of the iPad's game
+    folders and none in FOLDER (the app keeps the maps of all its games in one place).
+    Returns how many maps."""
     new = os.path.join(cache_dir, "codemap", "new")
     os.makedirs(new, exist_ok=True)
     maps = map_files(source)
+    if folder:
+        maps = [m for m in maps if not map_folders(m) or folder.lower() in (f.lower() for f in map_folders(m))]
     for i, path in enumerate(maps):
         # The compiler only takes *.bin from codemap/new.
         name = os.path.basename(path)
