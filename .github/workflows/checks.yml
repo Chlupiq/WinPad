@@ -1055,14 +1055,17 @@ jobs:
         run: |
           set +e
           w=$RUNNER_TEMP/work
-          timeout 600 docker run --rm --platform linux/arm64 -v "$RUNNER_TEMP/check:/c" -v "$w/fexcache:/f" -v "$w/i386-windows:/i" \
-            -e FEX_MADEIRA_HOSTPROBE="$(cat "$RUNNER_TEMP/check/fexcache/codemap/new/hostprobe.txt")" -e 'FEX_APP_CACHE_LOCATION=Z:\f\' \
-            -e WINEDEBUG=+seh,+loaddll,+virtual,err+all -e WINEDLLOVERRIDES=mscoree,mshtml= winpad-translator-wine:4 \
-            wine /c/FEXOfflineCompiler.exe process-all --max-caches 8 > "$RUNNER_TEMP/seh.log" 2>&1
+          # The translator's own mounts (/host + the path), which its code maps' paths name.
+          m=""; for d in "$RUNNER_TEMP/check" "$RUNNER_TEMP/game" "$w/fexcache" "$w/i386-windows"; do m="$m -v $d:/host$d"; done
+          timeout 600 docker run --rm --platform linux/arm64 $m \
+            -e FEX_MADEIRA_HOSTPROBE="$(cat "$RUNNER_TEMP/check/fexcache/codemap/new/hostprobe.txt")" \
+            -e "FEX_APP_CACHE_LOCATION=Z:$(echo "/host$w/fexcache/" | tr / '\\')" \
+            -e WINEDEBUG=+seh,+loaddll,err+all -e WINEDLLOVERRIDES=mscoree,mshtml= winpad-translator-wine:4 \
+            wine "/host$RUNNER_TEMP/check/FEXOfflineCompiler.exe" process-all --max-caches 8 > "$RUNNER_TEMP/seh.log" 2>&1
           echo "exit $?"; wc -l "$RUNNER_TEMP/seh.log"
           log=$RUNNER_TEMP/seh-short.log; grep -v "libunwind_virtual_unwind no info" "$RUNNER_TEMP/seh.log" > "$log"
-          echo "--- exceptions"; grep -n -A6 "dispatch_exception code=" "$log" | head -n 80
-          first=$(grep -n -m1 "dispatch_exception code=" "$log" | cut -d: -f1)
+          echo "--- exceptions"; grep -n -A6 "dispatch_exception code=" "$log" | grep -v -A6 "code=6ba" | head -n 80
+          first=$(grep -n "dispatch_exception code=" "$log" | grep -v "code=6ba" | head -n1 | cut -d: -f1)
           [ -n "$first" ] && { echo "--- before the first one"; sed -n "$((first > 60 ? first - 60 : 1)),$((first + 40))p" "$log"; }
           echo "--- end"; tail -n 40 "$log"
       - name: The caches are the simulator's, byte for byte
