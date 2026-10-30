@@ -30,12 +30,16 @@ PROGRESS = re.compile(r"\[process-all\] (\d+) caches generated \((\d+) failed\),
 DOCKER_IMAGE = "winpad-translator-wine:4"
 
 
+def docker_emulated(machine=None):
+    """Docker runs the arm64 container under QEMU on an x86 computer."""
+    return (machine or platform.machine()).lower() in ("x86_64", "amd64", "i386", "i686", "x86")
+
+
 def docker_wine_base(machine=None):
     """The container's distribution: Debian's Wine 10 on an arm64 computer, where Ubuntu's Wine 9
     hangs on CPUs with pointer authentication; Ubuntu's Wine 9 where Docker emulates arm64 with
     QEMU, under which Wine 10's wineboot never returns."""
-    machine = (machine or platform.machine()).lower()
-    return "ubuntu:24.04" if machine in ("x86_64", "amd64", "i386", "i686", "x86") else "debian:trixie"
+    return "ubuntu:24.04" if docker_emulated(machine) else "debian:trixie"
 
 
 class CompileError(Exception):
@@ -121,6 +125,7 @@ class Backend:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+            self.stop()
             raise CompileError(f"the offline compiler took longer than {self.timeout} s and was stopped")
         finally:
             reader.join(timeout=10)
@@ -130,6 +135,9 @@ class Backend:
         if not progress:
             raise CompileError(f"the offline compiler ended (exit {proc.returncode}) without its [process-all] line")
         return progress[-1]
+
+    def stop(self):
+        """What is left running when the compiler's process was killed."""
 
     def compile(self):
         prev = None
@@ -183,6 +191,8 @@ class Docker(Backend):
         super().__init__(*a, **kw)
         self.docker = docker
         self.mounts = [os.path.abspath(m) for m in mounts]
+        # Killing `docker run` leaves its container running, so it has a name to stop it by.
+        self.container = f"winpad-translator-{os.getpid()}"
 
     def container_path(self, local):
         p = os.path.abspath(local)
@@ -206,17 +216,24 @@ class Docker(Backend):
             raise CompileError("building the container image took more than an hour") from None
 
     def command(self, args):
-        cmd = [self.docker, "run", "--rm", "--platform", "linux/arm64"]
+        cmd = [self.docker, "run", "--rm", "--platform", "linux/arm64", "--name", self.container]
         for m in sorted(set(self.mounts + [self.cache_dir, os.path.dirname(os.path.abspath(self.compiler))])):
             cmd += ["-v", f"{m}:{self.container_path(m)}"]
         cache = "Z:" + self.container_path(self.cache_dir).replace("/", "\\") + "\\"
         # The image's own Wine prefix, made when it was built (data/docker/Dockerfile).
         if self.host_features:
             cmd += ["-e", f"FEX_MADEIRA_HOSTPROBE={self.host_features}"]
+        if docker_emulated():
+            # QEMU's default CPU has pointer authentication, which Ubuntu's Wine 9 cannot unwind
+            # through; the compiler only writes code, so a plain ARMv8.2 core with LSE will do.
+            cmd += ["-e", "QEMU_CPU=neoverse-n1"]
         cmd += ["-e", f"FEX_APP_CACHE_LOCATION={cache}", "-e", "WINEDEBUG=-all", "-e", "WINEDLLOVERRIDES=mscoree,mshtml=",
                 DOCKER_IMAGE,
                 "wine", self.container_path(self.compiler)]
         return cmd + args
+
+    def stop(self):
+        subprocess.run([self.docker, "kill", self.container], capture_output=True)
 
     def compile(self):
         self.ensure_image()
