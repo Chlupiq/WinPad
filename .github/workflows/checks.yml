@@ -1022,11 +1022,10 @@ jobs:
         shell: bash
         run: |
           start=$(date +%s)
-          base=$(cd tools/winpad-translator && python -c "from winpad_translator.compile import docker_wine_base; print(docker_wine_base())")
           cpu=$(cd tools/winpad-translator && python -c "from winpad_translator.compile import docker_emulated, EMULATED_CPU; print(EMULATED_CPU if docker_emulated() else '')")
-          echo "container: $base, emulated CPU: ${cpu:-none}"
+          echo "emulated CPU: ${cpu:-none}"
           timeout 1800 docker build --progress plain --platform linux/arm64 -t winpad-translator-wine:4 \
-            --build-arg WINE_BASE=$base --build-arg EMULATED_CPU=$cpu tools/winpad-translator/data/docker 2>&1 | tail -n 60
+            --build-arg EMULATED_CPU=$cpu tools/winpad-translator/data/docker 2>&1 | tail -n 60
           echo "::notice::container build: $(( $(date +%s) - start )) s"
       - name: WinPad Translator compiles that code map with FEX's offline compiler, without a Mac
         shell: bash
@@ -1071,24 +1070,6 @@ jobs:
           first=$(grep -n "dispatch_exception code=" "$log" | grep -v "code=6ba" | head -n1 | cut -d: -f1)
           [ -n "$first" ] && { echo "--- before the first one"; sed -n "$((first > 60 ? first - 60 : 1)),$((first + 40))p" "$log"; }
           echo "--- end"; tail -n 40 "$log"
-      - name: "Experiment: Debian's Wine 10 in the emulated container, with the same CPU"
-        if: failure() && matrix.backend == 'docker' && matrix.os == 'ubuntu-24.04'
-        timeout-minutes: 25
-        shell: bash
-        run: |
-          set +e
-          timeout 900 docker build --progress plain --platform linux/arm64 -t probe-debian --build-arg WINE_BASE=debian:trixie \
-            --build-arg EMULATED_CPU=neoverse-n1 tools/winpad-translator/data/docker 2>&1 | tail -n 8
-          echo "build exit ${PIPESTATUS[0]}"
-          w=$RUNNER_TEMP/work
-          m=""; for d in "$RUNNER_TEMP/check" "$RUNNER_TEMP/game" "$w/fexcache" "$w/i386-windows"; do m="$m -v $d:/host$d"; done
-          timeout 300 docker run --rm --name probe2 --platform linux/arm64 $m -e QEMU_CPU=neoverse-n1 \
-            -e FEX_MADEIRA_HOSTPROBE="$(cat "$RUNNER_TEMP/check/fexcache/codemap/new/hostprobe.txt")" \
-            -e "FEX_APP_CACHE_LOCATION=Z:$(echo "/host$w/fexcache/" | tr / '\\')" \
-            -e WINEDEBUG=-all -e WINEDLLOVERRIDES=mscoree,mshtml= probe-debian \
-            wine "/host$RUNNER_TEMP/check/FEXOfflineCompiler.exe" process-all --max-caches 8 2>&1 | tail -n 25
-          echo "run exit ${PIPESTATUS[0]}"; docker kill probe2 >/dev/null 2>&1
-          python tools/winpad-translator/tests/compare_caches.py "$RUNNER_TEMP/check/fexcache" "$w/fexcache" 2>&1 | tail -n 15
       - name: The caches are the simulator's, byte for byte
         shell: bash
         run: python tools/winpad-translator/tests/compare_caches.py "$RUNNER_TEMP/check/fexcache" "$RUNNER_TEMP/work/fexcache"

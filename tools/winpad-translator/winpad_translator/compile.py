@@ -38,13 +38,6 @@ def docker_emulated(machine=None):
     return (machine or platform.machine()).lower() in ("x86_64", "amd64", "i386", "i686", "x86")
 
 
-def docker_wine_base(machine=None):
-    """The container's distribution: Debian's Wine 10 on an arm64 computer, where Ubuntu's Wine 9
-    hangs on CPUs with pointer authentication; Ubuntu's Wine 9 where Docker emulates arm64 with
-    QEMU, under which Wine 10's wineboot never returns."""
-    return "ubuntu:24.04" if docker_emulated(machine) else "debian:trixie"
-
-
 class CompileError(Exception):
     pass
 
@@ -213,7 +206,6 @@ class Docker(Backend):
         self.log(f"=== building the container image {DOCKER_IMAGE} (once; it needs the network)")
         try:
             subprocess.run([self.docker, "build", "--platform", "linux/arm64", "-t", DOCKER_IMAGE,
-                            "--build-arg", "WINE_BASE=" + docker_wine_base(),
                             "--build-arg", "EMULATED_CPU=" + (EMULATED_CPU if docker_emulated() else ""),
                             os.path.join(paths.DATA, "docker")], check=True, timeout=3600)
         except subprocess.TimeoutExpired:
@@ -228,8 +220,8 @@ class Docker(Backend):
         if self.host_features:
             cmd += ["-e", f"FEX_MADEIRA_HOSTPROBE={self.host_features}"]
         if docker_emulated():
-            # QEMU's default CPU has pointer authentication, which Ubuntu's Wine 9 cannot unwind
-            # through; the compiler only writes code, so a plain ARMv8.2 core with LSE will do.
+            # Under QEMU's default CPU Wine 10 never finishes wineboot; the compiler only writes
+            # code, so a plain ARMv8.2 core with LSE will do (as when the image is built).
             cmd += ["-e", "QEMU_CPU=" + EMULATED_CPU]
         cmd += ["-e", f"FEX_APP_CACHE_LOCATION={cache}", "-e", "WINEDEBUG=-all", "-e", "WINEDLLOVERRIDES=mscoree,mshtml=",
                 DOCKER_IMAGE,
