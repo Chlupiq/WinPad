@@ -86,7 +86,7 @@ cp -R "$here/Settings.bundle" "$proj/"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
     libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
-    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController"
+    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI"
     if [ -n "$d3d9" ]; then
         libs="$libs metal-display.o libdxmt_combined.a"
         frameworks="$frameworks Metal QuartzCore IOSurface"
@@ -252,6 +252,9 @@ for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
     sleep 1
 done
+# What the library looks like (CI artifact wine-app-window).
+mkdir -p "$out/library-screens"
+xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>&1 || true
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true

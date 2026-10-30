@@ -865,6 +865,7 @@ jobs:
           name: wine-app-window
           path: |
             ${{ runner.temp }}/wine-app/window-frames
+            ${{ runner.temp }}/wine-app/library-screens
             ${{ runner.temp }}/wine-app/wine-*.log
           if-no-files-found: ignore
       - name: Upload the Xcode project of the Wine app
