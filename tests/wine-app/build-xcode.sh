@@ -72,6 +72,10 @@ mkdir -p "$proj/wine/nls" "$proj/wine/fonts"
 cp "$work"/madeira/wine/nls/*.nls "$proj/wine/nls/"
 # The registry each launch's prefix starts from (main.m's MakePrefix).
 cp "$root/tests/wine-loader/prefix/system.reg" "$proj/wine/"
+# This build of the app, which WinPad Translator writes next to an image it signs into a
+# game folder (Library.m uses it only with the same build): FEX and Wine's i386 ntdll.
+cat "$work/modules-iphoneos/aarch64-windows/xtajit.dll.dylib" "$work/i386-windows/ntdll.dll" |
+    shasum -a 256 | cut -c1-16 >"$proj/wine/winpad-build.txt"
 find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*.ttc' -o -name '*.fon' \) \
     -exec cp {} "$proj/wine/fonts/" \;
 echo "Wine files in the project:"
@@ -82,7 +86,7 @@ cp -R "$here/Settings.bundle" "$proj/"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
     libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
-    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController"
+    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI"
     if [ -n "$d3d9" ]; then
         libs="$libs metal-display.o libdxmt_combined.a"
         frameworks="$frameworks Metal QuartzCore IOSurface"
@@ -238,15 +242,23 @@ cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/
 printf '{"title": "WinPad Test"}\n' >"$docs/Test Game/winpad.json"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
 echo notes >"$docs/Empty/readme.txt"
+# An image WinPad Translator signed into a game folder: used for this build of the app only.
+cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Plain/fexaot.dylib"
+cp "$sim_app/winpad-build.txt" "$docs/Plain/fexaot.build"
+cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Test Game/fexaot.dylib"
+echo 0123456789abcdef >"$docs/Test Game/fexaot.build"
 xcrun simctl launch "$udid" "$bundle" -libraryTest YES
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
     sleep 1
 done
+# What the library looks like (CI artifact wine-app-window).
+mkdir -p "$out/library-screens"
+xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>&1 || true
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
-for expect in 'library: 2 games' 'library: Plain | Plain/GAME.EXE | 32bit | image none' \
+for expect in 'library: 2 games' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
     'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none' 'start: game Test Game/TEST.EXE, image none'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done

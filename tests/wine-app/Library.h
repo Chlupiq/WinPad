@@ -8,7 +8,14 @@
 @property(nonatomic, copy) NSString* folder;  // the folder's name in Documents
 @property(nonatomic, copy) NSString* exe;     // its program, relative to Documents
 @property(nonatomic, copy) NSString* arch;    // "32bit", "64bit" or nil, from the program's PE header
-@property(nonatomic, copy) NSString* image;   // the path of its AOT image in the bundle, or nil
+@property(nonatomic, copy) NSString* image;   // the path of its AOT image, or nil
+// The image in the bundle (Frameworks/fexaot-FOLDER.dylib, else fexaot-game.dylib), or nil.
+@property(nonatomic, copy) NSString* bundleImage;
+// image is the game folder's fexaot.dylib (signed on the Mac by WinPad Translator): main.m
+// checks that it loads, else takes bundleImage.
+@property(nonatomic) BOOL imageInFolder;
+// Why the folder's fexaot.dylib is not used (made for another build of the app), or nil.
+@property(nonatomic, copy) NSString* folderImageNote;
 @property(nonatomic, strong) UIImage* cover;  // cover.png or cover.jpg in its folder, or nil
 @end
 

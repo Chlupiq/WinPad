@@ -25,6 +25,21 @@ def app_prefix(names):
     raise IpaError("no Payload/*.app in the IPA")
 
 
+# The app's build (tests/wine-app/build-xcode.sh): an image in a game folder is used only
+# by the build it was made for.
+BUILD_FILE = "winpad-build.txt"
+
+
+def build_id(ipa):
+    """The IPA's winpad-build.txt, or None (an IPA from before it)."""
+    with zipfile.ZipFile(ipa) as z:
+        name = app_prefix(z.namelist()) + BUILD_FILE
+        try:
+            return z.read(name).decode("utf-8", "replace").strip() or None
+        except KeyError:
+            return None
+
+
 def extract_system_dlls(ipa, folder):
     """Writes the app's i386-windows/*.dll to FOLDER. Returns how many."""
     with zipfile.ZipFile(ipa) as z:

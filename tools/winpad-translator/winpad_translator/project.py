@@ -2,7 +2,9 @@
 import dataclasses
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 
 from . import codemaps, compile as fexcompile, ipa as ipamod, link, paths
@@ -53,6 +55,13 @@ class Project:
     xcode_project: str = ""
     # The name under the app's icon on the iPad (in the IPA or Xcode project written); empty: WinPad Wine.
     app_name: str = ""
+    # Take only this game's maps from ipad_maps: the app keeps the maps of all its games in
+    # one folder (a library of games, library.py).
+    own_maps_only: bool = False
+    # Mac only: sign the image with this identity ("auto": the first Apple Development one)
+    # and put it into the game folder as fexaot.dylib, which the app loads from there, so
+    # the app need not be installed again for it.
+    sign_identity: str = ""
 
     def folder_name(self):
         return os.path.basename(os.path.normpath(self.game_dir))
@@ -157,7 +166,9 @@ def run(p, log=print):
 
     for i, folder in enumerate(p.ipad_maps):
         tag = f"ipad{i}-{os.path.basename(os.path.normpath(folder))}"
-        log(f"=== {codemaps.import_maps(folder, cache_dir, tag)} code maps from {folder}")
+        own = (p.ipad_folder or p.folder_name()) if p.own_maps_only else None
+        log(f"=== {codemaps.import_maps(folder, cache_dir, tag, own)} code maps from {folder}"
+            + (f" (those of {own})" if own else ""))
         probe = codemaps.host_probe(folder)
         if probe and probe != p.host_features:
             if p.host_features and link.caches_in(cache_dir):
@@ -262,6 +273,8 @@ def run(p, log=print):
         os.makedirs(p.output_dir, exist_ok=True)
         shutil.copyfile(device, os.path.join(p.output_dir, p.image_name()))
         log(f"  -> {os.path.join(p.output_dir, p.image_name())}")
+    if p.sign_identity:
+        into_game_folder(p, device, log)
     if p.output_ipa:
         if not p.ipa:
             raise TranslateError("an IPA with the image needs the IPA it is made from")
@@ -273,6 +286,64 @@ def run(p, log=print):
     log(f"Done. Copy the game folder {p.folder_name()} into WinPad Wine's Documents on the iPad (Finder or Files) "
         "and install the app with the image.")
     return [m[1] for m in made]
+
+
+# The image in a game folder, which the app loads in place of the one in its Frameworks
+# (tests/wine-app/Library.m), and the app build it was made for.
+GAME_FOLDER_IMAGE = "fexaot.dylib"
+GAME_FOLDER_BUILD = "fexaot.build"
+
+
+def signing_identity(name, run=subprocess.run):
+    """NAME, or with "auto" the first Apple Development identity of the keychain."""
+    if name != "auto":
+        return name
+    out = run(["security", "find-identity", "-v", "-p", "codesigning"], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        m = re.search(r'"(Apple Development: [^"]+)"', line)
+        if m:
+            return m.group(1)
+    raise TranslateError("no Apple Development identity in the keychain: sign in to Xcode with your Apple ID "
+                         "(Settings > Accounts) or give the identity's name")
+
+
+def into_game_folder(p, image, log=print, run=subprocess.run):
+    """Signs IMAGE with p.sign_identity into the game folder as fexaot.dylib, with the app
+    build it was made for (the IPA's or Xcode project's winpad-build.txt) next to it. The
+    iPad loads it only when its signature is from the team the app is signed for."""
+    if sys.platform != "darwin":
+        raise TranslateError("signing an image for the game folder needs a Mac (codesign)")
+    identity = signing_identity(p.sign_identity, run)
+    dest = os.path.join(p.game_dir, GAME_FOLDER_IMAGE)
+    tmp = dest + ".tmp"
+    shutil.copyfile(image, tmp)
+    r = run(["codesign", "--force", "--sign", identity, "--timestamp=none", tmp], capture_output=True, text=True)
+    if r.returncode:
+        os.remove(tmp)
+        raise TranslateError(f"codesign failed: {(r.stderr or r.stdout).strip()}")
+    os.replace(tmp, dest)
+    build = app_build(p)
+    stamp = os.path.join(p.game_dir, GAME_FOLDER_BUILD)
+    if build:
+        with open(stamp, "w", newline="\n") as f:
+            f.write(build + "\n")
+    elif os.path.exists(stamp):
+        os.remove(stamp)
+    log(f"=== {dest}: signed by {identity}" + (f", for app build {build}" if build else ""))
+    log("  copy it with the game folder to the iPad: the app loads it from there, no new install needed")
+
+
+def app_build(p):
+    """The build of the app the image is made for (winpad-build.txt), or None."""
+    if p.ipa:
+        return ipamod.build_id(p.ipa)
+    if p.xcode_project:
+        try:
+            with open(os.path.join(p.xcode_project, "wine", ipamod.BUILD_FILE)) as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
+    return None
 
 
 def _seed_map(new, exe, backend, maps):
