@@ -836,6 +836,10 @@ static CFTimeInterval fps_shown;
                           withIntermediateDirectories:YES
                                            attributes:nil
                                                 error:nil];
+  // This iPad's CPU features next to the code maps it records: WinPad Translator compiles the
+  // game's image for them.
+  setenv("WINEHOST_HOSTPROBE_FILE",
+         [cache stringByAppendingPathComponent:@"codemap/new/hostprobe.txt"].fileSystemRepresentation, 1);
   // Wine, FEX and the program write with stdio and to fds 1 and 2: both go
   // to the log file. The log also goes to the original stderr at the end:
   // Xcode's console.
