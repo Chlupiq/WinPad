@@ -121,6 +121,19 @@ na klávesy (`WinPadPadKeys` v `Library.m`): levá páčka a křížový ovlada�
 pravá páčka nemá výchozí klávesu. Každé tlačítko přeřadíš v nastavení knihovny (Y) →
 Mapování tlačítek.
 
+Název aplikace na ploše změníš v Xcode: target `WinPadWine` → General →
+Identity → Display Name (např. „NFS Underground 2“), což je `CFBundleDisplayName`
+v `Info.plist`. Po Run (⌘R) se změní na ploše i v Soubory. Bundle Identifier
+neměň: s jiným by iPad aplikaci nainstaloval jako novou, bez herních souborů,
+uložených pozic a nastavení.
+
+Aplikace se iOS hlásí jako hra (`LSApplicationCategoryType`
+`public.app-category.games` a `GCSupportsGameMode` v `Info.plist`), takže když
+hra běží na celé obrazovce, iPadOS sám zapne Herní režim: hra dostane přednost
+na procesoru i grafice, procesy na pozadí se omezí a ovladače i AirPods mají
+kratší odezvu. Že běží, poznáš podle oznámení „Herní režim“ nahoře a v Ovládacím
+centru, kde ho jde i vypnout.
+
 Ukazatel FPS (nastavení knihovny → Diagnostika → Ukazatel FPS, nebo Nastavení →
 WinPad Wine → FPS overlay) ukáže v levém horním rohu hry snímky za poslední
 sekundu, nejdelší snímek v ní (zásek) a rozlišení snímku, který hra kreslí přes
