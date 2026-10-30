@@ -478,6 +478,31 @@ jobs:
           sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
             "$RUNNER_TEMP/wine-loader/i386-windows/hook.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
             "$RUNNER_TEMP/fexcache-hook"
+      - name: The x86 program that copies code into memory of its own and runs it there, as a game's sound system does, runs from the AOT image with NoJIT, that code included
+        env:
+          WINEHOST_EXPECT_OUTPUT: "rtcode: done"
+          # The code is in no image. FEX gives its range an id from its bytes and address
+          # (patches/fex-wow64/0036): the code map records its blocks under that id, its bytes
+          # are saved with the code map, the offline compiler compiles them and the image
+          # holds the result. Writes to other data on its page drop its blocks; with the
+          # same bytes they come back from the image, or the interpreter runs them in every
+          # round and the rounds never converge.
+          WINEHOST_AOT_IMAGE: ${{ runner.temp }}/fexaot-rtcode/fexaot.dylib
+          WINEHOST_FEX_NOJIT: 1
+          WINEHOST_EXPECT_LOG: |
+            made executable at run time: rtcode-20000964-
+            code cache from the AOT image
+            blocks registered again after an invalidation, bytes unchanged
+          WINEHOST_FEX_CACHE: ${{ runner.temp }}/fexcache-rtcode-image
+          WINEHOST_FEX_CODEMAP: 1
+          WINEHOST_FEX_ALL_CACHED: 1
+        run: |
+          rm -rf "$RUNNER_TEMP/fexcache-rtcode"
+          cp -Rp "$RUNNER_TEMP/fexcache" "$RUNNER_TEMP/fexcache-rtcode"
+          sh tests/fex-wow64/build-aot-image.sh "$RUNNER_TEMP/fexcache-rtcode" "$RUNNER_TEMP/fexaot-rtcode/fexaot.dylib"
+          sh tests/wine-loader/converge-nojit.sh "$RUNNER_TEMP/wine-loader" \
+            "$RUNNER_TEMP/wine-loader/i386-windows/rtcode.exe" "$RUNNER_TEMP/xtajit/FEXOfflineCompiler.exe" \
+            "$RUNNER_TEMP/fexcache-rtcode"
       - name: The x86 program with unaligned accesses runs from an AOT image whose blocks were compiled with plain loads and stores and half barriers
         env:
           WINEHOST_EXPECT_OUTPUT: "unaligned: done"

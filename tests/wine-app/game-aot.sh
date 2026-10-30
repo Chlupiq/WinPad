@@ -71,6 +71,13 @@ if [ -n "$new_maps" ]; then
     [ $# -gt 0 ] || { echo "no code maps in $new_maps" >&2; exit 1; }
     cp "$@" "$cache_dir/codemap/new/"
     echo "=== $# code maps from the iPad"
+    # The bytes of code the game made at run time (its sound modules), which those
+    # maps hold blocks of (patches/fex-wow64/0036).
+    if [ -d "$new_maps/runtime" ]; then
+        mkdir -p "$cache_dir/codemap/new/runtime"
+        cp "$new_maps"/runtime/* "$cache_dir/codemap/new/runtime/"
+        echo "=== $(find "$new_maps/runtime" -type f | wc -l | tr -d ' ') ranges of runtime code from the iPad"
+    fi
     # They name the game's files by their path in the app's Documents/FOLDER; the
     # offline compiler opens them here (GAME_AOT_IPAD_FOLDER: the folder's name on
     # the iPad, if it is not the game folder's name here).
