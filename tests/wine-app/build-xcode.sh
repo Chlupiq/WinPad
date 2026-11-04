@@ -239,7 +239,30 @@ rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/library.txt"
 mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Test Game/TEST.EXE"
 cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Test Game/SETUP.EXE"
-printf '{"title": "WinPad Test"}\n' >"$docs/Test Game/winpad.json"
+# Its winpad.json has a game profile as WinPad Translator writes one (profiles.py), with the
+# user's own title and DLL override over the profile's; the registry values go into the
+# prefix (32-bit: HKLM\Software through Wow6432Node). The key is new in each run: the prefix
+# stays from run to run, and a value the registry has is kept as it is.
+run_id=$(date +%s)
+cat >"$docs/Test Game/winpad.json" <<'JSON'
+{
+  "title": "WinPad Test",
+  "dllOverrides": {"d3d8": "b"},
+  "profile": {
+    "id": "test", "version": 3, "title": "Profile Title", "notes": [],
+    "settings": {
+      "title": "Profile Title", "exe": "TEST.EXE", "args": ["-window", "x y"],
+      "dllOverrides": {"d3d8": "n,b", "dsound": "n"},
+      "env": {"WINPAD_TEST": "1", "WINEDEBUG": "-all"},
+      "registry": {
+        "HKLM\\Software\\WinPad\\RUNID": {"Resolution": 2, "Name": "WinPad \"1\"", "Blob": {"hex": "00FF"}},
+        "HKCU\\Software\\WinPad\\RUNID": {"Mode": "fullscreen"}
+      }
+    }
+  }
+}
+JSON
+perl -pi -e "s/RUNID/$run_id/g" "$docs/Test Game/winpad.json"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
 echo notes >"$docs/Empty/readme.txt"
 # An image WinPad Translator signed into a game folder: used for this build of the app only.
@@ -259,9 +282,20 @@ xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
 for expect in 'library: 2 games' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
-    'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none' 'start: game Test Game/TEST.EXE, image none'; do
+    'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none | profile test v3' \
+    'start: game Test Game/TEST.EXE, image none' 'settings: game profile test v3' \
+    'settings: WINEDLLOVERRIDES=d3d8=b;dinput8=n,b;dsound=n' 'settings: WINPAD_TEST=1' \
+    'settings: skipped environment variable WINEDEBUG (the app sets it)' 'settings: arguments: -window x y' \
+    "settings: registry: \"Resolution\"=dword:00000002 in system.reg [Software\\Wow6432Node\\WinPad\\$run_id]" \
+    'settings: registry: "Name"="WinPad \"1\"" in system.reg' 'settings: registry: "Blob"=hex:00,ff in system.reg' \
+    "settings: registry: \"Mode\"=\"fullscreen\" in user.reg [Software\\WinPad\\$run_id]"; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
+# In the prefix as Wine writes keys; the next runs (window.exe) start Wine's server on it.
+grep -qiF "[Software\\\\Wow6432Node\\\\WinPad\\\\$run_id]" "$docs/prefix/system.reg" &&
+    grep -qF '"Resolution"=dword:00000002' "$docs/prefix/system.reg" &&
+    grep -qF '"Mode"="fullscreen"' "$docs/prefix/user.reg" ||
+    { echo "the game profile's registry values are not in the prefix" >&2; exit 1; }
 rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty"
 echo "The game library found the games in Documents and started the one picked with the controller's buttons"
 [ -n "$sim_window_aot" ] || exit 0

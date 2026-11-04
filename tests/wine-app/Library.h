@@ -17,9 +17,19 @@
 // Why the folder's fexaot.dylib is not used (made for another build of the app), or nil.
 @property(nonatomic, copy) NSString* folderImageNote;
 @property(nonatomic, strong) UIImage* cover;  // cover.png or cover.jpg in its folder, or nil
+// Its winpad.json's settings (WinPadGameSettings): args, dllOverrides, env, registry...
+@property(nonatomic, copy) NSDictionary* settings;
+// The game profile WinPad Translator put into winpad.json ("nfsu2 v1"), or nil.
+@property(nonatomic, copy) NSString* profile;
 @end
 
 NSArray<WinPadGame*>* WinPadFindGames(void);
+
+// The settings of a game folder's winpad.json INFO: those of the game profile WinPad
+// Translator put there ("profile": {"settings": ...}, tools/winpad-translator/winpad_translator/
+// profiles.py), with the user's own top-level keys over them; dllOverrides, env and registry
+// key by key (registry values by name).
+NSDictionary* WinPadGameSettings(NSDictionary* info);
 
 // The inputs of a game controller that become keys (main.m's Gamepads), in the order the
 // settings list them.
