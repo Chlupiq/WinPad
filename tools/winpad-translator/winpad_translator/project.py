@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import codemaps, compile as fexcompile, ipa as ipamod, link, paths
+from . import codemaps, compile as fexcompile, install as installmod, ipa as ipamod, link, package as packagemod, paths, profiles
 
 SETTINGS = "winpad-translator.json"
 
@@ -62,6 +62,28 @@ class Project:
     # and put it into the game folder as fexaot.dylib, which the app loads from there, so
     # the app need not be installed again for it.
     sign_identity: str = ""
+    # Also write the game as one WinPad package (.winpad, package.py) here: a file, or a folder
+    # for <game folder>.winpad. The iPad app opens it from AirDrop or Files.
+    package: str = ""
+    # Whether the package holds the game's files too, or only its settings and signed image
+    # (for a game the iPad has already).
+    package_game: bool = True
+    # The game profile put into the game folder's winpad.json (profiles.py): "auto" (or empty)
+    # finds it by the game's files or Steam app, "none" takes it out, else a profile's id.
+    profile: str = "auto"
+    # Sign the app and install it on the iPad when the image is made (install.py): on a Mac
+    # with Xcode's identity (or install_identity) and team, elsewhere with install_p12 and
+    # install_profile, or in GitHub Actions of the private repository cloud_repo.
+    install: bool = False
+    install_identity: str = ""
+    install_team: str = ""
+    install_p12: str = ""
+    install_profile: str = ""
+    cloud_repo: str = ""
+    install_device: str = ""
+    install_bundle_id: str = ""
+    # Only sign (a signed IPA to install by other means), do not install.
+    sign_only: bool = False
 
     def folder_name(self):
         return os.path.basename(os.path.normpath(self.game_dir))
@@ -108,13 +130,13 @@ def default_work_dir(game_dir):
 
 
 def program_from_settings(game_dir):
-    """winpad.json's "exe" in the game folder (the app's game library reads it too)."""
+    """winpad.json's "exe" in the game folder, the user's or its profile's (the app's game
+    library reads it too)."""
     try:
-        with open(os.path.join(game_dir, "winpad.json")) as f:
-            exe = json.load(f).get("exe")
-    except (OSError, ValueError, AttributeError):
+        exe = profiles.effective(profiles.read_winpad_json(game_dir)).get("exe")
+    except (OSError, profiles.ProfileError):
         return None
-    return codemaps.find_ci(game_dir, exe) if exe else None
+    return codemaps.find_ci(game_dir, exe) if isinstance(exe, str) and exe else None
 
 
 class TranslateError(Exception):
@@ -122,7 +144,8 @@ class TranslateError(Exception):
 
 
 # What goes wrong for a reason the message says (no traceback needed).
-KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, OSError)
+KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, packagemod.PackageError,
+                profiles.ProfileError, installmod.InstallError, installmod.signipa.SignError, OSError)
 
 
 def _script(module, argv, log):
@@ -154,6 +177,7 @@ def run(p, log=print):
     os.makedirs(new, exist_ok=True)
     p.save()
     log(f"=== {p.folder_name()}: image {p.image_name()}, work folder {p.work_dir}, compiler backend {p.backend}")
+    profiles.apply(p.game_dir, p.profile, log=log)
 
     system_dir = p.system_dir
     if p.ipa and not system_dir:
@@ -164,7 +188,9 @@ def run(p, log=print):
         raise TranslateError("give the WinPad Wine IPA the iPad runs (or its i386-windows folder): "
                              "the compiler needs the same Wine DLLs as the iPad")
 
-    for i, folder in enumerate(p.ipad_maps):
+    # Zips the app shared with "Exportovat pro převodník" are unpacked into the work folder.
+    ipad_maps, _ = codemaps.unpack(p.ipad_maps, os.path.join(p.work_dir, "imports"), log)
+    for i, folder in enumerate(ipad_maps):
         tag = f"ipad{i}-{os.path.basename(os.path.normpath(folder))}"
         own = (p.ipad_folder or p.folder_name()) if p.own_maps_only else None
         log(f"=== {codemaps.import_maps(folder, cache_dir, tag, own)} code maps from {folder}"
@@ -275,17 +301,34 @@ def run(p, log=print):
         log(f"  -> {os.path.join(p.output_dir, p.image_name())}")
     if p.sign_identity:
         into_game_folder(p, device, log)
-    if p.output_ipa:
+    output_ipa = p.output_ipa
+    if p.install and not output_ipa and p.ipa and not (p.xcode_project and sys.platform == "darwin"):
+        output_ipa = os.path.join(p.work_dir, f"WinPadWine-{p.slug()}.ipa")
+    if output_ipa:
         if not p.ipa:
             raise TranslateError("an IPA with the image needs the IPA it is made from")
-        ipamod.add_images(p.ipa, p.output_ipa, [device], p.app_name)
-        log(f"=== {p.output_ipa}: the app with {p.image_name()}, for AltStore, SideStore or Sideloadly")
+        ipamod.add_images(p.ipa, output_ipa, [device], p.app_name)
+        log(f"=== {output_ipa}: the app with {p.image_name()}, for AltStore, SideStore or Sideloadly")
+    if p.package:
+        write_package(p, log)
+    if p.install:
+        sign_and_install(p, output_ipa, log)
     # The maps and logs are in the cache directory now; the next run takes only new ones.
     p.ipad_maps, p.drcov_logs, p.rebuild = [], [], False
     p.save()
     log(f"Done. Copy the game folder {p.folder_name()} into WinPad Wine's Documents on the iPad (Finder or Files) "
         "and install the app with the image.")
     return [m[1] for m in made]
+
+
+def sign_and_install(p, output_ipa, log=print):
+    """Signs the app with the image (the Xcode project on a Mac, else the IPA written) and
+    installs it on the iPad (install.py)."""
+    if not output_ipa and not p.xcode_project:
+        raise TranslateError("installing needs the app: give the WinPad Wine IPA (or a WinPadWine-xcode project)")
+    xcode = p.xcode_project if sys.platform == "darwin" and not (p.install_p12 or p.cloud_repo) else ""
+    return installmod.install(installmod.settings_from(p), xcode_project=xcode, ipa=output_ipa,
+                              app_name=p.app_name, work=os.path.join(p.work_dir, "install"), log=log)
 
 
 # The image in a game folder, which the app loads in place of the one in its Frameworks
@@ -331,6 +374,16 @@ def into_game_folder(p, image, log=print, run=subprocess.run):
         os.remove(stamp)
     log(f"=== {dest}: signed by {identity}" + (f", for app build {build}" if build else ""))
     log("  copy it with the game folder to the iPad: the app loads it from there, no new install needed")
+
+
+def write_package(p, log=print):
+    """Writes P's game as a WinPad package to p.package. Returns its path."""
+    exe = ""
+    if p.exe:
+        found = codemaps.find_ci(p.game_dir, p.exe)
+        exe = os.path.relpath(found, p.game_dir) if found else p.exe
+    return packagemod.write(p.game_dir, p.package, folder=p.ipad_folder or p.folder_name(), exe=exe,
+                            with_game=p.package_game, log=log)
 
 
 def app_build(p):

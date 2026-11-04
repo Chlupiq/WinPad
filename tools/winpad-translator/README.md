@@ -16,8 +16,15 @@ Inputs, any combination:
 - **Code maps from the iPad.** Code missing from the image runs in FEX's
   interpreter on the iPad, slowly, and is recorded in the app's
   `Documents/fexcache/<game folder>/codemap/new` (with `runtime/` for code the game builds at
-  run time). Copy that folder off the iPad (Finder or Files) and add it. Each
-  round of play → copy → translate makes the game faster.
+  run time). In the app's library, **Exportovat pro převodník** (or the
+  controller's X) shares them as one zip (AirDrop to the Mac, Files, Mail);
+  add that zip (`--ipad-maps WinPad-mapy-<game>-<date>.zip`, or the **zip**
+  button in the window). Copying the folder off the iPad (Finder or Files)
+  works too. The app writes each block the moment the interpreter learns it,
+  so maps survive iPadOS ending the app. The zip's `winpad-export.json` names
+  the game folder, the app build and when it was exported; the library build
+  says when an export is of no game it has. Each round of play → export →
+  translate makes the game faster.
 - **DynamoRIO logs from a Windows PC** (`drrun -t drcov -- GAME.EXE`, play for a
   while): one session covers most of the game's own code at once
   (`tests/fex-wow64/drcov2codemap.py`).
@@ -107,6 +114,61 @@ the new IPA. The settings of a game are kept in its work folder
 (`winpad-translator.json`, `--settings`), so the next round only needs the new
 code maps.
 
+## Game profiles
+
+Some games need settings of their own in WinPad Wine: a DLL from the game
+folder before Wine's, a resolution that fits the iPad, an argument. A profile
+(`data/profiles/<id>.json`, `profiles.py`) says how to recognise a game and
+what it needs. Every translation looks for one (`--profile auto`, the
+default; Game profile in the window) and puts it into the game folder's
+`winpad.json`, which the app reads:
+
+```json
+{
+  "title": "My own title",
+  "profile": {
+    "id": "nfsu2", "version": 1, "title": "Need for Speed Underground 2",
+    "notes": ["..."],
+    "settings": {
+      "exe": "SPEED2.EXE", "title": "Need for Speed Underground 2",
+      "dllOverrides": {"dinput8": "n,b"},
+      "registry": {"HKLM\\Software\\EA Games\\Need for Speed Underground 2": {"g_RacingResolution": 2}}
+    }
+  }
+}
+```
+
+The translator only writes `"profile"`. Every other key of `winpad.json` is
+the user's, and it wins over the profile's: `title` and `exe` replace the
+profile's, and `dllOverrides`, `env` and `registry` win entry by entry. The app
+(`WinPadGameSettings` in tests/wine-app/Library.m) and `profiles.effective`
+merge the same way. The settings:
+
+| key | what the app does with it |
+| --- | --- |
+| `title`, `exe` | the library's title and the program, relative to the game folder |
+| `args` | arguments for the program |
+| `dllOverrides` | `WINEDLLOVERRIDES`, after the app's own `dinput8=n,b` |
+| `env` | environment variables, except the ones the app sets (`WINE*`, `FEX_*`, `DYLD_*`...) |
+| `registry` | values (text, a number = DWORD, `{"hex": "00ff"}` = binary) put into the prefix's `system.reg` (HKLM) or `user.reg` (HKCU) when the key does not have them yet, so a game that changes one keeps its own; a 32-bit game's `HKLM\Software` goes to `Wow6432Node` |
+
+A profile matches a game by any of its `match` rules: an `exe` in the folder
+(any case) with all of the rule's `files`, or the folder's Steam app
+(`steamAppId`: `steam_appid.txt` in the folder, or the `appmanifest_<id>.acf`
+of the `steamapps` folder it is in). `--profile ID` forces one, `--profile
+none` takes it out of `winpad.json`, `--list-profiles` lists them, and
+`--profile-only --game FOLDER` only writes `winpad.json`.
+
+| profile | recognised by | settings |
+| --- | --- | --- |
+| `nfsu2` Need for Speed Underground 2 | `SPEED2.EXE` + `GLOBAL/GLOBALA.BUN` | `dinput8=n,b` (Ultimate ASI Loader), race resolution 1024×768 (`g_RacingResolution` 2) |
+| `mafia` Mafia (2002) | Steam 40990, `GameV12.exe`, or `Game.exe` + `Setup.exe` + `LS3DF.dll` | `d3d8=n,b`: a `d3d8.dll` in the game folder (Mafia Widescreen Fix's d3d8to9) first, else the app's d3d8to9 |
+
+Each profile names its sources (PCGamingWiki, forums). Proton's game fixes
+(umu-protonfixes) have nothing for either game; take settings from them when a
+game has one. A new profile is one JSON file; `tests/test_profiles.py` checks
+the shipped ones.
+
 ## Several games in one app
 
 The app's game library (tests/wine-app/Library.m) starts each game folder in
@@ -146,4 +208,106 @@ refuses it (a signature from another team than the app's: install the app from
 Xcode with the same Apple ID). Code maps themselves cannot be turned into code
 on the iPad: that would take a JIT.
 
-Tests: `python3 -m unittest discover -s tools/winpad-translator/tests`.
+## One file for the iPad: the .winpad package
+
+`--package FILE` (or a folder, for `<game folder>.winpad` in it; "Write .winpad
+package" in the window) also writes the game as one file: a ZIP archive of the
+game folder as the app keeps it, with its `winpad.json`, cover and, when it was
+signed with `--sign-identity`, the image `fexaot.dylib` with `fexaot.build`.
+AirDrop it to the iPad or open it in Files (or copy it into WinPad Wine's
+Documents): the app unpacks it into `Documents/<folder>` and the game shows in
+its library. Files the game wrote there itself (saves) stay.
+
+- `--package-no-game`: only the settings, cover and signed image, for a game
+  the iPad has already (an update after a new translation round).
+- `--package-only`: package the game folder as it is, translate nothing.
+- `--library ... --build --package-dir FOLDER`: a package of each game
+  translated.
+
+An image that is not signed is left out, because iOS would not run it: the game
+then runs from the image in the app's IPA. The code maps are not packaged: the
+iPad writes its own, and the translator's copies name this computer's files.
+
+`winpad.json` in the package is the game folder's own (the library reads
+`title` and `exe`; other keys are game settings), plus a `package` object:
+
+```json
+{"title": "Need for Speed Underground 2", "exe": "SPEED2.EXE",
+ "package": {"format": 1, "folder": "NFSU2", "game_files": true, "image": "fexaot.dylib",
+             "app_build": "…", "made": "2026-11-04T13:00:00+00:00", "translator": "0.1.0"}}
+```
+
+The app reads packages with `tests/wine-app/Package.c` (zlib; stored and
+deflated entries, ZIP64 for games over 4 GB; names that would leave the folder
+are refused); `tests/test_package.py` builds it with the C compiler here and
+unpacks the translator's packages with it.
+
+
+## Sign and install in one step
+
+Translated code is executable code, and an iPad runs only code signed for it, so the
+image runs from an app signed with your Apple certificate. With `--install` ("Sign and
+install on the iPad" in the window, both tabs) the translator signs the app with the new
+image and installs it on the iPad, connected by cable or on the same Wi-Fi, right after
+translating (winpad_translator/install.py). Installed over the old app (same bundle
+identifier), it keeps its Documents and games.
+
+| Computer | What signs | What it needs |
+|---|---|---|
+| Mac with the `WinPadWine-xcode` project (`--xcode-project`) | `xcodebuild` builds the app for your team; Xcode makes the certificate and profile itself and registers a new iPad (`-allowProvisioningUpdates`) | your Apple ID in Xcode (Settings › Accounts), free or paid; the team is your Apple Development identity's (`--team` otherwise) |
+| Mac with only the IPA | `codesign` with your Apple Development identity and the profile Xcode made for the app | one Run of WinPadWine from Xcode with your team (that makes the profile), or `--provisioning-profile` |
+| Windows PC, Linux | `rcodesign` (apple-codesign; the packaged app brings it) | your certificate as a `.p12` (`--p12`, `--p12-password` or `WINPAD_P12_PASSWORD`) and a profile (`--provisioning-profile`): paid Apple Developer account |
+| Windows PC, nothing installed | a GitHub Actions job in your own private repository (`--cloud-sign OWNER/REPO`) | the same `.p12` and profile, once stored in that repository |
+
+The app goes onto the iPad with Xcode's `devicectl` on a Mac and with `ideviceinstaller`
+(libimobiledevice) elsewhere when it is installed; otherwise the translator writes
+`…-signed.ipa`, which installs as it is (Sideloadly with Signing mode "Normal install",
+Apple Configurator). `--device` picks the iPad when several are connected; `--sign-only`
+only writes the signed IPA; `--bundle-id` sets another bundle identifier (with a free
+Apple ID it must be one nobody else registered). The first app from a new certificate
+needs Settings › General › VPN & Device Management › trust, and iOS 16+ Developer Mode.
+
+```
+# Mac: translate, build for your team, install
+winpad-translator --game ~/Games/NFSU2 --ipad-maps ~/from-ipad/fexcache \
+    --xcode-project ~/Developer/wine-app/WinPadWine-xcode --install
+# a library of games, the same way
+winpad-translator --library --build --ipad-maps ~/from-ipad/fexcache --install
+```
+
+### A certificate without a Mac
+
+developer.apple.com takes a certificate signing request; the translator makes one and
+turns Apple's certificate into the `.p12` (winpad_translator/applecert.py):
+
+```
+winpad-translator --cert-request you@example.com
+#   upload ~/WinPadTranslator/certificate/winpad.certSigningRequest at developer.apple.com ›
+#   Certificates › + › Apple Development, download the .cer
+winpad-translator --cert-p12 development.cer --p12-password SECRET
+#   then Profiles › + › iOS App Development: the app's identifier
+#   (com.chlupiq.winpad.wine or your own), this certificate, your iPad › download
+```
+
+### Signing in the cloud
+
+For a Windows PC with nothing to sign with. Once:
+
+```
+winpad-translator --cloud-setup you/winpad-sign --github-token TOKEN \
+    --p12 winpad.p12 --p12-password SECRET --provisioning-profile WinPad.mobileprovision
+```
+
+makes the private repository `you/winpad-sign` (or takes yours), puts the signing job
+(data/cloud-sign/winpad-sign.yml) and `signipa.py` into it and stores the certificate,
+its password and the profile as its Actions secrets, encrypted for the repository
+(PyNaCl). The token (a fine-grained one for that repository with Contents, Actions,
+Secrets and Administration, or a classic one with `repo` and `workflow`) is kept in
+`~/WinPadTranslator/github-token`. Then `--cloud-sign you/winpad-sign` uploads the IPA to a
+draft release of the repository, starts the job, downloads the signed IPA and deletes the
+release. The IPA holds your games' translated code, so a public repository is refused.
+On GitHub's free plan a private repository has 2,000 Actions minutes a month; one
+signing takes about a minute.
+
+Tests: `python3 -m unittest discover -s tools/winpad-translator/tests` (signing needs
+rcodesign: `python3 tools/winpad-translator/fetch-rcodesign.py FOLDER`).

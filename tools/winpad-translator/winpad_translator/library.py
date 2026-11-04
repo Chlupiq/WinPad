@@ -19,13 +19,18 @@ import dataclasses
 import json
 import os
 
-from . import codemaps, ipa as ipamod, project
+import sys
+
+from . import codemaps, install as installmod, ipa as ipamod, package as packagemod, project
 
 LIBRARY = "library.json"
 APP_NAME = "WinPad"
 # The settings of how to compile, which the library gives every game.
 SHARED = ("backend", "compiler", "dispatcher", "wine", "sim_work_dir", "winpad_repo", "host_features",
           "caches_per_run", "compile_timeout", "half_barrier", "simulator_image", "sign_identity")
+# How the app is signed and installed (install.py), once for all games.
+INSTALL = ("install", "install_identity", "install_team", "install_p12", "install_profile", "cloud_repo",
+           "install_device", "install_bundle_id", "sign_only")
 
 
 def default_path():
@@ -42,6 +47,10 @@ class Library:
     xcode_project: str = ""
     # The name under the icon; empty: "WinPad".
     app_name: str = ""
+    # Write a WinPad package (.winpad) of each game translated by build() into this folder.
+    package_dir: str = ""
+    # Whether those packages hold the games' files too (else only settings, cover, signed image).
+    package_game: bool = True
     # Settings of SHARED for every game.
     settings: dict = dataclasses.field(default_factory=dict)
 
@@ -63,7 +72,7 @@ class Library:
     def projects(self):
         return [project.Project.load(os.path.join(w, project.SETTINGS)) for w in self.games]
 
-    def add(self, game_dir, exe="", ipad_folder="", work_dir=""):
+    def add(self, game_dir, exe="", ipad_folder="", work_dir="", profile=""):
         """Adds the game in GAME_DIR (or updates its program and iPad folder). Returns its Project."""
         game_dir = os.path.abspath(game_dir)
         if not os.path.isdir(game_dir):
@@ -81,6 +90,7 @@ class Library:
         p.game_dir, p.work_dir = game_dir, work_dir
         p.exe = exe or p.exe
         p.ipad_folder = ipad_folder or p.ipad_folder
+        p.profile = profile or p.profile
         p.save()
         if work_dir not in self.games:
             self.games.append(work_dir)
@@ -110,33 +120,52 @@ def has_own_maps(p, folders):
     return False
 
 
-def build(lib, ipad_maps=(), rebuild=False, log=print):
-    """Translates each game with new code maps in IPAD_MAPS (or without an image yet) and
-    writes the app with every game's image. Returns the images in it."""
+def imports_dir():
+    return os.path.join(os.path.dirname(default_path()), "imports")
+
+
+def build(lib, ipad_maps=(), rebuild=False, log=print, imports=None):
+    """Translates each game with new code maps in IPAD_MAPS (folders copied off the iPad, or zips
+    its "Exportovat pro převodník" shared; those are unpacked under IMPORTS) or without an image
+    yet, and writes the app with every game's image. Returns the images in it."""
     if not lib.games:
         raise project.TranslateError("the library has no games yet: add a game folder")
     if not lib.ipa and not lib.xcode_project:
         raise project.TranslateError("give the WinPad Wine IPA from CI (or a WinPadWine-xcode project)")
+    if lib.settings.get("install") and lib.ipa and not lib.output_ipa and not (lib.xcode_project and sys.platform == "darwin"):
+        lib.output_ipa = os.path.join(os.path.dirname(default_path()), "WinPad.ipa")
     if not lib.output_ipa and not lib.xcode_project:
         raise project.TranslateError("say where the app goes: an IPA to write (or a WinPadWine-xcode project)")
     if lib.ipa and lib.output_ipa and os.path.abspath(lib.ipa) == os.path.abspath(lib.output_ipa):
         raise project.TranslateError("write the app to another IPA than the one it is made from")
+    ipad_maps, manifests = codemaps.unpack(ipad_maps, imports or imports_dir(), log)
+    projects = lib.projects()
+    known = {(p.ipad_folder or p.folder_name()).lower() for p in projects}
+    for manifest in manifests:
+        folder = codemaps.export_folder(manifest)
+        if folder and folder.lower() not in known:
+            log(f"##### the export of {folder} is of no game in the library: add its game folder "
+                "(--add-game, or + in Game library) and build again")
     images = []
-    for p in lib.projects():
+    for p in projects:
         for key in SHARED:
             if key in lib.settings:
                 setattr(p, key, lib.settings[key])
         p.ipa, p.xcode_project = lib.ipa, lib.xcode_project
-        p.output_ipa, p.output_dir, p.app_name = "", "", ""
+        p.output_ipa, p.output_dir, p.app_name, p.package = "", "", "", ""
         p.own_maps_only = True
+        # The library signs and installs the one app with every game, below.
+        p.install = False
         p.rebuild = p.rebuild or rebuild
         image = image_of(p)
         new = has_own_maps(p, ipad_maps)
+        translated = False
         if new or p.drcov_logs or p.discover or p.rebuild or (not os.path.isfile(image) and
                                                                os.path.isdir(os.path.join(p.work_dir, "fexcache", "cache"))):
             p.ipad_maps = list(ipad_maps) if new else []
             log(f"##### {p.folder_name()}")
             project.run(p, log=log)
+            translated = True
         elif os.path.isfile(image):
             log(f"##### {p.folder_name()}: no new code maps, its image {p.image_name()} stays")
             if p.sign_identity and not os.path.isfile(os.path.join(p.game_dir, project.GAME_FOLDER_IMAGE)):
@@ -147,6 +176,11 @@ def build(lib, ipad_maps=(), rebuild=False, log=print):
             continue
         if os.path.isfile(image):
             images.append(image)
+            package = os.path.join(lib.package_dir, (p.ipad_folder or p.folder_name()) + packagemod.EXTENSION) \
+                if lib.package_dir else ""
+            if package and (translated or not os.path.isfile(package)):
+                p.package, p.package_game = package, lib.package_game
+                project.write_package(p, log)
     name = lib.app_name or APP_NAME
     if lib.output_ipa:
         ipamod.add_images(lib.ipa, lib.output_ipa, images, name)
@@ -154,6 +188,13 @@ def build(lib, ipad_maps=(), rebuild=False, log=print):
     if lib.xcode_project and os.path.isfile(os.path.join(lib.xcode_project, "Info.plist")):
         ipamod.rename_app(os.path.join(lib.xcode_project, "Info.plist"), name)
         log(f"=== {lib.xcode_project}: {len(images)} games' images, app name {name}")
+    if lib.settings.get("install"):
+        s = installmod.settings_from(lib.settings)
+        xcode = lib.xcode_project if sys.platform == "darwin" and not (s.p12 or s.cloud_repo) else ""
+        installmod.install(s, xcode_project=xcode, ipa=lib.output_ipa, app_name=name,
+                           work=os.path.join(os.path.dirname(default_path()), "install"), log=log)
+        log("Done. The app is on the iPad; copy each game folder into its Documents if it is not there yet.")
+        return images
     log("Done. Install the app over the old one (its Documents stay) and copy each game folder into its "
         "Documents if it is not there yet.")
     return images

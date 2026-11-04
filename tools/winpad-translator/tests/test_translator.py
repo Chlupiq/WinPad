@@ -216,6 +216,51 @@ class IpaTest(unittest.TestCase):
                                                     "CFBundleExecutable": "$(EXECUTABLE_NAME)"})
 
 
+def write_export(path, folder, images):
+    """A zip as WinPad Wine's "Exportovat pro převodník" shares it (Library.m, WinPadExportMaps)."""
+    with tempfile.TemporaryDirectory() as t:
+        top = os.path.join(t, "WinPad-mapy")
+        new = os.path.join(top, "fexcache", folder, "codemap", "new")
+        write_map(os.path.join(new, "0123.133456789.bin"), images)
+        os.makedirs(os.path.join(new, "runtime"))
+        write(os.path.join(new, "runtime", "rtcode-1.fexrc"), b"x")
+        write(os.path.join(new, "hostprobe.txt"), b"AFP=1\n")
+        with open(os.path.join(top, codemaps.EXPORT_MANIFEST), "w") as f:
+            f.write('{"kind": "winpad-codemaps", "version": 1, "maps": 1, "app_build": "abc", '
+                    '"exported": "2026-11-04T12:00:00Z", "game": {"folder": "%s", "title": "%s"}}' % (folder, folder))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with zipfile.ZipFile(path, "w") as z:
+            for dirpath, _, filenames in os.walk(top):
+                for name in filenames:
+                    full = os.path.join(dirpath, name)
+                    z.write(full, os.path.relpath(full, t))
+    return path
+
+
+class ExportTest(unittest.TestCase):
+    def test_unpack(self):
+        with tempfile.TemporaryDirectory() as t:
+            zip_path = write_export(os.path.join(t, "WinPad-mapy-game-a.zip"), "Game A",
+                                    [(1, IPAD.format("Game A", "a.exe"), [0x1000])])
+            with zipfile.ZipFile(zip_path, "a") as z:
+                z.writestr("../evil.bin", b"no")
+                z.writestr("__MACOSX/._x", b"no")
+            lines = []
+            folders, manifests = codemaps.unpack([zip_path, os.path.join(t, "plain")], os.path.join(t, "imports"),
+                                                 lines.append)
+            self.assertEqual(folders, [os.path.join(t, "imports", "WinPad-mapy-game-a"), os.path.join(t, "plain")])
+            self.assertEqual(codemaps.export_folder(manifests[0]), "Game A")
+            self.assertFalse(os.path.exists(os.path.join(t, "evil.bin")))
+            self.assertFalse(os.path.exists(os.path.join(folders[0], "__MACOSX")))
+            self.assertIn("code maps of Game A", lines[0])
+            self.assertEqual(codemaps.import_maps(folders[0], os.path.join(t, "work"), "x", "Game A"), 1)
+            self.assertEqual(codemaps.host_probe(folders[0]), "AFP=1")
+            self.assertTrue(os.path.isfile(os.path.join(t, "work", "codemap", "new", "runtime", "rtcode-1.fexrc")))
+            # A second export of the same name replaces the first.
+            codemaps.unpack([zip_path], os.path.join(t, "imports"), lines.append)
+            self.assertEqual(len(codemaps.map_files(folders[0])), 1)
+
+
 class LibraryTest(unittest.TestCase):
     def test_own_maps_only(self):
         with tempfile.TemporaryDirectory() as t:
@@ -409,6 +454,19 @@ class RunTest(unittest.TestCase):
             library.build(lib, [], log=lines.append)
             self.assertTrue(any("its image fexaot-game-a.dylib stays" in line for line in lines), lines)
             self.assertFalse(any("=== compiling" in line for line in lines))
+            # The zips the app's "Exportovat pro převodník" shared: Game A's new maps are compiled,
+            # Game B keeps its image, and an export of a game not in the library says so.
+            exe_a = os.path.join(t, "Game A", "game.exe")
+            zip_a = write_export(os.path.join(t, "shared", "WinPad-mapy-game-a.zip"), "Game A",
+                                 [(file_id(exe_a), IPAD.format("Game A", "game.exe"), [0x1100])])
+            zip_x = write_export(os.path.join(t, "shared", "WinPad-mapy-other.zip"), "Other",
+                                 [(7, IPAD.format("Other", "x.exe"), [0x1000])])
+            lines.clear()
+            images = library.build(lib, [zip_a, zip_x], log=lines.append, imports=os.path.join(t, "imports"))
+            self.assertEqual(len(images), 2)
+            self.assertTrue(any(line.startswith("##### Game A") and "stays" not in line for line in lines), lines)
+            self.assertTrue(any("its image fexaot-game-b.dylib stays" in line for line in lines), lines)
+            self.assertTrue(any("the export of Other is of no game in the library" in line for line in lines), lines)
 
 
 if __name__ == "__main__":

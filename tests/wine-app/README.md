@@ -23,7 +23,20 @@ spustí). Ve složce hry může být:
   `{"title": "Need for Speed Underground 2", "exe": "SPEED2.EXE"}`. Bez něj
   je názvem jméno složky a programem největší `.exe`, který není instalátor
   ani pomocný program.
+  WinPad Translator do něj zapíše profil známé hry (`"profile"`: program,
+  přepsání DLL, proměnné prostředí, argumenty, hodnoty registru, třeba
+  rozlišení). Aplikace hru spustí s nimi; vlastní klíče v `winpad.json`
+  (`title`, `exe`, `args`, `dllOverrides`, `env`, `registry`) mají přednost.
+  Viz tools/winpad-translator/README.md, Game profiles.
 - `cover.png` nebo `cover.jpg`, obal hry.
+
+Hru jde poslat i jako jeden soubor `.winpad`, který vyrobí WinPad Translator
+(`--package`). Pošli ho na iPad přes AirDrop nebo ho otevři v Souborech
+(případně zkopíruj do Soubory → WinPad Wine): aplikace ho rozbalí do složky
+hry (`Documents/<složka>`) a hra se objeví v knihovně. Uložené pozice a jiné
+soubory, které hra ve složce vytvořila, zůstanou. Balíček s podepsaným
+obrazem (`--sign-identity` na Macu) přinese i přeložený kód, jinak se použije
+obraz z aplikace.
 
 Přeložený obraz hry je v projektu `Frameworks/<sdk>/fexaot-SLOŽKA.dylib`
 (jméno složky malými písmeny, ostatní znaky jako `-`), jinak
@@ -142,7 +155,7 @@ Hra třikrát proběhne v simulátoru s JITem a zapíše mapu kódu, offline
 kompilátor FEXu z ní udělá cache a ty se slinkují do `fexaot-game.dylib`
 pro simulátor i iPad. Pak stačí v Xcode dát Run; hra na iPadu poběží i bez
 debuggeru (spuštěná z plochy). Bloky, které v obrazu chybí, spustí
-interpretr FEXu a zapíše je do Soubory → WinPad Wine → `fexcache/codemap/new`.
+interpretr FEXu a zapíše je do Soubory → WinPad Wine → `fexcache/codemap/new`. Hry z knihovny je zapisují do `fexcache/<složka hry>/codemap/new`, každý blok hned, jak ho interpretr pozná (patch fex-wow64 0038), takže se neztratí ani když iPadOS aplikaci ukončí. Tlačítko **Exportovat pro převodník** v knihovně (nebo X na ovladači) je pošle jako jeden zip (AirDrop, Soubory, Mail) pro WinPad Translator; štítek pod názvem hry ukazuje, kolik map přibylo od posledního exportu.
 Tu složku zkopíruj na Mac a dej ji skriptu jako šestý argument: další obraz
 je už bude mít.
 

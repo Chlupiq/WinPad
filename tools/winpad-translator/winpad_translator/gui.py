@@ -1,10 +1,13 @@
 """The window of WinPad Translator (Tk, so the same code runs on macOS and Windows)."""
 import os
 import queue
+import sys
 import threading
 import traceback
 
-from . import __version__, compile as fexcompile, library, project
+from . import __version__, compile as fexcompile, library, profiles, project
+
+EXPORT_TYPES = [("WinPad code maps", "*.zip"), ("all", "*")]
 
 
 def main():
@@ -38,6 +41,8 @@ def main():
                 v = filedialog.askdirectory()
             elif kind == "save":
                 v = filedialog.asksaveasfilename(defaultextension=".ipa", filetypes=[("IPA", "*.ipa")])
+            elif kind == "package":
+                v = filedialog.asksaveasfilename(defaultextension=".winpad", filetypes=[("WinPad package", "*.winpad")])
             else:
                 v = filedialog.askopenfilename(filetypes=kind)
             if v:
@@ -59,7 +64,7 @@ def main():
         buttons.grid(row=row, column=2, sticky="n")
 
         def add():
-            if kind == "dir":
+            if kind in ("dir", "maps"):
                 v = filedialog.askdirectory()
                 values = [v] if v else []
             else:
@@ -71,7 +76,14 @@ def main():
             for i in reversed(box.curselection()):
                 box.delete(i)
 
+        def add_zip():
+            for v in filedialog.askopenfilenames(filetypes=EXPORT_TYPES):
+                box.insert("end", v)
+
         ttk.Button(buttons, text="+", width=3, command=add).pack()
+        if kind == "maps":
+            # The zip the app's "Exportovat pro převodník" shared (AirDrop, Files, Mail…).
+            ttk.Button(buttons, text="zip", width=3, command=add_zip).pack()
         ttk.Button(buttons, text="−", width=3, command=remove).pack()
         entries[key] = box
         row += 1
@@ -79,8 +91,34 @@ def main():
         row += 1
 
     path_row("Game folder", "game_dir", "dir", "the game as it is in WinPad Wine's Documents on the iPad")
-    list_row("iPad code maps", "ipad_maps", "dir",
-             "folders copied off the iPad: WinPad Wine › fexcache › <game> (or all of fexcache)")
+    ttk.Label(frame, text="Game profile").grid(row=row, column=0, sticky="w", pady=2)
+    try:
+        known = list(profiles.load_all())
+    except (OSError, ValueError, profiles.ProfileError):
+        known = []
+    entries["profile"] = tk.StringVar(value=p.profile or "auto")
+    ttk.Combobox(frame, textvariable=entries["profile"], values=["auto", "none"] + known, state="readonly",
+                 width=12).grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
+    found = tk.StringVar(value="auto: settings of a known game (DLLs, resolution, fixes) go into its winpad.json")
+    ttk.Label(frame, textvariable=found, foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
+
+    def show_profile(*_):
+        game_dir = entries["game_dir"].get()
+        if not os.path.isdir(game_dir):
+            return
+        try:
+            prof, exe = profiles.detect(game_dir)
+        except (OSError, ValueError, profiles.ProfileError) as e:
+            found.set(f"profiles: {e}")
+            return
+        found.set(f"found: {prof['title']} ({prof['id']})" + (f", program {exe}" if exe else "")
+                  if prof else "no profile for this game: it runs with the defaults")
+
+    entries["game_dir"].trace_add("write", show_profile)
+    list_row("iPad code maps", "ipad_maps", "maps",
+             "the zip the app's Exportovat pro převodník shared, or WinPad Wine › fexcache › <game> copied off")
     list_row("PC drcov logs", "drcov_logs", [("drcov log", "*.log"), ("all", "*")],
              "optional: drrun -t drcov -- GAME.EXE on a Windows PC, played for a while")
     discover = tk.BooleanVar(value=False)
@@ -90,6 +128,12 @@ def main():
     path_row("WinPad Wine IPA", "ipa", [("IPA", "*.ipa")], "the app the iPad runs (its Wine DLLs must match)")
     path_row("Write IPA with image", "output_ipa", "save", "optional: sign and install it with AltStore/SideStore/Sideloadly")
     path_row("Image folder", "output_dir", "dir")
+    path_row("Write .winpad package", "package", "package",
+             "optional: the game in one file; open it on the iPad from AirDrop or Files")
+    package_game = tk.BooleanVar(value=True)
+    ttk.Checkbutton(frame, text="Package the game's files too (uncheck when the iPad has the game already)",
+                    variable=package_game).grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
 
     ttk.Label(frame, text="App name").grid(row=row, column=0, sticky="w", pady=2)
     entries["app_name"] = tk.StringVar(value=p.app_name)
@@ -106,6 +150,8 @@ def main():
     ttk.Label(frame, text="Mac, optional: auto or your Apple Development identity; the app then loads the image "
               "from the game folder, no new install", foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
     row += 1
+
+    install_vars, row = install_rows(frame, row, p)
 
     ttk.Label(frame, text="Compiler runs").grid(row=row, column=0, sticky="w", pady=2)
     backend = tk.StringVar(value=fexcompile.default_backend())
@@ -146,8 +192,10 @@ def main():
         for key, var in adv.items():
             setattr(p, key, var.get().strip())
         p.discover, p.half_barrier, p.rebuild = discover.get(), half.get(), rebuild.get()
+        p.package_game = package_game.get()
         p.backend = backend.get()
         p.simulator_image = bool(p.xcode_project)
+        apply_install(install_vars, p)
 
     def work():
         try:
@@ -192,6 +240,10 @@ def main():
             else:
                 var.set(value)
         backend.set(loaded.backend or backend.get())
+        entries["profile"].set(loaded.profile or "auto")
+        for key, var in install_vars.items():
+            if key != "p12_password":
+                var.set(getattr(loaded, key))
 
     entries["game_dir"].trace_add("write", lambda *_: load_settings(entries["game_dir"].get())
                                   if os.path.isdir(entries["game_dir"].get()) else None)
@@ -199,6 +251,59 @@ def main():
     pump()
     root.mainloop()
     return 0
+
+
+INSTALL_HINT = ("Mac: Xcode's Apple ID (with the Xcode project, Xcode builds it for your team). Windows: your "
+                "certificate (.p12) and profile, or a private GitHub repository that signs it")
+
+
+def install_rows(frame, row, values):
+    """The sign-and-install settings (install.py) from row ROW on; VALUES: a dict or object with
+    the install_* keys. Returns ({key: var}, the next row)."""
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+
+    get = values.get if isinstance(values, dict) else (lambda k, d=None: getattr(values, k, d))
+    box = ttk.LabelFrame(frame, text="Sign and install on the iPad", padding=6)
+    box.grid(row=row, column=0, columnspan=3, sticky="ew", pady=4)
+    box.columnconfigure(1, weight=1)
+    v = {"install": tk.BooleanVar(value=bool(get("install", False)))}
+    ttk.Checkbutton(box, text="After translating, sign the app and install it (iPad on cable or the same Wi-Fi)",
+                    variable=v["install"]).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Label(box, text=INSTALL_HINT, foreground="gray", wraplength=640).grid(row=1, column=0, columnspan=3, sticky="w")
+    fields = [("Certificate (.p12)", "install_p12", [("Certificate", "*.p12")]), ("Password", "p12_password", None),
+              ("Profile", "install_profile", [("Profile", "*.mobileprovision")]),
+              ("GitHub repo (cloud)", "cloud_repo", None), ("iPad", "install_device", None)]
+    if sys.platform == "darwin":
+        fields = [("iPad", "install_device", None), ("Certificate (.p12)", "install_p12", [("Certificate", "*.p12")]),
+                  ("Password", "p12_password", None), ("Profile", "install_profile", [("Profile", "*.mobileprovision")])]
+    for i, (label, key, kind) in enumerate(fields, start=2):
+        ttk.Label(box, text=label).grid(row=i, column=0, sticky="w")
+        var = tk.StringVar(value=os.environ.get("WINPAD_P12_PASSWORD", "") if key == "p12_password" else get(key, "") or "")
+        ttk.Entry(box, textvariable=var, show="•" if key == "p12_password" else "").grid(row=i, column=1, sticky="ew", padx=6)
+        if kind:
+            ttk.Button(box, text="…", width=3, command=lambda var=var, kind=kind: var.set(
+                filedialog.askopenfilename(filetypes=kind) or var.get())).grid(row=i, column=2)
+        v[key] = var
+    return v, row + 1
+
+
+def apply_install(v, target):
+    """Puts the install_rows values into TARGET (a Project or a library's settings dict)."""
+    for key, var in v.items():
+        value = var.get()
+        if key == "p12_password":
+            if value:
+                os.environ["WINPAD_P12_PASSWORD"] = value
+            continue
+        value = value.strip() if isinstance(value, str) else value
+        if isinstance(target, dict):
+            if value:
+                target[key] = value
+            else:
+                target.pop(key, None)
+        else:
+            setattr(target, key, value)
 
 
 def library_tab(tabs):
@@ -250,10 +355,15 @@ def library_tab(tabs):
     ttk.Label(frame, text="iPad code maps").grid(row=2, column=0, sticky="w", pady=2)
     maps = tk.StringVar()
     ttk.Entry(frame, textvariable=maps).grid(row=2, column=1, sticky="ew", padx=6)
-    ttk.Button(frame, text="…", width=3, command=lambda: maps.set(filedialog.askdirectory() or maps.get())).grid(
-        row=2, column=2)
-    ttk.Label(frame, text="WinPad Wine › fexcache copied off the iPad: a folder of maps per game, "
-              "each game takes its own", foreground="gray").grid(row=3, column=1, sticky="w", padx=6)
+    pick = ttk.Frame(frame)
+    pick.grid(row=2, column=2)
+    ttk.Button(pick, text="…", width=3, command=lambda: maps.set(filedialog.askdirectory() or maps.get())).pack(
+        side="left")
+    # Zips the app's "Exportovat pro převodník" shared, one per game: several at once, separated by ";".
+    ttk.Button(pick, text="zip", width=3, command=lambda: maps.set(
+        ";".join(filedialog.askopenfilenames(filetypes=EXPORT_TYPES)) or maps.get())).pack(side="left")
+    ttk.Label(frame, text="zips from the app's Exportovat pro převodník, or WinPad Wine › fexcache copied off "
+              "the iPad; each game takes its own", foreground="gray").grid(row=3, column=1, sticky="w", padx=6)
 
     fields = {}
     for row, (label, key, kind) in enumerate([("WinPad Wine IPA", "ipa", "open"), ("Write app IPA", "output_ipa", "save"),
@@ -280,12 +390,13 @@ def library_tab(tabs):
     backend = tk.StringVar(value=lib.settings.get("backend") or fexcompile.default_backend())
     ttk.Combobox(frame, textvariable=backend, values=fexcompile.BACKENDS, state="readonly", width=12).grid(
         row=10, column=1, sticky="w", padx=6)
+    install_vars, _ = install_rows(frame, 11, lib.settings)
 
     build_button = ttk.Button(frame, text="Build the app")
-    build_button.grid(row=11, column=2, sticky="e", pady=6)
+    build_button.grid(row=12, column=2, sticky="e", pady=6)
     log = ScrolledText(frame, height=14, font=("TkFixedFont", 10))
-    log.grid(row=12, column=0, columnspan=3, sticky="nsew")
-    frame.rowconfigure(12, weight=1)
+    log.grid(row=13, column=0, columnspan=3, sticky="nsew")
+    frame.rowconfigure(13, weight=1)
 
     def work(folders):
         try:
@@ -306,10 +417,12 @@ def library_tab(tabs):
             lib.settings["sign_identity"] = sign.get().strip()
         else:
             lib.settings.pop("sign_identity", None)
+        apply_install(install_vars, lib.settings)
         lib.save(path)
         log.delete("1.0", "end")
         build_button.state(["disabled"])
-        threading.Thread(target=work, args=([maps.get().strip()] if maps.get().strip() else [],), daemon=True).start()
+        folders = [m.strip() for m in maps.get().split(";") if m.strip()]
+        threading.Thread(target=work, args=(folders,), daemon=True).start()
 
     def pump():
         try:

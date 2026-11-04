@@ -81,7 +81,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Package.h" "$here/Package.c" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
@@ -234,12 +234,47 @@ echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT
 # its winpad.json next to a larger installer, one with only its program, and a
 # folder without one. With libraryTest the app writes what it found to
 # Documents/library.txt, presses right and A, and writes what it would start.
+# A game also comes as one file, a WinPad package (.winpad) WinPad Translator
+# writes: the library unpacks the ones waiting in Documents and in its Inbox
+# (where AirDrop puts them) into game folders first; a broken one stays.
 docs="$data/Documents"
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/library.txt"
-mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty"
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/library.txt" "$docs/broken.winpad" \
+    "$docs/Inbox/Zed Game.winpad"
+mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Inbox"
+packed=$(mktemp -d)
+mkdir -p "$packed/Zed Game/DATA"
+cp "$sim_app/i386-windows/hello.exe" "$packed/Zed Game/PACKED.EXE"
+echo level >"$packed/Zed Game/DATA/level1.dat"
+printf '{"title": "WinPad Packed"}\n' >"$packed/Zed Game/winpad.json"
+python3 "$here/../../tools/winpad-translator/winpad-translator.py" --game "$packed/Zed Game" --work "$packed/work" \
+    --package "$docs/Inbox/Zed Game.winpad" --package-only
+echo "not a zip" >"$docs/broken.winpad"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Test Game/TEST.EXE"
 cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Test Game/SETUP.EXE"
-printf '{"title": "WinPad Test"}\n' >"$docs/Test Game/winpad.json"
+# Its winpad.json has a game profile as WinPad Translator writes one (profiles.py), with the
+# user's own title and DLL override over the profile's; the registry values go into the
+# prefix (32-bit: HKLM\Software through Wow6432Node). The key is new in each run: the prefix
+# stays from run to run, and a value the registry has is kept as it is.
+run_id=$(date +%s)
+cat >"$docs/Test Game/winpad.json" <<'JSON'
+{
+  "title": "WinPad Test",
+  "dllOverrides": {"d3d8": "b"},
+  "profile": {
+    "id": "test", "version": 3, "title": "Profile Title", "notes": [],
+    "settings": {
+      "title": "Profile Title", "exe": "TEST.EXE", "args": ["-window", "x y"],
+      "dllOverrides": {"d3d8": "n,b", "dsound": "n"},
+      "env": {"WINPAD_TEST": "1", "WINEDEBUG": "-all"},
+      "registry": {
+        "HKLM\\Software\\WinPad\\RUNID": {"Resolution": 2, "Name": "WinPad \"1\"", "Blob": {"hex": "00FF"}},
+        "HKCU\\Software\\WinPad\\RUNID": {"Mode": "fullscreen"}
+      }
+    }
+  }
+}
+JSON
+perl -pi -e "s/RUNID/$run_id/g" "$docs/Test Game/winpad.json"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
 echo notes >"$docs/Empty/readme.txt"
 # An image WinPad Translator signed into a game folder: used for this build of the app only.
@@ -247,6 +282,22 @@ cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Plain/fexaot.dylib"
 cp "$sim_app/winpad-build.txt" "$docs/Plain/fexaot.build"
 cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Test Game/fexaot.dylib"
 echo 0123456789abcdef >"$docs/Test Game/fexaot.build"
+# Code maps Test Game wrote in the interpreter (one empty, which does not count), with code it
+# made at run time and the iPad's CPU features: the library exports them as "Exportovat pro
+# převodník" does, to Documents/export-Test Game.zip.
+maps="$docs/fexcache/Test Game/codemap/new"
+rm -rf "$docs/fexcache/Test Game" "$docs/export-Test Game.zip"
+mkdir -p "$maps/runtime"
+PYTHONPATH="$root/tools/winpad-translator" python3 - "$maps/1234.133456789.bin" <<'PY'
+import sys
+from winpad_translator import codemaps
+name = "\\??\\Z:\\private\\var\\mobile\\Containers\\Data\\Application\\X\\Documents\\Test Game\\TEST.EXE"
+with open(sys.argv[1], "wb") as f:
+    f.write(codemaps.image_record(0x1234, name) + codemaps.ENTRY.pack(0x1234, 0x1000))
+PY
+: >"$maps/1234.133456790.bin"
+echo code >"$maps/runtime/rtcode-1.fexrc"
+echo 'AFP=1' >"$maps/hostprobe.txt"
 xcrun simctl launch "$udid" "$bundle" -libraryTest YES
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
@@ -258,12 +309,46 @@ xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
-for expect in 'library: 2 games' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
-    'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none' 'start: game Test Game/TEST.EXE, image none'; do
+for expect in 'library: 3 games' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
+    'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none | profile test v3' \
+    'start: game Test Game/TEST.EXE, image none' 'settings: game profile test v3' \
+    'settings: WINEDLLOVERRIDES=d3d8=b;dinput8=n,b;dsound=n' 'settings: WINPAD_TEST=1' \
+    'settings: skipped environment variable WINEDEBUG (the app sets it)' 'settings: arguments: -window x y' \
+    "settings: registry: \"Resolution\"=dword:00000002 in system.reg [Software\\Wow6432Node\\WinPad\\$run_id]" \
+    'settings: registry: "Name"="WinPad \"1\"" in system.reg' 'settings: registry: "Blob"=hex:00,ff in system.reg' \
+    "settings: registry: \"Mode\"=\"fullscreen\" in user.reg [Software\\WinPad\\$run_id]" \
+    'export: Test Game | 1 maps, 1 new | WinPad-mapy-test-game-' 'export: Test Game after it, 0 new' \
+    'package: Zed Game.winpad -> Zed Game' 'package: broken.winpad -> Není to balíček WinPad' \
+    'library: WinPad Packed | Zed Game/PACKED.EXE | 32bit | image none'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty"
-echo "The game library found the games in Documents and started the one picked with the controller's buttons"
+[ -f "$docs/Zed Game/DATA/level1.dat" ] && [ ! -e "$docs/Inbox/Zed Game.winpad" ] ||
+    { echo "the package was not unpacked into Documents/Zed Game, or is still in the Inbox" >&2; exit 1; }
+# In the prefix as Wine writes keys; the next runs (window.exe) start Wine's server on it.
+grep -qiF "[Software\\\\Wow6432Node\\\\WinPad\\\\$run_id]" "$docs/prefix/system.reg" &&
+    grep -qF '"Resolution"=dword:00000002' "$docs/prefix/system.reg" &&
+    grep -qF '"Mode"="fullscreen"' "$docs/prefix/user.reg" ||
+    { echo "the game profile's registry values are not in the prefix" >&2; exit 1; }
+# WinPad Translator takes the zip as it is: Test Game's map, the run-time code and the CPU features.
+echo "--- the exported zip ---"
+unzip -l "$docs/export-Test Game.zip"
+PYTHONPATH="$root/tools/winpad-translator" python3 - "$docs/export-Test Game.zip" "$out/export-check" <<'PY'
+import os, shutil, sys
+from winpad_translator import codemaps
+zip_path, work = sys.argv[1], sys.argv[2]
+shutil.rmtree(work, ignore_errors=True)
+folders, manifests = codemaps.unpack([zip_path], os.path.join(work, "imports"))
+m = manifests[0]
+assert m.get("kind") == "winpad-codemaps" and codemaps.export_folder(m) == "Test Game" and m.get("maps") == 1, m
+assert m.get("app_build"), m
+assert codemaps.import_maps(folders[0], os.path.join(work, "cache"), "ipad", "Test Game") == 1
+assert os.path.isfile(os.path.join(work, "cache", "codemap", "new", "runtime", "rtcode-1.fexrc"))
+assert codemaps.host_probe(folders[0]) == "AFP=1"
+print("WinPad Translator took the export:", m)
+PY
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/broken.winpad" "$packed" \
+    "$docs/fexcache/Test Game" "$docs/export-Test Game.zip" "$out/export-check"
+echo "The game library found the games in Documents, unpacked a .winpad package, applied a game profile, exported a game's code maps for WinPad Translator and started the one picked with the controller's buttons"
 [ -n "$sim_window_aot" ] || exit 0
 
 # window.exe, picked by the "program" setting, given here as a launch argument

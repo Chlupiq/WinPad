@@ -624,6 +624,194 @@ static NSString* MakePrefix(NSString* bundle) {
   return prefix;
 }
 
+// A game's settings from its winpad.json (WinPadGameSettings in Library.m: a game profile
+// of WinPad Translator, with the user's own keys over it).
+
+// A registry key or value name as Wine's *.reg files write it: \ and " escaped.
+static NSString* RegEscape(NSString* text) {
+  return [[text stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+      stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+}
+
+// "name"=data for value V: text (printable ASCII as it is, else REG_SZ as UTF-16 bytes), a
+// number (REG_DWORD) or {"hex": "00ff"} (REG_BINARY); nil for anything else.
+static NSString* RegValueLine(NSString* name, id v) {
+  NSString* lhs = name.length ? [NSString stringWithFormat:@"\"%@\"", RegEscape(name)] : @"@";
+  if ([v isKindOfClass:NSString.class]) {
+    NSString* text = v;
+    BOOL plain = YES;
+    for (NSUInteger i = 0; i < text.length && plain; i++) {
+      const unichar c = [text characterAtIndex:i];
+      plain = c >= 0x20 && c < 0x7f;
+    }
+    if (plain) return [NSString stringWithFormat:@"%@=\"%@\"", lhs, RegEscape(text)];
+    NSMutableString* hex = [NSMutableString stringWithString:@"hex(1):"];
+    for (NSUInteger i = 0; i <= text.length; i++) {
+      const unichar c = i < text.length ? [text characterAtIndex:i] : 0;
+      [hex appendFormat:@"%s%02x,%02x", i ? "," : "", c & 0xff, c >> 8];
+    }
+    return [NSString stringWithFormat:@"%@=%@", lhs, hex];
+  }
+  if ([v isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)v) != CFBooleanGetTypeID()) {
+    const long long n = [v longLongValue];
+    if (n < 0 || n > 0xffffffffLL) return nil;
+    return [NSString stringWithFormat:@"%@=dword:%08llx", lhs, n];
+  }
+  NSString* bytes = [v isKindOfClass:NSDictionary.class] ? v[@"hex"] : nil;
+  if ([bytes isKindOfClass:NSString.class] && bytes.length % 2 == 0) {
+    NSMutableArray* pairs = [NSMutableArray new];
+    for (NSUInteger i = 0; i < bytes.length; i += 2) {
+      NSString* pair = [bytes substringWithRange:NSMakeRange(i, 2)].lowercaseString;
+      if ([pair rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"].invertedSet]
+              .location != NSNotFound)
+        return nil;
+      [pairs addObject:pair];
+    }
+    return [NSString stringWithFormat:@"%@=hex:%@", lhs, [pairs componentsJoinedByString:@","]];
+  }
+  return nil;
+}
+
+// Puts REGISTRY's values ({"HKLM\Software\...": {"name": value}}) into the prefix's
+// system.reg (HKLM) and user.reg (HKCU) where the key does not have them yet, so a game
+// that changes one (its resolution...) keeps its own. Wine reads a key that is in the file
+// twice as one; its server writes the file anew when it saves. A 32-bit game sees
+// HKLM\Software through Wow6432Node. Returns what it did, for the log.
+static NSArray<NSString*>* AddRegistryDefaults(NSString* prefix, NSDictionary* registry, BOOL wow64) {
+  NSMutableArray<NSString*>* said = [NSMutableArray new];
+  if (![registry isKindOfClass:NSDictionary.class]) return said;
+  const long stamp = (long)NSDate.date.timeIntervalSince1970;
+  NSMutableDictionary<NSString*, NSMutableString*>* added = [NSMutableDictionary new];
+  NSMutableDictionary<NSString*, NSString*>* files = [NSMutableDictionary new];
+  for (NSString* full in [registry.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+    NSDictionary* values = registry[full];
+    const NSRange slash = [full rangeOfString:@"\\"];
+    if (![values isKindOfClass:NSDictionary.class] || slash.location == NSNotFound ||
+        [full rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"[]\"\n"]].location != NSNotFound) {
+      [said addObject:[NSString stringWithFormat:@"registry: skipped key %@", full]];
+      continue;
+    }
+    NSString* root = [full substringToIndex:slash.location].uppercaseString;
+    NSString* path = [full substringFromIndex:slash.location + 1];
+    NSString* file;
+    if ([@[ @"HKLM", @"HKEY_LOCAL_MACHINE" ] containsObject:root]) {
+      file = @"system.reg";
+      NSString* lower = path.lowercaseString;
+      if (wow64 && [lower hasPrefix:@"software\\"] && ![lower containsString:@"wow6432node"]) {
+        path = [lower hasPrefix:@"software\\classes\\"]
+                   ? [@"Software\\Classes\\Wow6432Node\\" stringByAppendingString:[path substringFromIndex:17]]
+                   : [@"Software\\Wow6432Node\\" stringByAppendingString:[path substringFromIndex:9]];
+      }
+    } else if ([@[ @"HKCU", @"HKEY_CURRENT_USER" ] containsObject:root]) {
+      file = @"user.reg";
+    } else {
+      [said addObject:[NSString stringWithFormat:@"registry: skipped key %@ (only HKLM and HKCU)", full]];
+      continue;
+    }
+    if (!files[file])
+      files[file] = [NSString stringWithContentsOfFile:[prefix stringByAppendingPathComponent:file]
+                                              encoding:NSUTF8StringEncoding
+                                                 error:nil] ?: @"";
+    // The key's section in the file, if it is there: from its [line] to the next one.
+    NSString* header = [NSString stringWithFormat:@"[%@]", RegEscape(path)].lowercaseString;
+    NSMutableSet<NSString*>* have = [NSMutableSet new];
+    BOOL inside = NO;
+    for (NSString* line in [files[file] componentsSeparatedByString:@"\n"]) {
+      NSString* l = line.lowercaseString;
+      if ([l hasPrefix:@"["]) inside = [l isEqualToString:header] || [l hasPrefix:[header stringByAppendingString:@" "]];
+      else if (inside) {
+        const NSRange eq = [l rangeOfString:@"\"="];
+        if ([l hasPrefix:@"@="]) [have addObject:@"@"];
+        else if ([l hasPrefix:@"\""] && eq.location != NSNotFound) [have addObject:[l substringToIndex:eq.location + 1]];
+      }
+    }
+    NSMutableString* lines = [NSMutableString new];
+    for (NSString* name in [values.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+      NSString* line = RegValueLine(name, values[name]);
+      NSString* key = name.length ? [NSString stringWithFormat:@"\"%@\"", RegEscape(name)].lowercaseString : @"@";
+      if (!line) {
+        [said addObject:[NSString stringWithFormat:@"registry: skipped %@\\%@ (not text, a number or hex)", full, name]];
+      } else if ([have containsObject:key]) {
+        [said addObject:[NSString stringWithFormat:@"registry: %@\\%@ kept as it is", full, name]];
+      } else {
+        [lines appendFormat:@"%@\n", line];
+        [said addObject:[NSString stringWithFormat:@"registry: %@ in %@ [%@]", line, file, path]];
+      }
+    }
+    if (!lines.length) continue;
+    if (!added[file]) added[file] = [NSMutableString new];
+    [added[file] appendFormat:@"\n[%@] %ld\n%@", RegEscape(path), stamp, lines];
+  }
+  for (NSString* file in added) {
+    NSString* text = files[file];
+    if (!text.length) {
+      // A new prefix's user.reg, before Wine's server first wrote it.
+      text = [file isEqualToString:@"user.reg"]
+                 ? @"WINE REGISTRY Version 2\n;; All keys relative to \\\\User\\\\S-1-5-21-0-0-0-1000\n\n#arch=win64\n"
+                 : @"WINE REGISTRY Version 2\n;; All keys relative to \\\\Machine\n\n#arch=win64\n";
+    }
+    if (![text hasSuffix:@"\n"]) text = [text stringByAppendingString:@"\n"];
+    NSError* error = nil;
+    if (![[text stringByAppendingString:added[file]] writeToFile:[prefix stringByAppendingPathComponent:file]
+                                                      atomically:YES
+                                                        encoding:NSUTF8StringEncoding
+                                                           error:&error])
+      [said addObject:[NSString stringWithFormat:@"registry: writing %@ failed: %@", file, error.localizedDescription]];
+  }
+  return said;
+}
+
+// Applies GAME's settings to the run about to start: WINEDLLOVERRIDES (after the app's own
+// dinput8=n,b, for the Ultimate ASI Loader many games carry), the environment (not the
+// variables the app sets itself), the program's arguments (into ARGS) and the registry's
+// values. Returns what it did, for the log.
+static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix, NSMutableArray<NSString*>* args) {
+  NSMutableArray<NSString*>* said = [NSMutableArray new];
+  NSDictionary* s = game.settings ?: @{};
+  if (game.profile) [said addObject:[NSString stringWithFormat:@"game profile %@", game.profile]];
+  NSMutableDictionary* dlls = [@{@"dinput8" : @"n,b"} mutableCopy];
+  NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
+  NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
+  if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {
+    for (NSString* dll in s[@"dllOverrides"]) {
+      id order = s[@"dllOverrides"][dll];
+      if (![dll isKindOfClass:NSString.class] || !dll.length || [dll rangeOfCharacterFromSet:bad_dll].location != NSNotFound ||
+          ![order isKindOfClass:NSString.class] || [order rangeOfCharacterFromSet:bad_order].location != NSNotFound) {
+        [said addObject:[NSString stringWithFormat:@"skipped DLL override %@", dll]];
+        continue;
+      }
+      dlls[dll.lowercaseString] = [order stringByReplacingOccurrencesOfString:@" " withString:@""];
+    }
+  }
+  NSMutableArray* parts = [NSMutableArray new];
+  for (NSString* dll in [dlls.allKeys sortedArrayUsingSelector:@selector(compare:)])
+    [parts addObject:[NSString stringWithFormat:@"%@=%@", dll, dlls[dll]]];
+  NSString* overrides = [parts componentsJoinedByString:@";"];
+  setenv("WINEDLLOVERRIDES", overrides.UTF8String, 1);
+  [said addObject:[@"WINEDLLOVERRIDES=" stringByAppendingString:overrides]];
+  if ([s[@"env"] isKindOfClass:NSDictionary.class]) {
+    for (NSString* name in [[s[@"env"] allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+      id value = s[@"env"][name];
+      const BOOL own = [name hasPrefix:@"WINE"] || [name hasPrefix:@"FEX_"] || [name hasPrefix:@"DYLD_"] ||
+                       [@[ @"HOME", @"TMPDIR", @"MADEIRA_WOW_MIN_FREE_GB", @"MADEIRA_WIN32U", @"MADEIRA_DESKTOP" ]
+                           containsObject:name];
+      if (own || ![value isKindOfClass:NSString.class] || !name.length || [name containsString:@"="]) {
+        [said addObject:[NSString stringWithFormat:@"skipped environment variable %@ (the app sets it)", name]];
+        continue;
+      }
+      setenv(name.UTF8String, [value UTF8String], 1);
+      [said addObject:[NSString stringWithFormat:@"%@=%@", name, value]];
+    }
+  }
+  if ([s[@"args"] isKindOfClass:NSArray.class]) {
+    for (id arg in s[@"args"])
+      if ([arg isKindOfClass:NSString.class]) [args addObject:arg];
+    if (args.count) [said addObject:[@"arguments: " stringByAppendingString:[args componentsJoinedByString:@" "]]];
+  }
+  [said addObjectsFromArray:AddRegistryDefaults(prefix, s[@"registry"], [game.arch isEqualToString:@"32bit"])];
+  return said;
+}
+
 @interface WineViewController : UIViewController
 @property(nonatomic, strong) UITextView* text;
 @property(nonatomic, strong) NSTimer* timer;
@@ -870,11 +1058,14 @@ static CFTimeInterval fps_shown;
   setenv("WINEHOST_RETURN", "1", 1);
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
+  NSMutableArray<NSString*>* game_args = [NSMutableArray new];
   if (game) {
     NSString* exe = self.game ? self.game.exe : [NSUserDefaults.standardUserDefaults stringForKey:@"game"];
     program = DocumentsPath(exe.length ? exe : @"NFSU2/SPEED2.EXE");
-    // The Ultimate ASI Loader many games carry is a dinput8.dll of their own.
-    setenv("WINEDLLOVERRIDES", "dinput8=n,b", 1);
+    // The Ultimate ASI Loader many games carry is a dinput8.dll of their own; the game's
+    // winpad.json (its profile) may add more.
+    for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))
+      printf("WinPad Wine: %s\n", line.UTF8String);
   }
   // The game has an AOT image only where game-aot.sh put one into the
   // project on the Mac it was built on; without it the game runs with the JIT.
@@ -940,8 +1131,13 @@ static CFTimeInterval fps_shown;
   }
   // The cube spins for 8 s, exits with 43 and says how many frames it presented;
   // a game runs until it ends (a day at most).
-  char* args[] = {"winehost", game ? "86400" : "60", (char*)program.fileSystemRepresentation, NULL};
-  const int status = winehost_main(3, args);
+  // winehost passes what follows the program on to it (at most 60 arguments).
+  char* args[64] = {"winehost", game ? "86400" : "60", (char*)program.fileSystemRepresentation};
+  int argc = 3;
+  for (NSString* arg in game_args)
+    if (argc < 63) args[argc++] = strdup(arg.UTF8String);
+  args[argc] = NULL;
+  const int status = winehost_main(argc, args);
   NSString* log = ReadLog();
   const BOOL ok = cube   ? [log containsString:@"MADEIRA-D3D9: done, frames presented = "] &&
                              [log containsString:@"winehost: Wine process exited with code 43"]
@@ -987,8 +1183,14 @@ static CFTimeInterval fps_shown;
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
       NSString* path = DocumentsPath(@"library.txt");
       NSString* report = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
-      report = [report stringByAppendingFormat:@"start: %@ %@, image %@\n%@\n", program, game.exe ?: @"-",
-                                               game.image.lastPathComponent ?: @"none", FinishedMarker];
+      report = [report stringByAppendingFormat:@"start: %@ %@, image %@\n", program, game.exe ?: @"-",
+                                               game.image.lastPathComponent ?: @"none"];
+      // What the game would be started with (its winpad.json): the registry values go into the
+      // prefix for real, so that the runs after this one load them.
+      NSMutableArray<NSString*>* game_args = [NSMutableArray new];
+      for (NSString* line in ApplyGameSettings(game, MakePrefix(NSBundle.mainBundle.bundlePath), game_args))
+        report = [report stringByAppendingFormat:@"settings: %@\n", line];
+      report = [report stringByAppendingFormat:@"%@\n", FinishedMarker];
       [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
       return;
     }
@@ -999,6 +1201,33 @@ static CFTimeInterval fps_shown;
   };
   self.window.rootViewController = library;
   [self.window makeKeyAndVisible];
+  // Started by opening a WinPad package (.winpad) from AirDrop or Files.
+  [self scene:scene openURLContexts:options.URLContexts];
+}
+
+// A WinPad package (.winpad, Info.plist's document type) opened from AirDrop, Files or a
+// share sheet: the library unpacks it into a game folder. While a game runs, the package
+// waits in Documents for the library's next start.
+- (void)scene:(UIScene*)scene openURLContexts:(NSSet<UIOpenURLContext*>*)contexts {
+  NSMutableArray<NSURL*>* urls = [NSMutableArray new];
+  for (UIOpenURLContext* context in contexts)
+    if (context.URL.isFileURL && [context.URL.pathExtension.lowercaseString isEqualToString:@"winpad"])
+      [urls addObject:context.URL];
+  if (!urls.count) return;
+  UIViewController* root = self.window.rootViewController;
+  if ([root isKindOfClass:LibraryViewController.class]) {
+    [(LibraryViewController*)root openPackages:urls];
+    return;
+  }
+  NSString* docs = DocumentsPath(@"");
+  for (NSURL* url in urls) {
+    if ([url.path.stringByResolvingSymlinksInPath hasPrefix:docs.stringByResolvingSymlinksInPath]) continue;
+    const BOOL scoped = [url startAccessingSecurityScopedResource];
+    [NSFileManager.defaultManager copyItemAtPath:url.path
+                                          toPath:[docs stringByAppendingPathComponent:url.lastPathComponent]
+                                           error:nil];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+  }
 }
 @end
 
