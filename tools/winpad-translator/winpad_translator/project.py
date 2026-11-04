@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import codemaps, compile as fexcompile, ipa as ipamod, link, paths
+from . import codemaps, compile as fexcompile, ipa as ipamod, link, paths, profiles
 
 SETTINGS = "winpad-translator.json"
 
@@ -62,6 +62,9 @@ class Project:
     # and put it into the game folder as fexaot.dylib, which the app loads from there, so
     # the app need not be installed again for it.
     sign_identity: str = ""
+    # The game profile put into the game folder's winpad.json (profiles.py): "auto" (or empty)
+    # finds it by the game's files or Steam app, "none" takes it out, else a profile's id.
+    profile: str = "auto"
 
     def folder_name(self):
         return os.path.basename(os.path.normpath(self.game_dir))
@@ -108,13 +111,13 @@ def default_work_dir(game_dir):
 
 
 def program_from_settings(game_dir):
-    """winpad.json's "exe" in the game folder (the app's game library reads it too)."""
+    """winpad.json's "exe" in the game folder, the user's or its profile's (the app's game
+    library reads it too)."""
     try:
-        with open(os.path.join(game_dir, "winpad.json")) as f:
-            exe = json.load(f).get("exe")
-    except (OSError, ValueError, AttributeError):
+        exe = profiles.effective(profiles.read_winpad_json(game_dir)).get("exe")
+    except (OSError, profiles.ProfileError):
         return None
-    return codemaps.find_ci(game_dir, exe) if exe else None
+    return codemaps.find_ci(game_dir, exe) if isinstance(exe, str) and exe else None
 
 
 class TranslateError(Exception):
@@ -122,7 +125,8 @@ class TranslateError(Exception):
 
 
 # What goes wrong for a reason the message says (no traceback needed).
-KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, OSError)
+KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, profiles.ProfileError,
+                OSError)
 
 
 def _script(module, argv, log):
@@ -154,6 +158,7 @@ def run(p, log=print):
     os.makedirs(new, exist_ok=True)
     p.save()
     log(f"=== {p.folder_name()}: image {p.image_name()}, work folder {p.work_dir}, compiler backend {p.backend}")
+    profiles.apply(p.game_dir, p.profile, log=log)
 
     system_dir = p.system_dir
     if p.ipa and not system_dir:
