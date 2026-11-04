@@ -922,15 +922,19 @@ jobs:
       - name: Install tools
         shell: bash
         run: |
-          python -m pip install -q xxhash pefile capstone
+          python -m pip install -q xxhash pefile capstone pynacl cryptography
           case "$RUNNER_OS" in
             Linux) sudo apt-get update -q && sudo apt-get install -y -q clang-18 lld-18 ;;
             macOS) brew install lld ;;
           esac
-      - name: Unit tests (code maps from an iPad, the IPA, linking the image with LLVM and no Xcode, a whole run)
+          # rcodesign, which signs the IPA off a Mac (and in the cloud signing job).
+          python tools/winpad-translator/fetch-rcodesign.py "$RUNNER_TEMP/rcodesign"
+          echo "$RUNNER_TEMP/rcodesign" >>"$GITHUB_PATH"
+      - name: Unit tests (code maps from an iPad, the IPA, linking the image with LLVM and no Xcode, a whole run, signing and installing)
         shell: bash
         env:
           WINPAD_REQUIRE_LLVM: 1
+          WINPAD_REQUIRE_SIGNING: 1
         run: python -m unittest discover -s tools/winpad-translator/tests -v
 
   winpad-translator-app:
@@ -954,12 +958,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install tools
-        run: python -m pip install -q xxhash pefile capstone pyinstaller
+        run: python -m pip install -q xxhash pefile capstone pyinstaller pynacl cryptography
       - name: WinPad Translator's toolkit (wine-loader job)
         uses: actions/download-artifact@v4
         with:
           name: WinPadTranslator-toolkit
           path: ${{ runner.temp }}/toolkit
+      - name: rcodesign into the toolkit (signing without a Mac)
+        shell: bash
+        run: python tools/winpad-translator/fetch-rcodesign.py "$RUNNER_TEMP/toolkit"
       - name: The app, packed with PyInstaller
         shell: bash
         run: python tools/winpad-translator/package.py "$RUNNER_TEMP/dist" "$RUNNER_TEMP/toolkit"
@@ -972,6 +979,10 @@ jobs:
           esac
           "$app" --version
           "$app" --help | grep -q -- --ipad-maps
+          "$app" --help | grep -q -- --cloud-sign
+          # Signing without a Mac: a certificate request, made by the packed app itself.
+          HOME=$RUNNER_TEMP/home USERPROFILE=$RUNNER_TEMP/home "$app" --cert-request me@example.com
+          test -s "$RUNNER_TEMP/home/WinPadTranslator/certificate/winpad.certSigningRequest"
       - name: Upload the app
         uses: actions/upload-artifact@v4
         with:

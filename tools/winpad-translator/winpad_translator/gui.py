@@ -1,6 +1,7 @@
 """The window of WinPad Translator (Tk, so the same code runs on macOS and Windows)."""
 import os
 import queue
+import sys
 import threading
 import traceback
 
@@ -107,6 +108,8 @@ def main():
               "from the game folder, no new install", foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
     row += 1
 
+    install_vars, row = install_rows(frame, row, p)
+
     ttk.Label(frame, text="Compiler runs").grid(row=row, column=0, sticky="w", pady=2)
     backend = tk.StringVar(value=fexcompile.default_backend())
     ttk.Combobox(frame, textvariable=backend, values=fexcompile.BACKENDS, state="readonly", width=12).grid(
@@ -148,6 +151,7 @@ def main():
         p.discover, p.half_barrier, p.rebuild = discover.get(), half.get(), rebuild.get()
         p.backend = backend.get()
         p.simulator_image = bool(p.xcode_project)
+        apply_install(install_vars, p)
 
     def work():
         try:
@@ -192,6 +196,9 @@ def main():
             else:
                 var.set(value)
         backend.set(loaded.backend or backend.get())
+        for key, var in install_vars.items():
+            if key != "p12_password":
+                var.set(getattr(loaded, key))
 
     entries["game_dir"].trace_add("write", lambda *_: load_settings(entries["game_dir"].get())
                                   if os.path.isdir(entries["game_dir"].get()) else None)
@@ -199,6 +206,59 @@ def main():
     pump()
     root.mainloop()
     return 0
+
+
+INSTALL_HINT = ("Mac: Xcode's Apple ID (with the Xcode project, Xcode builds it for your team). Windows: your "
+                "certificate (.p12) and profile, or a private GitHub repository that signs it")
+
+
+def install_rows(frame, row, values):
+    """The sign-and-install settings (install.py) from row ROW on; VALUES: a dict or object with
+    the install_* keys. Returns ({key: var}, the next row)."""
+    import tkinter as tk
+    from tkinter import filedialog, ttk
+
+    get = values.get if isinstance(values, dict) else (lambda k, d=None: getattr(values, k, d))
+    box = ttk.LabelFrame(frame, text="Sign and install on the iPad", padding=6)
+    box.grid(row=row, column=0, columnspan=3, sticky="ew", pady=4)
+    box.columnconfigure(1, weight=1)
+    v = {"install": tk.BooleanVar(value=bool(get("install", False)))}
+    ttk.Checkbutton(box, text="After translating, sign the app and install it (iPad on cable or the same Wi-Fi)",
+                    variable=v["install"]).grid(row=0, column=0, columnspan=3, sticky="w")
+    ttk.Label(box, text=INSTALL_HINT, foreground="gray", wraplength=640).grid(row=1, column=0, columnspan=3, sticky="w")
+    fields = [("Certificate (.p12)", "install_p12", [("Certificate", "*.p12")]), ("Password", "p12_password", None),
+              ("Profile", "install_profile", [("Profile", "*.mobileprovision")]),
+              ("GitHub repo (cloud)", "cloud_repo", None), ("iPad", "install_device", None)]
+    if sys.platform == "darwin":
+        fields = [("iPad", "install_device", None), ("Certificate (.p12)", "install_p12", [("Certificate", "*.p12")]),
+                  ("Password", "p12_password", None), ("Profile", "install_profile", [("Profile", "*.mobileprovision")])]
+    for i, (label, key, kind) in enumerate(fields, start=2):
+        ttk.Label(box, text=label).grid(row=i, column=0, sticky="w")
+        var = tk.StringVar(value=os.environ.get("WINPAD_P12_PASSWORD", "") if key == "p12_password" else get(key, "") or "")
+        ttk.Entry(box, textvariable=var, show="•" if key == "p12_password" else "").grid(row=i, column=1, sticky="ew", padx=6)
+        if kind:
+            ttk.Button(box, text="…", width=3, command=lambda var=var, kind=kind: var.set(
+                filedialog.askopenfilename(filetypes=kind) or var.get())).grid(row=i, column=2)
+        v[key] = var
+    return v, row + 1
+
+
+def apply_install(v, target):
+    """Puts the install_rows values into TARGET (a Project or a library's settings dict)."""
+    for key, var in v.items():
+        value = var.get()
+        if key == "p12_password":
+            if value:
+                os.environ["WINPAD_P12_PASSWORD"] = value
+            continue
+        value = value.strip() if isinstance(value, str) else value
+        if isinstance(target, dict):
+            if value:
+                target[key] = value
+            else:
+                target.pop(key, None)
+        else:
+            setattr(target, key, value)
 
 
 def library_tab(tabs):
@@ -280,12 +340,13 @@ def library_tab(tabs):
     backend = tk.StringVar(value=lib.settings.get("backend") or fexcompile.default_backend())
     ttk.Combobox(frame, textvariable=backend, values=fexcompile.BACKENDS, state="readonly", width=12).grid(
         row=10, column=1, sticky="w", padx=6)
+    install_vars, _ = install_rows(frame, 11, lib.settings)
 
     build_button = ttk.Button(frame, text="Build the app")
-    build_button.grid(row=11, column=2, sticky="e", pady=6)
+    build_button.grid(row=12, column=2, sticky="e", pady=6)
     log = ScrolledText(frame, height=14, font=("TkFixedFont", 10))
-    log.grid(row=12, column=0, columnspan=3, sticky="nsew")
-    frame.rowconfigure(12, weight=1)
+    log.grid(row=13, column=0, columnspan=3, sticky="nsew")
+    frame.rowconfigure(13, weight=1)
 
     def work(folders):
         try:
@@ -306,6 +367,7 @@ def library_tab(tabs):
             lib.settings["sign_identity"] = sign.get().strip()
         else:
             lib.settings.pop("sign_identity", None)
+        apply_install(install_vars, lib.settings)
         lib.save(path)
         log.delete("1.0", "end")
         build_button.state(["disabled"])
