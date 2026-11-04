@@ -98,6 +98,11 @@ def library_main(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    # A Windows console's code page (cp1252...) lacks letters of the profiles' Czech notes:
+    # print what it can instead of failing.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     if not argv:
         from . import gui
         return gui.main()
