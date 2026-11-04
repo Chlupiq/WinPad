@@ -21,6 +21,12 @@
 
 NSArray<WinPadGame*>* WinPadFindGames(void);
 
+// Unpacks the WinPad package (.winpad) at PATH into Documents/<its folder>, calling
+// PROGRESS (0..1, on this thread) as it goes. Returns the folder, or nil with why in *ERROR.
+NSString* WinPadInstallPackage(NSString* path, void (^progress)(double), NSString** error);
+// The packages waiting in Documents or Documents/Inbox (copied in, or handed over by AirDrop).
+NSArray<NSURL*>* WinPadWaitingPackages(void);
+
 // The inputs of a game controller that become keys (main.m's Gamepads), in the order the
 // settings list them.
 enum { PadUp, PadDown, PadLeft, PadRight, PadA, PadB, PadX, PadY, PadL1, PadR1, PadL2, PadR2, PadMenu, PadOptions,
@@ -32,4 +38,7 @@ void WinPadPadKeys(unsigned short keys[PadCount]);
 @interface LibraryViewController : UIViewController
 // Runs a program: "game" with the game picked, or a test program (hello, window) with nil.
 @property(nonatomic, copy) void (^start)(NSString* program, WinPadGame* game);
+// Installs the packages at URLS (opened from AirDrop, Files or a share sheet) and the ones
+// waiting in Documents, then shows the game.
+- (void)openPackages:(NSArray<NSURL*>*)urls;
 @end
