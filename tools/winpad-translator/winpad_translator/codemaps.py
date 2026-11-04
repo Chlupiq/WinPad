@@ -21,7 +21,9 @@ ENTRY, LIBRARY, SET_MAIN, parse = codemap.ENTRY, codemap.LIBRARY, codemap.SET_MA
 HALF_BARRIER = codemap.HALF_BARRIER
 
 IPAD_DOCUMENTS = re.compile(
-    r"^\\\?\?\\Z:\\(?:private\\)?var\\mobile\\Containers\\Data\\Application\\[^\\]+\\Documents\\([^\\]+)\\(.+)$",
+    # On the iPad /var/mobile/Containers/..., in an iPad simulator on a Mac (record.py)
+    # /Users/NAME/Library/Developer/CoreSimulator/Devices/UDID/data/Containers/...
+    r"^\\\?\?\\Z:\\(?:private\\)?(?:var\\mobile|.+?\\data)\\Containers\\Data\\Application\\[^\\]+\\Documents\\([^\\]+)\\(.+)$",
     re.IGNORECASE)
 SYSTEM_PATH = re.compile(r"\\windows\\(?:syswow64|system32)\\|\\i386-windows\\", re.IGNORECASE)
 

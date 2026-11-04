@@ -54,6 +54,13 @@ def parser():
                     help="the package holds only the game's settings, cover and signed image, not its files")
     ap.add_argument("--package-only", action="store_true",
                     help="only write the --package of the game folder as it is, translate nothing")
+    rec = ap.add_argument_group("play and record: the game runs here and its code is recorded (record.py)")
+    rec.add_argument("--record", action="store_true",
+                     help="start the game and record the code it runs while you play, then translate with it: "
+                     "Windows under DynamoRIO (downloaded the first time), a Mac in an iPad simulator "
+                     "(needs --xcode-project)")
+    rec.add_argument("--record-only", action="store_true", help="only record (the next translation takes it)")
+    rec.add_argument("--dynamorio", help="Windows: DynamoRIO's folder (default: found, else downloaded)")
     prof = ap.add_argument_group("game profiles: settings a known game needs, put into its winpad.json")
     prof.add_argument("--profile", metavar="ID",
                       help="auto: find the game's profile by its files or Steam app (default); none: take it out; "
@@ -102,12 +109,12 @@ def parser():
     return ap
 
 
-PATH_KEYS = ("winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project", "package", "install_p12",
+PATH_KEYS = ("dynamorio", "winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project", "package", "install_p12",
              "install_profile", "cert_p12")
 # Arguments that are not settings of a game.
 NOT_SETTINGS = ("settings", "library", "add_game", "remove_game", "list_games", "build", "p12_password",
                 "github_token", "cloud_setup", "cert_request", "cert_p12", "package_dir", "package_only",
-                "list_profiles", "profile_only")
+                "list_profiles", "profile_only", "record", "record_only")
 
 
 def certificate_main(args):
@@ -225,6 +232,13 @@ def main(argv=None):
                 raise project.TranslateError(f"no game folder: {p.game_dir}")
             profiles.apply(p.game_dir, p.profile)
             return 0
+        if args.record or args.record_only:
+            from . import record
+            record.record(p)
+            if args.record_only:
+                p.save()
+                print(f"recorded; translate with --settings {os.path.join(p.work_dir, project.SETTINGS)}")
+                return 0
         if args.package_only:
             if not p.package:
                 raise project.TranslateError("--package-only needs --package FILE")

@@ -346,8 +346,38 @@ assert os.path.isfile(os.path.join(work, "cache", "codemap", "new", "runtime", "
 assert codemaps.host_probe(folders[0]) == "AFP=1"
 print("WinPad Translator took the export:", m)
 PY
+# WinPad Translator's "Play and record" on a Mac (record.py): -recordGame FOLDER starts that game
+# at once with FEX's JIT, not the image its folder has, and FEX writes the blocks it compiles to
+# Documents/fexcache/FOLDER/codemap/new; no hostprobe.txt (those would be this Mac's features).
+rec_maps="$docs/fexcache/Plain/codemap/new"
+rm -rf "$docs/fexcache/Plain" "$log"
+xcrun simctl launch --terminate-running-process "$udid" "$bundle" -recordGame Plain
+for _ in $(seq 150); do
+    grep -q '== finished' "$log" 2>/dev/null && break
+    sleep 1
+done
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+cp "$log" "$out/wine-record.log" 2>/dev/null || true
+echo "--- the app's log, recording Plain ---"
+tail -n 40 "$log" || true
+for expect in 'WinPad Wine: recording the game'"'"'s code maps with the JIT' 'AOT image none (JIT)' 'Hello from x86' \
+    '== finished, exit 0'; do
+    grep -qF "$expect" "$log" || { echo "missing in the app's log (recording): $expect" >&2; exit 1; }
+done
+[ ! -e "$rec_maps/hostprobe.txt" ] || { echo "the recording wrote the Mac's CPU features" >&2; exit 1; }
+PYTHONPATH="$root/tools/winpad-translator" python3 - "$rec_maps" <<'PY'
+import sys
+from winpad_translator import codemaps
+maps = codemaps.map_files(sys.argv[1])
+assert maps, f"no code map in {sys.argv[1]}"
+names, blocks, main_id = codemaps.summary(maps)
+# The game's path is the simulator app's Documents/Plain: WinPad Translator finds it in the game folder.
+assert codemaps.ipad_folders(names.values()) == ["Plain"], names
+assert main_id in names and names[main_id].upper().endswith("\\PLAIN\\GAME.EXE"), names
+print(f"recorded {len(maps)} code maps, {sum(len(b) for b in blocks.values())} blocks:", sorted(set(names.values()))[:8])
+PY
 rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/broken.winpad" "$packed" \
-    "$docs/fexcache/Test Game" "$docs/export-Test Game.zip" "$out/export-check"
+    "$docs/fexcache/Test Game" "$docs/fexcache/Plain" "$docs/export-Test Game.zip" "$out/export-check"
 echo "The game library found the games in Documents, unpacked a .winpad package, applied a game profile, exported a game's code maps for WinPad Translator and started the one picked with the controller's buttons"
 [ -n "$sim_window_aot" ] || exit 0
 

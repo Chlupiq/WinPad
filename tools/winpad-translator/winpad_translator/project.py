@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import codemaps, compile as fexcompile, install as installmod, ipa as ipamod, link, package as packagemod, paths, profiles
+from . import codemaps, compile as fexcompile, record as recordmod, install as installmod, ipa as ipamod, link, package as packagemod, paths, profiles
 
 SETTINGS = "winpad-translator.json"
 
@@ -84,6 +84,8 @@ class Project:
     install_bundle_id: str = ""
     # Only sign (a signed IPA to install by other means), do not install.
     sign_only: bool = False
+    # Windows: DynamoRIO's folder for recording (record.py); empty: found or downloaded.
+    dynamorio: str = ""
 
     def folder_name(self):
         return os.path.basename(os.path.normpath(self.game_dir))
@@ -145,7 +147,7 @@ class TranslateError(Exception):
 
 # What goes wrong for a reason the message says (no traceback needed).
 KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, packagemod.PackageError,
-                profiles.ProfileError, installmod.InstallError, installmod.signipa.SignError, OSError)
+                profiles.ProfileError, installmod.InstallError, recordmod.RecordError, installmod.signipa.SignError, OSError)
 
 
 def _script(module, argv, log):
@@ -247,12 +249,13 @@ def run(p, log=print):
     if (p.drcov_logs or p.discover) and not exe:
         raise TranslateError("which .exe is the game? (no code map names it; set exe or winpad.json)")
     if p.drcov_logs or p.discover:
-        import drcov2codemap
         import discover
         seed = _seed_map(new, exe, backend, maps)
         if p.drcov_logs:
-            log(f"=== blocks of {os.path.basename(exe)} from {len(p.drcov_logs)} drcov logs")
-            _script(drcov2codemap, [exe, seed, os.path.join(new, "drcov.bin")] + list(p.drcov_logs), log)
+            # The .exe's blocks, and those of the game's own DLLs the logs saw (record.py).
+            from . import record
+            if not record.drcov_to_maps(p.drcov_logs, exe, p.game_dir, new, backend.image_name, seed, log):
+                raise TranslateError("none of the drcov logs saw the game's .exe or its DLLs")
         if p.discover:
             log(f"=== static code discovery in {os.path.basename(exe)}")
             _script(discover, [exe, seed, os.path.join(new, "discover.bin")], log)
