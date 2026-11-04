@@ -3,7 +3,7 @@ import argparse
 import os
 import sys
 
-from . import __version__, compile as fexcompile, library, project
+from . import __version__, compile as fexcompile, library, profiles, project
 
 
 def parser():
@@ -54,6 +54,13 @@ def parser():
                     help="the package holds only the game's settings, cover and signed image, not its files")
     ap.add_argument("--package-only", action="store_true",
                     help="only write the --package of the game folder as it is, translate nothing")
+    prof = ap.add_argument_group("game profiles: settings a known game needs, put into its winpad.json")
+    prof.add_argument("--profile", metavar="ID",
+                      help="auto: find the game's profile by its files or Steam app (default); none: take it out; "
+                      "or a profile's id")
+    prof.add_argument("--list-profiles", action="store_true", help="list the game profiles there are")
+    prof.add_argument("--profile-only", action="store_true",
+                      help="only put the profile into --game's winpad.json, translate nothing")
     lib = ap.add_argument_group("a library of games: several games in one app")
     lib.add_argument("--library", nargs="?", const=library.default_path(), metavar="FILE",
                      help=f"work on the library in FILE (default {library.default_path()}); --ipa, --out-ipa, "
@@ -83,8 +90,9 @@ def library_main(args):
         if value is not None:
             lib.settings[key] = value
     for folder in args.add_game:
-        p = lib.add(folder, exe=args.exe or "", ipad_folder=args.ipad_folder or "")
+        p = lib.add(folder, exe=args.exe or "", ipad_folder=args.ipad_folder or "", profile=args.profile or "")
         print(f"added {p.folder_name()} (image {p.image_name()}, work folder {p.work_dir})")
+        profiles.apply(p.game_dir, p.profile)
     for name in args.remove_game:
         print(f"removed {lib.remove(name).folder_name()}")
     lib.save(path)
@@ -99,10 +107,21 @@ def library_main(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    # A Windows console's code page (cp1252...) lacks letters of the profiles' Czech notes:
+    # print what it can instead of failing.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     if not argv:
         from . import gui
         return gui.main()
     args = parser().parse_args(argv)
+    if args.list_profiles:
+        for prof in profiles.load_all().values():
+            how = ", ".join(f"Steam {r['steamAppId']}" if "steamAppId" in r else
+                            " + ".join([r["exe"]] + r.get("files", [])) for r in prof["match"])
+            print(f"{prof['id']} v{prof['version']}: {prof.get('title', '')} ({how})")
+        return 0
     for key, value in vars(args).items():
         if key in ("remove_game", "library") or value in (None, []):
             continue
@@ -122,10 +141,15 @@ def main(argv=None):
     p = project.Project.load(args.settings) if args.settings else project.Project()
     for key, value in vars(args).items():
         if key in ("settings", "library", "add_game", "remove_game", "list_games", "build", "package_dir",
-                   "package_only") or value in (None, []):
+                   "package_only", "list_profiles", "profile_only") or value in (None, []):
             continue
         setattr(p, key, value)
     try:
+        if args.profile_only:
+            if not p.game_dir or not os.path.isdir(p.game_dir):
+                raise project.TranslateError(f"no game folder: {p.game_dir}")
+            profiles.apply(p.game_dir, p.profile)
+            return 0
         if args.package_only:
             if not p.package:
                 raise project.TranslateError("--package-only needs --package FILE")

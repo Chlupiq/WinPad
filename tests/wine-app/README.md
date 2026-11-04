@@ -23,6 +23,11 @@ spustí). Ve složce hry může být:
   `{"title": "Need for Speed Underground 2", "exe": "SPEED2.EXE"}`. Bez něj
   je názvem jméno složky a programem největší `.exe`, který není instalátor
   ani pomocný program.
+  WinPad Translator do něj zapíše profil známé hry (`"profile"`: program,
+  přepsání DLL, proměnné prostředí, argumenty, hodnoty registru, třeba
+  rozlišení). Aplikace hru spustí s nimi; vlastní klíče v `winpad.json`
+  (`title`, `exe`, `args`, `dllOverrides`, `env`, `registry`) mají přednost.
+  Viz tools/winpad-translator/README.md, Game profiles.
 - `cover.png` nebo `cover.jpg`, obal hry.
 
 Hru jde poslat i jako jeden soubor `.winpad`, který vyrobí WinPad Translator

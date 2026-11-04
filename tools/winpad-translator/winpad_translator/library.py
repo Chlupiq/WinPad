@@ -67,7 +67,7 @@ class Library:
     def projects(self):
         return [project.Project.load(os.path.join(w, project.SETTINGS)) for w in self.games]
 
-    def add(self, game_dir, exe="", ipad_folder="", work_dir=""):
+    def add(self, game_dir, exe="", ipad_folder="", work_dir="", profile=""):
         """Adds the game in GAME_DIR (or updates its program and iPad folder). Returns its Project."""
         game_dir = os.path.abspath(game_dir)
         if not os.path.isdir(game_dir):
@@ -85,6 +85,7 @@ class Library:
         p.game_dir, p.work_dir = game_dir, work_dir
         p.exe = exe or p.exe
         p.ipad_folder = ipad_folder or p.ipad_folder
+        p.profile = profile or p.profile
         p.save()
         if work_dir not in self.games:
             self.games.append(work_dir)

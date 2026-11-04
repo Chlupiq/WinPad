@@ -15,6 +15,10 @@
 // app (winpad-build.txt in the bundle), and main.m falls back to the bundle's
 // image if iOS refuses to load it.
 //
+// WinPad Translator may have put a game profile into winpad.json (the settings a known game
+// needs: its program, DLL overrides, environment, registry values; WinPadGameSettings), and
+// main.m starts the game with them.
+//
 // It looks like a console's home screen: a row of square tiles, the focused
 // one large with a white frame and its title, tags and Spustit below, on a
 // backdrop picked in the settings (Nastavení › Vzhled: four glows, the
@@ -255,6 +259,34 @@ static NSString* NewMapsText(NSInteger n) {
                             : [NSString stringWithFormat:@"%ld nových code map", (long)n];
 }
 
+NSDictionary* WinPadGameSettings(NSDictionary* info) {
+  NSMutableDictionary* out = [NSMutableDictionary new];
+  NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
+  if ([profile[@"settings"] isKindOfClass:NSDictionary.class]) [out addEntriesFromDictionary:profile[@"settings"]];
+  for (NSString* key in info) {
+    if ([key isEqualToString:@"profile"]) continue;
+    id mine = info[key], theirs = out[key];
+    if ([@[ @"dllOverrides", @"env", @"registry" ] containsObject:key] && [mine isKindOfClass:NSDictionary.class] &&
+        [theirs isKindOfClass:NSDictionary.class]) {
+      NSMutableDictionary* merged = [theirs mutableCopy];
+      for (NSString* k in mine) {
+        if ([key isEqualToString:@"registry"] && [mine[k] isKindOfClass:NSDictionary.class] &&
+            [merged[k] isKindOfClass:NSDictionary.class]) {
+          NSMutableDictionary* values = [merged[k] mutableCopy];
+          [values addEntriesFromDictionary:mine[k]];
+          merged[k] = values;
+        } else {
+          merged[k] = mine[k];
+        }
+      }
+      out[key] = merged;
+    } else {
+      out[key] = mine;
+    }
+  }
+  return out;
+}
+
 NSArray<WinPadGame*>* WinPadFindGames(void) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* docs = Documents();
@@ -274,7 +306,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
       id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
       if ([obj isKindOfClass:NSDictionary.class]) info = obj;
     }
-    NSString* exe = [info[@"exe"] isKindOfClass:NSString.class] ? info[@"exe"] : nil;
+    NSDictionary* settings = WinPadGameSettings(info);
+    NSString* exe = [settings[@"exe"] isKindOfClass:NSString.class] ? settings[@"exe"] : nil;
     if (exe && ([exe containsString:@".."] || ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:exe]])) exe = nil;
     if (!exe) {
       unsigned long long best = 0;
@@ -294,7 +327,11 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     WinPadGame* game = [WinPadGame new];
     game.folder = folder;
     game.exe = [folder stringByAppendingPathComponent:exe];
-    NSString* title = [info[@"title"] isKindOfClass:NSString.class] ? info[@"title"] : nil;
+    NSString* title = [settings[@"title"] isKindOfClass:NSString.class] ? settings[@"title"] : nil;
+    game.settings = settings;
+    NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
+    if ([profile[@"id"] isKindOfClass:NSString.class])
+      game.profile = [NSString stringWithFormat:@"%@ v%@", profile[@"id"], profile[@"version"] ?: @"?"];
     game.title = title.length ? title : folder;
     game.arch = ProgramArch([docs stringByAppendingPathComponent:game.exe]);
     game.bundleImage = WinPadGameImage(folder);
@@ -1186,8 +1223,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   NSMutableString* report = [NSMutableString stringWithFormat:@"%@library: %lu games\n", self.installReport,
                                                              (unsigned long)self.games.count];
   for (WinPadGame* game in self.games)
-    [report appendFormat:@"library: %@ | %@ | %@ | image %@%@\n", game.title, game.exe, game.arch ?: @"?",
-                         game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @""];
+    [report appendFormat:@"library: %@ | %@ | %@ | image %@%@%@\n", game.title, game.exe, game.arch ?: @"?",
+                         game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @"",
+                         game.profile ? [@" | profile " stringByAppendingString:game.profile] : @""];
   // What "Exportovat pro převodník" shares, without the share sheet: Documents/export-FOLDER.zip.
   for (WinPadGame* game in self.games) {
     if (!game.maps) continue;

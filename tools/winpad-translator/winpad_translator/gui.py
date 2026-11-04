@@ -4,7 +4,7 @@ import queue
 import threading
 import traceback
 
-from . import __version__, compile as fexcompile, library, project
+from . import __version__, compile as fexcompile, library, profiles, project
 
 EXPORT_TYPES = [("WinPad code maps", "*.zip"), ("all", "*")]
 
@@ -90,6 +90,32 @@ def main():
         row += 1
 
     path_row("Game folder", "game_dir", "dir", "the game as it is in WinPad Wine's Documents on the iPad")
+    ttk.Label(frame, text="Game profile").grid(row=row, column=0, sticky="w", pady=2)
+    try:
+        known = list(profiles.load_all())
+    except (OSError, ValueError, profiles.ProfileError):
+        known = []
+    entries["profile"] = tk.StringVar(value=p.profile or "auto")
+    ttk.Combobox(frame, textvariable=entries["profile"], values=["auto", "none"] + known, state="readonly",
+                 width=12).grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
+    found = tk.StringVar(value="auto: settings of a known game (DLLs, resolution, fixes) go into its winpad.json")
+    ttk.Label(frame, textvariable=found, foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
+
+    def show_profile(*_):
+        game_dir = entries["game_dir"].get()
+        if not os.path.isdir(game_dir):
+            return
+        try:
+            prof, exe = profiles.detect(game_dir)
+        except (OSError, ValueError, profiles.ProfileError) as e:
+            found.set(f"profiles: {e}")
+            return
+        found.set(f"found: {prof['title']} ({prof['id']})" + (f", program {exe}" if exe else "")
+                  if prof else "no profile for this game: it runs with the defaults")
+
+    entries["game_dir"].trace_add("write", show_profile)
     list_row("iPad code maps", "ipad_maps", "maps",
              "the zip the app's Exportovat pro převodník shared, or WinPad Wine › fexcache › <game> copied off")
     list_row("PC drcov logs", "drcov_logs", [("drcov log", "*.log"), ("all", "*")],
@@ -210,6 +236,7 @@ def main():
             else:
                 var.set(value)
         backend.set(loaded.backend or backend.get())
+        entries["profile"].set(loaded.profile or "auto")
 
     entries["game_dir"].trace_add("write", lambda *_: load_settings(entries["game_dir"].get())
                                   if os.path.isdir(entries["game_dir"].get()) else None)

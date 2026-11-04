@@ -114,6 +114,61 @@ the new IPA. The settings of a game are kept in its work folder
 (`winpad-translator.json`, `--settings`), so the next round only needs the new
 code maps.
 
+## Game profiles
+
+Some games need settings of their own in WinPad Wine: a DLL from the game
+folder before Wine's, a resolution that fits the iPad, an argument. A profile
+(`data/profiles/<id>.json`, `profiles.py`) says how to recognise a game and
+what it needs. Every translation looks for one (`--profile auto`, the
+default; Game profile in the window) and puts it into the game folder's
+`winpad.json`, which the app reads:
+
+```json
+{
+  "title": "My own title",
+  "profile": {
+    "id": "nfsu2", "version": 1, "title": "Need for Speed Underground 2",
+    "notes": ["..."],
+    "settings": {
+      "exe": "SPEED2.EXE", "title": "Need for Speed Underground 2",
+      "dllOverrides": {"dinput8": "n,b"},
+      "registry": {"HKLM\\Software\\EA Games\\Need for Speed Underground 2": {"g_RacingResolution": 2}}
+    }
+  }
+}
+```
+
+The translator only writes `"profile"`. Every other key of `winpad.json` is
+the user's, and it wins over the profile's: `title` and `exe` replace the
+profile's, and `dllOverrides`, `env` and `registry` win entry by entry. The app
+(`WinPadGameSettings` in tests/wine-app/Library.m) and `profiles.effective`
+merge the same way. The settings:
+
+| key | what the app does with it |
+| --- | --- |
+| `title`, `exe` | the library's title and the program, relative to the game folder |
+| `args` | arguments for the program |
+| `dllOverrides` | `WINEDLLOVERRIDES`, after the app's own `dinput8=n,b` |
+| `env` | environment variables, except the ones the app sets (`WINE*`, `FEX_*`, `DYLD_*`...) |
+| `registry` | values (text, a number = DWORD, `{"hex": "00ff"}` = binary) put into the prefix's `system.reg` (HKLM) or `user.reg` (HKCU) when the key does not have them yet, so a game that changes one keeps its own; a 32-bit game's `HKLM\Software` goes to `Wow6432Node` |
+
+A profile matches a game by any of its `match` rules: an `exe` in the folder
+(any case) with all of the rule's `files`, or the folder's Steam app
+(`steamAppId`: `steam_appid.txt` in the folder, or the `appmanifest_<id>.acf`
+of the `steamapps` folder it is in). `--profile ID` forces one, `--profile
+none` takes it out of `winpad.json`, `--list-profiles` lists them, and
+`--profile-only --game FOLDER` only writes `winpad.json`.
+
+| profile | recognised by | settings |
+| --- | --- | --- |
+| `nfsu2` Need for Speed Underground 2 | `SPEED2.EXE` + `GLOBAL/GLOBALA.BUN` | `dinput8=n,b` (Ultimate ASI Loader), race resolution 1024×768 (`g_RacingResolution` 2) |
+| `mafia` Mafia (2002) | Steam 40990, `GameV12.exe`, or `Game.exe` + `Setup.exe` + `LS3DF.dll` | `d3d8=n,b`: a `d3d8.dll` in the game folder (Mafia Widescreen Fix's d3d8to9) first, else the app's d3d8to9 |
+
+Each profile names its sources (PCGamingWiki, forums). Proton's game fixes
+(umu-protonfixes) have nothing for either game; take settings from them when a
+game has one. A new profile is one JSON file; `tests/test_profiles.py` checks
+the shipped ones.
+
 ## Several games in one app
 
 The app's game library (tests/wine-app/Library.m) starts each game folder in

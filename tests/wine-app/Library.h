@@ -21,6 +21,10 @@
 // its image, which the interpreter ran. newMaps of them since the last "Exportovat pro převodník".
 @property(nonatomic) NSInteger maps;
 @property(nonatomic) NSInteger newMaps;
+// Its winpad.json's settings (WinPadGameSettings): args, dllOverrides, env, registry...
+@property(nonatomic, copy) NSDictionary* settings;
+// The game profile WinPad Translator put into winpad.json ("nfsu2 v1"), or nil.
+@property(nonatomic, copy) NSString* profile;
 @end
 
 NSArray<WinPadGame*>* WinPadFindGames(void);
@@ -37,6 +41,11 @@ void WinPadMarkMapsExported(WinPadGame* game, NSDate* date);
 NSString* WinPadInstallPackage(NSString* path, void (^progress)(double), NSString** error);
 // The packages waiting in Documents or Documents/Inbox (copied in, or handed over by AirDrop).
 NSArray<NSURL*>* WinPadWaitingPackages(void);
+// The settings of a game folder's winpad.json INFO: those of the game profile WinPad
+// Translator put there ("profile": {"settings": ...}, tools/winpad-translator/winpad_translator/
+// profiles.py), with the user's own top-level keys over them; dllOverrides, env and registry
+// key by key (registry values by name).
+NSDictionary* WinPadGameSettings(NSDictionary* info);
 
 // The inputs of a game controller that become keys (main.m's Gamepads), in the order the
 // settings list them.

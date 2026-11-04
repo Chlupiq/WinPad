@@ -1,0 +1,23 @@
+{
+  "id": "mafia",
+  "version": 1,
+  "title": "Mafia",
+  "match": [
+    {"steamAppId": 40990},
+    {"exe": "GameV12.exe"},
+    {"exe": "Game.exe", "files": ["Setup.exe", "LS3DF.dll"]}
+  ],
+  "settings": {
+    "dllOverrides": {"d3d8": "n,b"}
+  },
+  "notes": [
+    "Direct3D 8 jde přes d3d8to9 z aplikace; d3d8.dll v herní složce (třeba z Mafia Widescreen Fix) má přednost.",
+    "Rozlišení a grafiku ukládá Setup.exe binárně do registru; bez něj hra začne s výchozím nastavením. Antialiasing nech vypnutý (pády při startu).",
+    "Původní CD verze má SafeDisc 2, který ve Wine nefunguje: použij verzi ze Steamu nebo GOG.",
+    "Hra počítá s nejvýš 63 FPS; vyšší snímková frekvence rozbíjí řízení aut."
+  ],
+  "sources": [
+    "https://www.pcgamingwiki.com/wiki/Mafia",
+    "https://store.steampowered.com/app/40990"
+  ]
+}

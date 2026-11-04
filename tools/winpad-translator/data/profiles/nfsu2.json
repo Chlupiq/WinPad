@@ -1,0 +1,23 @@
+{
+  "id": "nfsu2",
+  "version": 1,
+  "title": "Need for Speed Underground 2",
+  "match": [
+    {"exe": "SPEED2.EXE", "files": ["GLOBAL/GLOBALA.BUN"]}
+  ],
+  "settings": {
+    "dllOverrides": {"dinput8": "n,b"},
+    "registry": {
+      "HKLM\\Software\\EA Games\\Need for Speed Underground 2": {"g_RacingResolution": 2}
+    }
+  },
+  "notes": [
+    "Rozlišení závodu 1024×768 (g_RacingResolution 2, 4:3 jako obraz v aplikaci), jen dokud si ho hra nezmění sama.",
+    "dinput8 z herní složky (Ultimate ASI Loader) má přednost před Wine.",
+    "Widescreen Fix (.asi) na iPadu hru brzdí nezarovnanými atomickými přístupy; nech ho mimo složku scripts."
+  ],
+  "sources": [
+    "https://www.pcgamingwiki.com/wiki/Need_for_Speed:_Underground_2",
+    "https://www.neowin.net/forum/topic/244769-nfsu2-resolutions-higher-than-1024x768/"
+  ]
+}
