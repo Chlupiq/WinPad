@@ -123,7 +123,8 @@ class DynamoRioTest(unittest.TestCase):
 @unittest.skipUnless(HAVE_PE_TOOLS, "needs pefile, capstone and xxhash")
 class DrcovTest(unittest.TestCase):
     def test_exe_and_game_dlls(self):
-        with tempfile.TemporaryDirectory() as t:
+        # pefile keeps the images mapped until it is collected, which Windows does not let go of.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
             game = os.path.join(t, "My Game")
             exe = x86_pe(os.path.join(game, "GAME.EXE"), CODE)
             dll = x86_pe(os.path.join(game, "bin", "engine.dll"), CODE, base=0x10000000, stamp=0x1234)
@@ -215,7 +216,9 @@ class SimulatorTest(unittest.TestCase):
                     self.assertTrue(os.path.isfile(os.path.join(docs, "My Game", "DATA", "a.bin")))
                     maps = os.path.join(docs, "fexcache", "My Game", "codemap", "new")
                     os.makedirs(maps)
-                    name = "\\??\\Z:" + os.path.join(docs, "My Game", "GAME.EXE").replace("/", "\\")
+                    # As Wine on the Mac names it (Z: is the Mac's root), whatever this computer is.
+                    name = ("\\??\\Z:\\Users\\me\\Library\\Developer\\CoreSimulator\\Devices\\PRO\\data\\"
+                            "Containers\\Data\\Application\\UUID\\Documents\\My Game\\GAME.EXE")
                     with open(os.path.join(maps, "1234.1.bin"), "wb") as f:
                         f.write(codemaps.image_record(0x1234, name) + codemaps.ENTRY.pack(*codemaps.SET_MAIN) +
                                 struct.pack("<Q", 0x1234) + codemaps.ENTRY.pack(0x1234, 0x1000))
