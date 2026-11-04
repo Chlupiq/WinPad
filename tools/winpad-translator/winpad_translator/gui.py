@@ -5,8 +5,10 @@ import sys
 import threading
 import traceback
 
-from . import __version__, compile as fexcompile, library, profiles, project
+from . import __version__, compile as fexcompile, library, profiles, project, record
 
+# Windows: the game natively under DynamoRIO; a Mac: in the iPad simulator (Xcode project).
+RECORD_LABEL = "Play and record"
 EXPORT_TYPES = [("WinPad code maps", "*.zip"), ("all", "*")]
 
 
@@ -120,7 +122,7 @@ def main():
     list_row("iPad code maps", "ipad_maps", "maps",
              "the zip the app's Exportovat pro převodník shared, or WinPad Wine › fexcache › <game> copied off")
     list_row("PC drcov logs", "drcov_logs", [("drcov log", "*.log"), ("all", "*")],
-             "optional: drrun -t drcov -- GAME.EXE on a Windows PC, played for a while")
+             "optional: drrun -t drcov -- GAME.EXE on a Windows PC; Play and record below does it for you")
     discover = tk.BooleanVar(value=False)
     ttk.Checkbutton(frame, text="Also find the game's code statically (more code, bigger image)",
                     variable=discover).grid(row=row, column=1, sticky="w", padx=6)
@@ -182,6 +184,16 @@ def main():
     frame.rowconfigure(row + 1, weight=1)
     run_button = ttk.Button(frame, text="Translate")
     run_button.grid(row=row, column=2, sticky="e")
+    # Play and record (record.py): the game runs here, its code is recorded while it is played,
+    # and the translation takes it at once. Stop closes the game (its recording is kept).
+    record_buttons = ttk.Frame(frame)
+    record_buttons.grid(row=row, column=1, sticky="e")
+    record_button = ttk.Button(record_buttons, text=RECORD_LABEL)
+    record_button.pack(side="left")
+    stop_button = ttk.Button(record_buttons, text="Stop the game")
+    stop_button.pack(side="left", padx=4)
+    stop_button.state(["disabled"])
+    stop = threading.Event()
 
     def collect():
         for key, var in entries.items():
@@ -197,8 +209,11 @@ def main():
         p.simulator_image = bool(p.xcode_project)
         apply_install(install_vars, p)
 
-    def work():
+    def work(play=False):
         try:
+            if play:
+                record.record(p, log=lines.put, stop=stop)
+                lines.put("STOP-OFF")
             project.run(p, log=lines.put)
         except project.KNOWN_ERRORS as e:
             lines.put(f"error: {e}")
@@ -207,18 +222,25 @@ def main():
             lines.put(traceback.format_exc())
         lines.put(None)
 
-    def start():
+    def start(play=False):
         collect()
         log.delete("1.0", "end")
         run_button.state(["disabled"])
-        threading.Thread(target=work, daemon=True).start()
+        record_button.state(["disabled"])
+        if play:
+            stop.clear()
+            stop_button.state(["!disabled"])
+        threading.Thread(target=work, args=(play,), daemon=True).start()
 
     def pump():
         try:
             while True:
                 line = lines.get_nowait()
-                if line is None:
-                    run_button.state(["!disabled"])
+                if line is None or line == "STOP-OFF":
+                    stop_button.state(["disabled"])
+                    if line is None:
+                        run_button.state(["!disabled"])
+                        record_button.state(["!disabled"])
                     continue
                 log.insert("end", line + "\n")
                 log.see("end")
@@ -248,6 +270,8 @@ def main():
     entries["game_dir"].trace_add("write", lambda *_: load_settings(entries["game_dir"].get())
                                   if os.path.isdir(entries["game_dir"].get()) else None)
     run_button.configure(command=start)
+    record_button.configure(command=lambda: start(play=True))
+    stop_button.configure(command=stop.set)
     pump()
     root.mainloop()
     return 0

@@ -980,9 +980,50 @@ jobs:
           "$app" --version
           "$app" --help | grep -q -- --ipad-maps
           "$app" --help | grep -q -- --cloud-sign
+          "$app" --help | grep -q -- --record
           # Signing without a Mac: a certificate request, made by the packed app itself.
           HOME=$RUNNER_TEMP/home USERPROFILE=$RUNNER_TEMP/home "$app" --cert-request me@example.com
           test -s "$RUNNER_TEMP/home/WinPadTranslator/certificate/winpad.certSigningRequest"
+      - name: hello.exe, a 32-bit x86 program (wine-loader job)
+        if: runner.os == 'Windows'
+        uses: actions/download-artifact@v4
+        with:
+          name: translator-check
+          path: ${{ runner.temp }}/check
+      - name: Play and record on Windows - the packed app downloads DynamoRIO, runs the program under drcov and makes its code map
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          app="$RUNNER_TEMP/dist/WinPadTranslator.exe"
+          mkdir -p "$RUNNER_TEMP/rec-game"
+          cp "$RUNNER_TEMP/check/hello.exe" "$RUNNER_TEMP/rec-game/"
+          export HOME=$RUNNER_TEMP/home USERPROFILE=$RUNNER_TEMP/home
+          "$app" --game "$(cygpath -w "$RUNNER_TEMP/rec-game")" --work "$(cygpath -w "$RUNNER_TEMP/rec-work")" \
+            --exe hello.exe --record-only 2>&1 | tee "$RUNNER_TEMP/record.log"
+          ls "$RUNNER_TEMP"/home/WinPadTranslator/tools/
+          ls -l "$RUNNER_TEMP"/rec-work/drcov/*/
+          # The recording goes to the translation: the code map of hello.exe from its drcov logs.
+          cd tools/winpad-translator
+          python - "$(cygpath -w "$RUNNER_TEMP/rec-game/hello.exe")" "$(cygpath -w "$RUNNER_TEMP/rec-work")" <<'PY'
+          import json, os, sys
+          from winpad_translator import codemaps, project, record
+          exe, work = sys.argv[1], sys.argv[2]
+          p = project.Project.load(os.path.join(work, project.SETTINGS))
+          assert p.drcov_logs, p
+          new = os.path.join(work, "check-maps")
+          os.makedirs(new, exist_ok=True)
+          class Backend:
+              image_name = staticmethod(lambda local: "\\??\\" + local)
+          seed = project._seed_map(new, exe, Backend, [])
+          made = record.drcov_to_maps(p.drcov_logs, exe, os.path.dirname(exe), new, Backend.image_name, seed)
+          with open(made[0], "rb") as f:
+              names, blocks, main, _ = codemaps.parse(f.read())
+          # hello.exe is small: its entry, the calls it makes and the returns from them.
+          assert main in blocks and len(blocks[main]) >= 3, (names, blocks)
+          print(f"recorded {len(blocks[main])} block starts of hello.exe")
+          PY
       - name: Upload the app
         uses: actions/upload-artifact@v4
         with:

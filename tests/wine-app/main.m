@@ -822,6 +822,9 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
 @property(nonatomic, strong) NSDate* started;
 @property(nonatomic, strong) UILabel* fps;  // the FPS overlay over the game, if Settings has it on
 @property(nonatomic, strong) CADisplayLink* fpsLink;
+// WinPad Translator's "Play and record" on a Mac (-recordGame FOLDER, simulator only): the game runs
+// with FEX's JIT, not its image, and FEX writes every block it compiles to the game's code maps.
+@property(nonatomic) BOOL record;
 @end
 
 // The FPS overlay: the display link looks at Metal's frame count every screen
@@ -1030,8 +1033,10 @@ static CFTimeInterval fps_shown;
                                                 error:nil];
   // This iPad's CPU features next to the code maps it records: WinPad Translator compiles the
   // game's image for them.
-  setenv("WINEHOST_HOSTPROBE_FILE",
-         [cache stringByAppendingPathComponent:@"codemap/new/hostprobe.txt"].fileSystemRepresentation, 1);
+  // Not when recording in a simulator: those are the Mac's features, not an iPad's.
+  if (!self.record)
+    setenv("WINEHOST_HOSTPROBE_FILE",
+           [cache stringByAppendingPathComponent:@"codemap/new/hostprobe.txt"].fileSystemRepresentation, 1);
   // Wine, FEX and the program write with stdio and to fds 1 and 2: both go
   // to the log file. The log also goes to the original stderr at the end:
   // Xcode's console.
@@ -1074,12 +1079,22 @@ static CFTimeInterval fps_shown;
   NSString* game_image = self.game ? self.game.image : [frameworks stringByAppendingPathComponent:@"fexaot-game.dylib"];
   if (self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
   // An image in the game folder loads only if it is signed by the app's team; else the bundle's.
-  if (self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
+  if (!self.record && self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
     printf("WinPad Wine: the game folder's image did not load (%s), taking %s\n", dlerror(),
            self.game.bundleImage ? self.game.bundleImage.lastPathComponent.UTF8String : "none");
     game_image = self.game.bundleImage;
   }
   if (game_image && ![NSFileManager.defaultManager fileExistsAtPath:game_image]) game_image = nil;
+  if (self.record) {
+    // FEX's JIT (a simulator runs it without a debugger), recording each block it compiles into
+    // Documents/fexcache/<game>/codemap/new, as tests/wine-loader/run-host.sh's
+    // WINEHOST_FEX_CODEMAP=1 does: the code map is written as it grows and at the game's end.
+    game_image = nil;
+    setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
+    setenv("FEX_APP_CACHE_LOCATION", WindowsDir(cache).UTF8String, 1);
+    printf("WinPad Wine: recording the game's code maps with the JIT into %s\n",
+           [cache stringByAppendingPathComponent:@"codemap/new"].UTF8String);
+  }
   if (!cube && (!game || game_image)) {
     // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
     NSString* path = game ? game_image
@@ -1177,6 +1192,26 @@ static CFTimeInterval fps_shown;
   // The library hands over to Wine, which runs once per process: the app is
   // started again for the next game. With libraryTest (CI) it only says what
   // it would run.
+  // WinPad Translator's "Play and record" (record.py) starts a game straight away: -recordGame
+  // FOLDER. Only a simulator runs FEX's JIT without a debugger.
+  NSString* record = [NSUserDefaults.standardUserDefaults stringForKey:@"recordGame"];
+  if (record.length) {
+#if TARGET_OS_SIMULATOR
+    for (WinPadGame* game in WinPadFindGames())
+      if ([game.folder caseInsensitiveCompare:record] == NSOrderedSame) {
+        WineViewController* wine = [WineViewController new];
+        wine.program = @"game";
+        wine.game = game;
+        wine.record = YES;
+        self.window.rootViewController = wine;
+        [self.window makeKeyAndVisible];
+        return;
+      }
+    NSLog(@"WinPad Wine: no game folder %@ in Documents to record", record);
+#else
+    NSLog(@"WinPad Wine: recording code maps needs the JIT: only in a simulator");
+#endif
+  }
   LibraryViewController* library = [LibraryViewController new];
   __weak UIWindow* window = self.window;
   library.start = ^(NSString* program, WinPadGame* game) {

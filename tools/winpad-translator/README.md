@@ -29,6 +29,29 @@ Inputs, any combination:
   while): one session covers most of the game's own code at once
   (`tests/fex-wow64/drcov2codemap.py`).
 - **A static walk** of the game's .exe (`tests/fex-wow64/discover.py`).
+- **Play and record** (`--record`, the **Play and record** button): the
+  translator starts the game here, you play, and when you quit it the code it
+  ran goes straight into the translation, with no other app (`record.py`):
+  - **Windows** (an x86-64 PC): the game runs natively under DynamoRIO's
+    drcov, which the translator downloads from DynamoRIO's GitHub releases the
+    first time into `~/WinPadTranslator/tools` (or `--dynamorio FOLDER`). Code
+    maps are made of the .exe and of the game's own DLLs (its folder); Windows'
+    DLLs are not Wine's, so their code is left to the iPad. A game with copy
+    protection or anti-cheat may refuse to run under DynamoRIO. DynamoRIO does
+    not run on Windows on ARM.
+  - **Mac**: the `WinPadWine-xcode` project (`--xcode-project`) is built for an
+    iPad simulator, the game is cloned into the simulator app's Documents and
+    started there (`-recordGame FOLDER`, main.m) with FEX's JIT and code maps
+    on. You play in the Simulator window (keyboard, game controller); Wine, its
+    DLLs and the game's settings are the iPad's, so these maps cover Wine's
+    code too and are taken as maps from the iPad are. The simulator runs on the
+    Mac's chip, so its `hostprobe.txt` is left out: the image is compiled for
+    the iPad's features.
+
+  Quitting the game in the game is best. **Stop the game** asks it to close on
+  Windows (drcov writes its log as the game ends), and ends the app on a Mac
+  (FEX has written all but the last few blocks by then). `--record-only` records without translating (the next run with
+  `--settings` takes it).
 
 Plus:
 
