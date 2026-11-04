@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import codemaps, compile as fexcompile, ipa as ipamod, link, paths
+from . import codemaps, compile as fexcompile, ipa as ipamod, link, package as packagemod, paths
 
 SETTINGS = "winpad-translator.json"
 
@@ -62,6 +62,12 @@ class Project:
     # and put it into the game folder as fexaot.dylib, which the app loads from there, so
     # the app need not be installed again for it.
     sign_identity: str = ""
+    # Also write the game as one WinPad package (.winpad, package.py) here: a file, or a folder
+    # for <game folder>.winpad. The iPad app opens it from AirDrop or Files.
+    package: str = ""
+    # Whether the package holds the game's files too, or only its settings and signed image
+    # (for a game the iPad has already).
+    package_game: bool = True
 
     def folder_name(self):
         return os.path.basename(os.path.normpath(self.game_dir))
@@ -122,7 +128,8 @@ class TranslateError(Exception):
 
 
 # What goes wrong for a reason the message says (no traceback needed).
-KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, OSError)
+KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, packagemod.PackageError,
+                OSError)
 
 
 def _script(module, argv, log):
@@ -282,6 +289,8 @@ def run(p, log=print):
             raise TranslateError("an IPA with the image needs the IPA it is made from")
         ipamod.add_images(p.ipa, p.output_ipa, [device], p.app_name)
         log(f"=== {p.output_ipa}: the app with {p.image_name()}, for AltStore, SideStore or Sideloadly")
+    if p.package:
+        write_package(p, log)
     # The maps and logs are in the cache directory now; the next run takes only new ones.
     p.ipad_maps, p.drcov_logs, p.rebuild = [], [], False
     p.save()
@@ -333,6 +342,16 @@ def into_game_folder(p, image, log=print, run=subprocess.run):
         os.remove(stamp)
     log(f"=== {dest}: signed by {identity}" + (f", for app build {build}" if build else ""))
     log("  copy it with the game folder to the iPad: the app loads it from there, no new install needed")
+
+
+def write_package(p, log=print):
+    """Writes P's game as a WinPad package to p.package. Returns its path."""
+    exe = ""
+    if p.exe:
+        found = codemaps.find_ci(p.game_dir, p.exe)
+        exe = os.path.relpath(found, p.game_dir) if found else p.exe
+    return packagemod.write(p.game_dir, p.package, folder=p.ipad_folder or p.folder_name(), exe=exe,
+                            with_game=p.package_game, log=log)
 
 
 def app_build(p):

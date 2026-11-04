@@ -40,6 +40,8 @@ def main():
                 v = filedialog.askdirectory()
             elif kind == "save":
                 v = filedialog.asksaveasfilename(defaultextension=".ipa", filetypes=[("IPA", "*.ipa")])
+            elif kind == "package":
+                v = filedialog.asksaveasfilename(defaultextension=".winpad", filetypes=[("WinPad package", "*.winpad")])
             else:
                 v = filedialog.askopenfilename(filetypes=kind)
             if v:
@@ -99,6 +101,12 @@ def main():
     path_row("WinPad Wine IPA", "ipa", [("IPA", "*.ipa")], "the app the iPad runs (its Wine DLLs must match)")
     path_row("Write IPA with image", "output_ipa", "save", "optional: sign and install it with AltStore/SideStore/Sideloadly")
     path_row("Image folder", "output_dir", "dir")
+    path_row("Write .winpad package", "package", "package",
+             "optional: the game in one file; open it on the iPad from AirDrop or Files")
+    package_game = tk.BooleanVar(value=True)
+    ttk.Checkbutton(frame, text="Package the game's files too (uncheck when the iPad has the game already)",
+                    variable=package_game).grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
 
     ttk.Label(frame, text="App name").grid(row=row, column=0, sticky="w", pady=2)
     entries["app_name"] = tk.StringVar(value=p.app_name)
@@ -155,6 +163,7 @@ def main():
         for key, var in adv.items():
             setattr(p, key, var.get().strip())
         p.discover, p.half_barrier, p.rebuild = discover.get(), half.get(), rebuild.get()
+        p.package_game = package_game.get()
         p.backend = backend.get()
         p.simulator_image = bool(p.xcode_project)
 

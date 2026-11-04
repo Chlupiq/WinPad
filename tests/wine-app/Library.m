@@ -32,11 +32,19 @@
 // (AirDrop to the Mac, Files, Mail…) for WinPad Translator's next round; the
 // tag under the title counts the maps written since the last export.
 //
+// A game also comes as one file, a WinPad package (NAME.winpad, made by
+// WinPad Translator's --package): opened from AirDrop, Files or a share sheet
+// (Info.plist's document type), or copied into Documents, it is unpacked into
+// Documents/<its folder> (WinPadInstallPackage, Package.c) and the game shows
+// in the library.
+//
 // With the "libraryTest" setting (CI, tests/wine-app/build-xcode.sh) the
 // library writes the games it found to Documents/library.txt, exports the
 // maps of each game that has some to Documents/export-FOLDER.zip, then
 // presses right and A.
 #import "Library.h"
+
+#import "Package.h"
 
 #import <GameController/GameController.h>
 #import <PhotosUI/PhotosUI.h>
@@ -254,7 +262,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
   NSArray* folders = [[fm contentsOfDirectoryAtPath:docs error:nil] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
   for (NSString* folder in folders) {
     // The app's own folders (main.m): the Wine prefix, FEX's caches, the window's frames.
-    if ([folder hasPrefix:@"."] || [@[ @"prefix", @"fexcache", @"frames" ] containsObject:folder]) continue;
+    // Inbox: where iOS puts the files other apps (AirDrop) hand over.
+    if ([folder hasPrefix:@"."] || [@[ @"prefix", @"fexcache", @"frames", @"Inbox" ] containsObject:folder]) continue;
     NSString* dir = [docs stringByAppendingPathComponent:folder];
     BOOL is_dir = NO;
     if (![fm fileExistsAtPath:dir isDirectory:&is_dir] || !is_dir) continue;
@@ -304,6 +313,119 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     [games addObject:game];
   }
   return games;
+}
+
+// A folder name a package may unpack into: one name, not one of the app's own folders.
+static BOOL PackageFolderOK(NSString* name) {
+  if (!name.length || [name hasPrefix:@"."] || [name containsString:@"/"] || [name containsString:@"\\"]) return NO;
+  for (NSString* own in @[ @"prefix", @"fexcache", @"frames", @"inbox" ])
+    if ([name.lowercaseString isEqualToString:own]) return NO;
+  return YES;
+}
+
+// Moves SRC to DST; where both are folders, each of SRC's items into DST, so the files
+// the game wrote itself (saves, its settings) stay unless the package has them too.
+static BOOL MergeInto(NSString* src, NSString* dst, NSError** error) {
+  NSFileManager* fm = NSFileManager.defaultManager;
+  BOOL src_dir = NO, dst_dir = NO;
+  [fm fileExistsAtPath:src isDirectory:&src_dir];
+  if (![fm fileExistsAtPath:dst isDirectory:&dst_dir]) return [fm moveItemAtPath:src toPath:dst error:error];
+  if (src_dir && dst_dir) {
+    for (NSString* name in [fm contentsOfDirectoryAtPath:src error:nil])
+      if (!MergeInto([src stringByAppendingPathComponent:name], [dst stringByAppendingPathComponent:name], error)) return NO;
+    return YES;
+  }
+  return [fm removeItemAtPath:dst error:error] && [fm moveItemAtPath:src toPath:dst error:error];
+}
+
+typedef struct {
+  __unsafe_unretained void (^progress)(double);
+  CFAbsoluteTime last;
+} PackageProgress;
+
+static int ReportPackageProgress(void* ctx, uint64_t done, uint64_t total) {
+  PackageProgress* p = ctx;
+  const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  if (p->progress && (now - p->last > 0.1 || done == total)) {
+    p->last = now;
+    p->progress(total ? (double)done / (double)total : 1);
+  }
+  return 0;
+}
+
+NSString* WinPadInstallPackage(NSString* path, void (^progress)(double), NSString** error) {
+  char err[512] = "";
+  void* data = NULL;
+  size_t size = 0;
+  if (winpad_package_read(path.fileSystemRepresentation, "winpad.json", 1 << 20, &data, &size, err, sizeof err)) {
+    *error = [NSString stringWithFormat:@"Není to balíček WinPad: %s", err];
+    return nil;
+  }
+  id settings = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytesNoCopy:data length:size freeWhenDone:YES]
+                                                options:0
+                                                  error:nil];
+  NSDictionary* package = [settings isKindOfClass:NSDictionary.class] ? settings[@"package"] : nil;
+  if (![package isKindOfClass:NSDictionary.class]) package = @{};
+  NSNumber* format = [package[@"format"] isKindOfClass:NSNumber.class] ? package[@"format"] : @1;
+  if (format.integerValue > 1) {
+    *error = @"Balíček je z novější verze převodníku: aktualizuj aplikaci.";
+    return nil;
+  }
+  NSString* folder = [package[@"folder"] isKindOfClass:NSString.class] ? package[@"folder"]
+                                                                       : path.lastPathComponent.stringByDeletingPathExtension;
+  if (!PackageFolderOK(folder)) {
+    *error = [NSString stringWithFormat:@"Balíček chce složku „%@“, tu aplikace nemůže použít.", folder];
+    return nil;
+  }
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSString* docs = Documents();
+  NSString* dest = [docs stringByAppendingPathComponent:folder];
+  if ([package[@"game_files"] isEqual:@NO] && ![fm fileExistsAtPath:dest]) {
+    *error = [NSString stringWithFormat:@"V balíčku nejsou soubory hry a složka %@ tu ještě není: zkopíruj nejdřív hru "
+                                        @"(nebo balíček s ní).",
+                                        folder];
+    return nil;
+  }
+  // Unpacked next to the games first, then moved in: a broken package leaves the game as it was.
+  NSString* work = [[docs stringByAppendingPathComponent:@".winpad-install"] stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+  PackageProgress report = {progress, 0};
+  if (winpad_package_extract(path.fileSystemRepresentation, work.fileSystemRepresentation, ReportPackageProgress, &report,
+                             err, sizeof err)) {
+    [fm removeItemAtPath:work error:nil];
+    *error = [NSString stringWithFormat:@"Rozbalení selhalo: %s", err];
+    return nil;
+  }
+  NSError* move_error = nil;
+  BOOL ok = [fm createDirectoryAtPath:dest withIntermediateDirectories:YES attributes:nil error:&move_error];
+  for (NSString* name in ok ? [fm contentsOfDirectoryAtPath:work error:nil] : @[]) {
+    ok = MergeInto([work stringByAppendingPathComponent:name], [dest stringByAppendingPathComponent:name], &move_error);
+    if (!ok) break;
+  }
+  [fm removeItemAtPath:work error:nil];
+  if (!ok) {
+    *error = [NSString stringWithFormat:@"Hru se nepodařilo přesunout do %@: %@", folder, move_error.localizedDescription];
+    return nil;
+  }
+  return folder;
+}
+
+NSArray<NSURL*>* WinPadWaitingPackages(void) {
+  NSMutableArray<NSURL*>* found = [NSMutableArray new];
+  NSString* docs = Documents();
+  for (NSString* dir in @[ docs, [docs stringByAppendingPathComponent:@"Inbox"] ]) {
+    for (NSString* name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]) {
+      if ([name.pathExtension.lowercaseString isEqualToString:@"winpad"] && ![name hasPrefix:@"."])
+        [found addObject:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:name]]];
+    }
+  }
+  return found;
+}
+
+// Whether the file at URL is the app's own copy (in its Documents), to delete once installed.
+static BOOL InDocuments(NSURL* url) {
+  NSString* docs = Documents().stringByResolvingSymlinksInPath;
+  NSString* path = url.path.stringByResolvingSymlinksInPath;
+  return [path hasPrefix:[docs stringByAppendingString:@"/"]];
 }
 
 // The controller's inputs, named as on an Xbox controller: their names in the settings and in the
@@ -873,6 +995,11 @@ enum { AppearanceSection = 0 };
 @property(nonatomic) unsigned pad;  // the controller buttons held at the last change (Nav*)
 @property(nonatomic) BOOL started;
 @property(nonatomic, readonly) BOOL compact;  // an iPhone's height: smaller, no hints or info card
+// Packages to install (openPackages:), whether one is being installed, and what the
+// installs said (for libraryTest's report).
+@property(nonatomic, strong) NSMutableArray<NSURL*>* packages;
+@property(nonatomic) BOOL installing;
+@property(nonatomic, strong) NSMutableString* installReport;
 - (void)reload;
 - (void)showFocus;
 - (void)tick;
@@ -884,6 +1011,8 @@ enum { AppearanceSection = 0 };
 - (void)openSettings;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
+- (void)installNext;
+- (void)focusFolder:(NSString*)folder;
 @end
 
 enum { NavLeft = 1, NavRight = 2, NavA = 4, NavB = 8, NavY = 16, NavX = 32 };
@@ -940,7 +1069,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.view addSubview:self.row];
 
   self.addGame = [UILabel new];
-  self.addGame.text = @"Přidat hru\n\nPřelož ji na Macu a složku zkopíruj do Soubory › WinPad Wine";
+  self.addGame.text = @"Přidat hru\n\nOtevři soubor .winpad z převodníku (AirDrop nebo Soubory), nebo složku hry "
+                      @"zkopíruj do Soubory › WinPad Wine";
   self.addGame.numberOfLines = 0;
   self.addGame.textAlignment = NSTextAlignmentCenter;
   self.addGame.textColor = Hex(0xDCE8FF);
@@ -998,7 +1128,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.view addSubview:self.info];
 
   self.empty = [UILabel new];
-  self.empty.text = @"Zatím tu není žádná hra.\n\nPřelož hru na Macu a její složku zkopíruj přes Finder → iPad → "
+  self.empty.text = @"Zatím tu není žádná hra.\n\nPřelož hru převodníkem WinPad Translator a soubor .winpad pošli "
+                    @"na iPad (AirDrop) nebo ho otevři v Souborech. Nebo složku hry zkopíruj přes Finder → iPad → "
                     @"Soubory → WinPad Wine. Knihovna ji pak sama ukáže.";
   self.empty.numberOfLines = 0;
   self.empty.textAlignment = NSTextAlignmentCenter;
@@ -1022,6 +1153,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                              queue:NSOperationQueue.mainQueue
                                                                         usingBlock:^(NSNotification* note) {
                                                                           [weak reload];
+                                                                          [weak openPackages:@[]];
                                                                         }]];
   [self.observers addObject:[NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification
                                                                             object:nil
@@ -1030,16 +1162,29 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                           [weak attach:note.object];
                                                                         }]];
   for (GCController* pad in GCController.controllers) [self attach:pad];
+  if (!self.packages) self.packages = [NSMutableArray new];
+  self.installReport = [NSMutableString new];
+  // CI: the packages waiting in Documents go in before the report, one after the other.
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
+    for (NSURL* url in WinPadWaitingPackages()) {
+      NSString* error = nil;
+      NSString* folder = WinPadInstallPackage(url.path, nil, &error);
+      if (folder) [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+      [self.installReport appendFormat:@"package: %@ -> %@\n", url.lastPathComponent, folder ?: error];
+    }
+  }
   [self reload];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
   [super viewDidAppear:animated];
   [self becomeFirstResponder];
+  [self openPackages:@[]];
   static BOOL tested;
   if (tested || ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
   tested = YES;
-  NSMutableString* report = [NSMutableString stringWithFormat:@"library: %lu games\n", (unsigned long)self.games.count];
+  NSMutableString* report = [NSMutableString stringWithFormat:@"%@library: %lu games\n", self.installReport,
+                                                             (unsigned long)self.games.count];
   for (WinPadGame* game in self.games)
     [report appendFormat:@"library: %@ | %@ | %@ | image %@%@\n", game.title, game.exe, game.arch ?: @"?",
                          game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @""];
@@ -1250,6 +1395,93 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self showFocus];
 }
 
+- (void)openPackages:(NSArray<NSURL*>*)urls {
+  if (self.started || [NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
+  if (!self.packages) self.packages = [NSMutableArray new];
+  NSMutableArray<NSURL*>* all = [urls mutableCopy];
+  [all addObjectsFromArray:WinPadWaitingPackages()];
+  for (NSURL* url in all) {
+    BOOL known = NO;
+    for (NSURL* queued in self.packages) known |= [queued.path isEqualToString:url.path];
+    if (!known) [self.packages addObject:url];
+  }
+  if (!self.installing) [self installNext];
+}
+
+// Installs the first package of the queue with a progress alert, then the next one.
+- (void)installNext {
+  NSURL* url = self.packages.firstObject;
+  if (!url || self.started) {
+    self.installing = NO;
+    return;
+  }
+  // Not over the settings or another alert: when that one closes, the library appears again.
+  if (self.presentedViewController || !self.view.window) return;
+  self.installing = YES;
+  [self.packages removeObjectAtIndex:0];
+  UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Přidávám hru"
+                                                                 message:url.lastPathComponent
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+  [self presentViewController:alert animated:YES completion:nil];
+  const BOOL scoped = [url startAccessingSecurityScopedResource];
+  const BOOL own = InDocuments(url);
+  NSString* name = url.lastPathComponent;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    NSString* error = nil;
+    NSString* folder = WinPadInstallPackage(url.path,
+                                            ^(double done) {
+                                              dispatch_async(dispatch_get_main_queue(), ^{
+                                                alert.message = [NSString stringWithFormat:@"%@\n%.0f %%", name, done * 100];
+                                              });
+                                            },
+                                            &error);
+    // The app's own copy (AirDrop's Inbox, or copied into Documents) goes once installed; a
+    // file opened in place in Files stays where it is.
+    if (folder && own) [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [alert dismissViewControllerAnimated:YES
+                                completion:^{
+                                  self.installing = NO;
+                                  [self reload];
+                                  if (folder) {
+                                    [self focusFolder:folder];
+                                    [self installNext];
+                                    return;
+                                  }
+                                  UIAlertController* failed =
+                                      [UIAlertController alertControllerWithTitle:@"Hru se nepodařilo přidat"
+                                                                          message:[NSString stringWithFormat:@"%@\n\n%@", name, error]
+                                                                   preferredStyle:UIAlertControllerStyleAlert];
+                                  [failed addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                                             style:UIAlertActionStyleDefault
+                                                                           handler:^(UIAlertAction* action) {
+                                                                             [self installNext];
+                                                                           }]];
+                                  // A copy in Documents that cannot be installed would come back
+                                  // at every start: it is set aside with a name the library skips.
+                                  if (own) {
+                                    NSString* aside = [url.path.stringByDeletingLastPathComponent
+                                        stringByAppendingPathComponent:[name stringByAppendingString:@".failed"]];
+                                    [NSFileManager.defaultManager removeItemAtPath:aside error:nil];
+                                    [NSFileManager.defaultManager moveItemAtPath:url.path toPath:aside error:nil];
+                                  }
+                                  [self presentViewController:failed animated:YES completion:nil];
+                                }];
+    });
+  });
+}
+
+- (void)focusFolder:(NSString*)folder {
+  for (NSUInteger i = 0; i < self.games.count; i++) {
+    if ([self.games[i].folder isEqualToString:folder]) {
+      self.focus = (NSInteger)i;
+      [self showFocus];
+      return;
+    }
+  }
+}
+
 - (void)startFocused {
   if (!self.games.count) return;
   [self startProgram:@"game" game:self.games[self.focus]];
@@ -1313,7 +1545,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 }
 
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game {
-  if (self.started) return;
+  if (self.started || self.installing) return;
   self.started = YES;
   if (game) [NSUserDefaults.standardUserDefaults setObject:game.folder forKey:@"lastGame"];
   // The game reads the controllers itself (main.m's Gamepads).

@@ -19,7 +19,7 @@ import dataclasses
 import json
 import os
 
-from . import codemaps, ipa as ipamod, project
+from . import codemaps, ipa as ipamod, package as packagemod, project
 
 LIBRARY = "library.json"
 APP_NAME = "WinPad"
@@ -42,6 +42,10 @@ class Library:
     xcode_project: str = ""
     # The name under the icon; empty: "WinPad".
     app_name: str = ""
+    # Write a WinPad package (.winpad) of each game translated by build() into this folder.
+    package_dir: str = ""
+    # Whether those packages hold the games' files too (else only settings, cover, signed image).
+    package_game: bool = True
     # Settings of SHARED for every game.
     settings: dict = dataclasses.field(default_factory=dict)
 
@@ -140,16 +144,18 @@ def build(lib, ipad_maps=(), rebuild=False, log=print, imports=None):
             if key in lib.settings:
                 setattr(p, key, lib.settings[key])
         p.ipa, p.xcode_project = lib.ipa, lib.xcode_project
-        p.output_ipa, p.output_dir, p.app_name = "", "", ""
+        p.output_ipa, p.output_dir, p.app_name, p.package = "", "", "", ""
         p.own_maps_only = True
         p.rebuild = p.rebuild or rebuild
         image = image_of(p)
         new = has_own_maps(p, ipad_maps)
+        translated = False
         if new or p.drcov_logs or p.discover or p.rebuild or (not os.path.isfile(image) and
                                                                os.path.isdir(os.path.join(p.work_dir, "fexcache", "cache"))):
             p.ipad_maps = list(ipad_maps) if new else []
             log(f"##### {p.folder_name()}")
             project.run(p, log=log)
+            translated = True
         elif os.path.isfile(image):
             log(f"##### {p.folder_name()}: no new code maps, its image {p.image_name()} stays")
             if p.sign_identity and not os.path.isfile(os.path.join(p.game_dir, project.GAME_FOLDER_IMAGE)):
@@ -160,6 +166,11 @@ def build(lib, ipad_maps=(), rebuild=False, log=print, imports=None):
             continue
         if os.path.isfile(image):
             images.append(image)
+            package = os.path.join(lib.package_dir, (p.ipad_folder or p.folder_name()) + packagemod.EXTENSION) \
+                if lib.package_dir else ""
+            if package and (translated or not os.path.isfile(package)):
+                p.package, p.package_game = package, lib.package_game
+                project.write_package(p, log)
     name = lib.app_name or APP_NAME
     if lib.output_ipa:
         ipamod.add_images(lib.ipa, lib.output_ipa, images, name)

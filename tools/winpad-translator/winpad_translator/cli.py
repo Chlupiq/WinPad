@@ -48,6 +48,12 @@ def parser():
     ap.add_argument("--xcode-project", help="put the image into this WinPadWine-xcode project's Frameworks")
     ap.add_argument("--sign-identity", help="Mac: also sign the image with this identity (auto: your Apple Development "
                     "one) into the game folder as fexaot.dylib, which the app loads without a new install")
+    ap.add_argument("--package", metavar="FILE", help="also write the game as one .winpad file (FILE, or a folder for "
+                    "<game>.winpad) to open on the iPad from AirDrop or Files")
+    ap.add_argument("--package-no-game", dest="package_game", action="store_false", default=None,
+                    help="the package holds only the game's settings, cover and signed image, not its files")
+    ap.add_argument("--package-only", action="store_true",
+                    help="only write the --package of the game folder as it is, translate nothing")
     lib = ap.add_argument_group("a library of games: several games in one app")
     lib.add_argument("--library", nargs="?", const=library.default_path(), metavar="FILE",
                      help=f"work on the library in FILE (default {library.default_path()}); --ipa, --out-ipa, "
@@ -58,16 +64,18 @@ def parser():
     lib.add_argument("--list-games", action="store_true", help="list the games")
     lib.add_argument("--build", action="store_true",
                      help="translate the games with new code maps in --ipad-maps and write the app with all of them")
+    lib.add_argument("--package-dir", metavar="FOLDER",
+                     help="with --build: also write a .winpad package of each game translated into FOLDER")
     return ap
 
 
-PATH_KEYS = ("winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project")
+PATH_KEYS = ("winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project", "package")
 
 
 def library_main(args):
     path = os.path.abspath(args.library)
     lib = library.Library.load(path)
-    for key in ("ipa", "output_ipa", "xcode_project", "app_name"):
+    for key in ("ipa", "output_ipa", "xcode_project", "app_name", "package_dir", "package_game"):
         if getattr(args, key) is not None:
             setattr(lib, key, getattr(args, key))
     for key in library.SHARED:
@@ -101,7 +109,9 @@ def main(argv=None):
         if isinstance(value, list):
             setattr(args, key, [os.path.abspath(v) for v in value])
         elif key.endswith("_dir") or key in PATH_KEYS:
-            setattr(args, key, os.path.abspath(value))
+            # A trailing separator says "a folder" (package.write); keep it.
+            sep = os.sep if isinstance(value, str) and value.endswith(("/", os.sep)) else ""
+            setattr(args, key, os.path.abspath(value) + sep)
     if args.library:
         try:
             library_main(args)
@@ -111,11 +121,17 @@ def main(argv=None):
         return 0
     p = project.Project.load(args.settings) if args.settings else project.Project()
     for key, value in vars(args).items():
-        if key in ("settings", "library", "add_game", "remove_game", "list_games", "build") or value in (None, []):
+        if key in ("settings", "library", "add_game", "remove_game", "list_games", "build", "package_dir",
+                   "package_only") or value in (None, []):
             continue
         setattr(p, key, value)
     try:
-        project.run(p)
+        if args.package_only:
+            if not p.package:
+                raise project.TranslateError("--package-only needs --package FILE")
+            project.write_package(p)
+        else:
+            project.run(p)
     except Exception as e:  # noqa: BLE001 - one line for the user, not a traceback
         print(f"error: {e}", file=sys.stderr)
         return 1

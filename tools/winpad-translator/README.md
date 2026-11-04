@@ -153,4 +153,38 @@ refuses it (a signature from another team than the app's: install the app from
 Xcode with the same Apple ID). Code maps themselves cannot be turned into code
 on the iPad: that would take a JIT.
 
+## One file for the iPad: the .winpad package
+
+`--package FILE` (or a folder, for `<game folder>.winpad` in it; "Write .winpad
+package" in the window) also writes the game as one file: a ZIP archive of the
+game folder as the app keeps it, with its `winpad.json`, cover and, when it was
+signed with `--sign-identity`, the image `fexaot.dylib` with `fexaot.build`.
+AirDrop it to the iPad or open it in Files (or copy it into WinPad Wine's
+Documents): the app unpacks it into `Documents/<folder>` and the game shows in
+its library. Files the game wrote there itself (saves) stay.
+
+- `--package-no-game`: only the settings, cover and signed image, for a game
+  the iPad has already (an update after a new translation round).
+- `--package-only`: package the game folder as it is, translate nothing.
+- `--library ... --build --package-dir FOLDER`: a package of each game
+  translated.
+
+An image that is not signed is left out, because iOS would not run it: the game
+then runs from the image in the app's IPA. The code maps are not packaged: the
+iPad writes its own, and the translator's copies name this computer's files.
+
+`winpad.json` in the package is the game folder's own (the library reads
+`title` and `exe`; other keys are game settings), plus a `package` object:
+
+```json
+{"title": "Need for Speed Underground 2", "exe": "SPEED2.EXE",
+ "package": {"format": 1, "folder": "NFSU2", "game_files": true, "image": "fexaot.dylib",
+             "app_build": "…", "made": "2026-11-04T13:00:00+00:00", "translator": "0.1.0"}}
+```
+
+The app reads packages with `tests/wine-app/Package.c` (zlib; stored and
+deflated entries, ZIP64 for games over 4 GB; names that would leave the folder
+are refused); `tests/test_package.py` builds it with the C compiler here and
+unpacks the translator's packages with it.
+
 Tests: `python3 -m unittest discover -s tools/winpad-translator/tests`.
