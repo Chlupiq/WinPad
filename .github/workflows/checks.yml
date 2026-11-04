@@ -851,6 +851,24 @@ jobs:
             echo "::error::an autorelease pool released a freed object"; exit 1
           fi
           echo "::notice::D3D9 cube on the simulator: device, Presents and drawables checked; GPU completion of its frames is not, the simulator lacks Metal 3 bindless (tier 2 argument buffers)"
+      # The same cube through Direct3D 8: d3d8to9's d3d8.dll turns it into D3D9 for the
+      # path above (it loads Wine's d3dx9_43 for shaders, or would stop at a message box).
+      - name: A 32-bit Direct3D 8 program creates its device and presents through d3d8to9, DXMT and Metal, on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "WINPAD-D3D8: present 3 hr=0x00000000"
+          WINEHOST_EXPECT_EXIT: running
+          WINEHOST_SECONDS: 20
+          WINEHOST_EXPECT_LOG: |
+            WINPAD-D3D8: Direct3DCreate8 ok
+            WINPAD-D3D8: device created
+            WINPAD-D3D8: present 1 hr=0x00000000
+            WINPAD-D3D8: present 2 hr=0x00000000
+            winehost: Metal layer
+            winehost: drawable 1 of Metal layer
+        run: |
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d8-cube.exe"
+          echo "::notice::D3D8 cube on the simulator: Direct3DCreate8, the device and Presents through d3d8to9 checked"
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
