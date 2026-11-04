@@ -164,7 +164,9 @@ def run(p, log=print):
         raise TranslateError("give the WinPad Wine IPA the iPad runs (or its i386-windows folder): "
                              "the compiler needs the same Wine DLLs as the iPad")
 
-    for i, folder in enumerate(p.ipad_maps):
+    # Zips the app shared with "Exportovat pro převodník" are unpacked into the work folder.
+    ipad_maps, _ = codemaps.unpack(p.ipad_maps, os.path.join(p.work_dir, "imports"), log)
+    for i, folder in enumerate(ipad_maps):
         tag = f"ipad{i}-{os.path.basename(os.path.normpath(folder))}"
         own = (p.ipad_folder or p.folder_name()) if p.own_maps_only else None
         log(f"=== {codemaps.import_maps(folder, cache_dir, tag, own)} code maps from {folder}"
