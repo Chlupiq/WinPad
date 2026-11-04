@@ -16,7 +16,7 @@ def parser():
     ap.add_argument("--game", dest="game_dir", help="the game's folder, as it is on the iPad")
     ap.add_argument("--work", dest="work_dir", help="where maps, caches and images are kept (default ~/WinPadTranslator/<game>)")
     ap.add_argument("--ipad-maps", action="append", default=[], metavar="FOLDER",
-                    help="Documents/fexcache/codemap/new copied off the iPad (may be repeated)")
+                    help="Documents/fexcache/<game> (or all of fexcache) copied off the iPad (may be repeated)")
     ap.add_argument("--drcov", dest="drcov_logs", action="append", default=[], metavar="LOG",
                     help="DynamoRIO drcov log of the game run on a PC (may be repeated)")
     ap.add_argument("--discover", action="store_true", help="also find the .exe's code statically")

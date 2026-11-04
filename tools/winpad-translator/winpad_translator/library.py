@@ -6,7 +6,8 @@ app holds any number of games: the library lists them (each a game folder with i
 work folder and settings, project.py), translates each from the code maps copied off
 the iPad and writes one IPA (or Xcode project) with all their images.
 
-The app keeps the code maps of every game in one folder (Documents/fexcache/codemap/new);
+The app keeps each game's code maps in Documents/fexcache/<game folder> (before, all in
+Documents/fexcache/codemap/new); the whole fexcache folder can be given, and
 each game takes its own from it (project.Project.own_maps_only).
 
 Adding a game means translating it and installing the app again, over the old one, so
@@ -142,7 +143,7 @@ def build(lib, ipad_maps=(), rebuild=False, log=print):
                 project.into_game_folder(p, image, log)
         else:
             log(f"##### {p.folder_name()}: no code maps yet. Play it on the iPad (it runs in the interpreter, "
-                "slowly), copy WinPad Wine › fexcache › codemap › new off it and build the library again")
+                "slowly), copy WinPad Wine › fexcache off it and build the library again")
             continue
         if os.path.isfile(image):
             images.append(image)

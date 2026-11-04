@@ -80,7 +80,7 @@ def main():
 
     path_row("Game folder", "game_dir", "dir", "the game as it is in WinPad Wine's Documents on the iPad")
     list_row("iPad code maps", "ipad_maps", "dir",
-             "folders copied off the iPad: WinPad Wine › fexcache › codemap › new")
+             "folders copied off the iPad: WinPad Wine › fexcache › <game> (or all of fexcache)")
     list_row("PC drcov logs", "drcov_logs", [("drcov log", "*.log"), ("all", "*")],
              "optional: drrun -t drcov -- GAME.EXE on a Windows PC, played for a while")
     discover = tk.BooleanVar(value=False)
@@ -252,7 +252,7 @@ def library_tab(tabs):
     ttk.Entry(frame, textvariable=maps).grid(row=2, column=1, sticky="ew", padx=6)
     ttk.Button(frame, text="…", width=3, command=lambda: maps.set(filedialog.askdirectory() or maps.get())).grid(
         row=2, column=2)
-    ttk.Label(frame, text="WinPad Wine › fexcache › codemap › new copied off the iPad: the maps of all games, "
+    ttk.Label(frame, text="WinPad Wine › fexcache copied off the iPad: a folder of maps per game, "
               "each game takes its own", foreground="gray").grid(row=3, column=1, sticky="w", padx=6)
 
     fields = {}

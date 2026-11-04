@@ -17,7 +17,7 @@ class Project:
     game_dir: str = ""
     # Where code maps, caches and images of this game are kept from one image to the next.
     work_dir: str = ""
-    # Folders copied off the iPad: the app's Documents/fexcache/codemap/new (with runtime/).
+    # Folders copied off the iPad: the app's Documents/fexcache/<game> (codemap/new, with runtime/).
     ipad_maps: list = dataclasses.field(default_factory=list)
     # DynamoRIO drcov logs of the game run natively on a PC (drrun -t drcov -- GAME.EXE).
     drcov_logs: list = dataclasses.field(default_factory=list)

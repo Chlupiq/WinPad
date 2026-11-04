@@ -39,7 +39,8 @@
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
 // interpreter (patches/fex-wow64/0019) and is written to the code map in
-// Documents/fexcache/codemap/new, so a later image can have it. If the run
+// Documents/fexcache/<game folder>/codemap/new (the test programs:
+// Documents/fexcache/codemap/new), so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
@@ -831,7 +832,10 @@ static CFTimeInterval fps_shown;
   const BOOL cube = [name isEqualToString:@"d3d9-cube"], game = [name isEqualToString:@"game"];
   NSString* bundle = NSBundle.mainBundle.bundlePath;
   NSString* prefix = MakePrefix(bundle);
-  NSString* cache = DocumentsPath(@"fexcache");
+  // Each game of the library keeps its code maps apart, in fexcache/<its folder>: one folder
+  // per game to copy off for WinPad Translator. The test programs use fexcache itself.
+  NSString* cache = self.game ? DocumentsPath([@"fexcache" stringByAppendingPathComponent:self.game.folder])
+                              : DocumentsPath(@"fexcache");
   [NSFileManager.defaultManager createDirectoryAtPath:[cache stringByAppendingPathComponent:@"codemap/new"]
                           withIntermediateDirectories:YES
                                            attributes:nil

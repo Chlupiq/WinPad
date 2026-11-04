@@ -15,7 +15,7 @@ Inputs, any combination:
 
 - **Code maps from the iPad.** Code missing from the image runs in FEX's
   interpreter on the iPad, slowly, and is recorded in the app's
-  `Documents/fexcache/codemap/new` (with `runtime/` for code the game builds at
+  `Documents/fexcache/<game folder>/codemap/new` (with `runtime/` for code the game builds at
   run time). Copy that folder off the iPad (Finder or Files) and add it. Each
   round of play → copy → translate makes the game faster.
 - **DynamoRIO logs from a Windows PC** (`drrun -t drcov -- GAME.EXE`, play for a
@@ -116,12 +116,15 @@ so one app holds any number of games. The translator keeps a library of them
 
 ```
 winpad-translator --library --add-game ~/Games/NFSU2 --add-game ~/Games/OtherGame
-winpad-translator --library --build --ipad-maps ~/from-ipad/new \
+winpad-translator --library --build --ipad-maps ~/from-ipad/fexcache \
     --ipa WinPadWine.ipa --out-ipa WinPad.ipa
 ```
 
-The app keeps the code maps of all its games in one folder; each game takes
-its own from it (the maps naming files in its folder on the iPad). Only games
+The app keeps each game's code maps in its own folder,
+`Documents/fexcache/<game folder>` (older builds: all in `fexcache/codemap/new`).
+Give the whole `fexcache` folder copied off the iPad; each game takes its own
+maps from it (the maps naming files in its folder on the iPad), and FEX's
+caches in it are left alone. Only games
 with new maps are compiled again; the others keep their image. The IPA written
 has every game's image and is called WinPad (`--app-name`). Install it over the
 old app (same bundle identifier, so its Documents and games stay). `--ipa` is

@@ -47,7 +47,9 @@ def map_files(folder):
     """Every non-empty code map under FOLDER, new or ready (the runtime/ code ranges are not maps)."""
     found = []
     for dirpath, dirnames, filenames in os.walk(folder):
-        dirnames[:] = sorted(d for d in dirnames if d != "runtime" and not d.startswith("."))
+        # Not FEX's own code caches either: their names end like ready maps' (a whole fexcache
+        # folder off the iPad, every game's maps in fexcache/<game>/codemap, may be given).
+        dirnames[:] = sorted(d for d in dirnames if d not in ("runtime", "cache") and not d.startswith("."))
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             if ((name.endswith(".bin") or READY_MAP.search(name)) and not name.startswith(".")

@@ -2,7 +2,7 @@
 
 The iPad app runs x86 code without a JIT, only from code compiled ahead of time
 into Frameworks/fexaot-<game>.dylib. Code the image lacks runs in FEX's
-interpreter, slowly, and is written to the app's Documents/fexcache/codemap/new.
+interpreter, slowly, and is written to the app's Documents/fexcache/<game>/codemap/new.
 This tool takes those code maps (and DynamoRIO logs of native PC runs, or a
 static walk of the game's .exe), compiles them with FEX's offline compiler and
 links the result into the dylib, for any game, on a Mac or a Windows PC.
