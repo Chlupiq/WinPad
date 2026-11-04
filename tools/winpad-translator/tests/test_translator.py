@@ -235,6 +235,7 @@ class LibraryTest(unittest.TestCase):
                       [(1, IPAD.format("Game A", "a.exe"), [0x1000])])
             write_map(os.path.join(fexcache, "Game B", "codemap", "new", "b.bin"),
                       [(2, IPAD.format("Game B", "b.exe"), [0x1000])])
+            os.makedirs(os.path.join(fexcache, "Game A", "cache"))
             write(os.path.join(fexcache, "Game A", "cache", "a.exe-0123456789abcdef-0000000000000000"), b"cache")
             self.assertEqual(len(codemaps.map_files(fexcache)), 2)
             self.assertEqual(codemaps.import_maps(fexcache, os.path.join(t, "a"), "x", "Game A"), 1)
