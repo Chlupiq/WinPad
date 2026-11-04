@@ -25,6 +25,14 @@ spustí). Ve složce hry může být:
   ani pomocný program.
 - `cover.png` nebo `cover.jpg`, obal hry.
 
+Hru jde poslat i jako jeden soubor `.winpad`, který vyrobí WinPad Translator
+(`--package`). Pošli ho na iPad přes AirDrop nebo ho otevři v Souborech
+(případně zkopíruj do Soubory → WinPad Wine): aplikace ho rozbalí do složky
+hry (`Documents/<složka>`) a hra se objeví v knihovně. Uložené pozice a jiné
+soubory, které hra ve složce vytvořila, zůstanou. Balíček s podepsaným
+obrazem (`--sign-identity` na Macu) přinese i přeložený kód, jinak se použije
+obraz z aplikace.
+
 Přeložený obraz hry je v projektu `Frameworks/<sdk>/fexaot-SLOŽKA.dylib`
 (jméno složky malými písmeny, ostatní znaky jako `-`), jinak
 `fexaot-game.dylib` z `game-aot.sh`. Knihovna u hry ukáže, jestli ho má.

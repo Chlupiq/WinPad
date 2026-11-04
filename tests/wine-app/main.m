@@ -999,6 +999,33 @@ static CFTimeInterval fps_shown;
   };
   self.window.rootViewController = library;
   [self.window makeKeyAndVisible];
+  // Started by opening a WinPad package (.winpad) from AirDrop or Files.
+  [self scene:scene openURLContexts:options.URLContexts];
+}
+
+// A WinPad package (.winpad, Info.plist's document type) opened from AirDrop, Files or a
+// share sheet: the library unpacks it into a game folder. While a game runs, the package
+// waits in Documents for the library's next start.
+- (void)scene:(UIScene*)scene openURLContexts:(NSSet<UIOpenURLContext*>*)contexts {
+  NSMutableArray<NSURL*>* urls = [NSMutableArray new];
+  for (UIOpenURLContext* context in contexts)
+    if (context.URL.isFileURL && [context.URL.pathExtension.lowercaseString isEqualToString:@"winpad"])
+      [urls addObject:context.URL];
+  if (!urls.count) return;
+  UIViewController* root = self.window.rootViewController;
+  if ([root isKindOfClass:LibraryViewController.class]) {
+    [(LibraryViewController*)root openPackages:urls];
+    return;
+  }
+  NSString* docs = DocumentsPath(@"");
+  for (NSURL* url in urls) {
+    if ([url.path.stringByResolvingSymlinksInPath hasPrefix:docs.stringByResolvingSymlinksInPath]) continue;
+    const BOOL scoped = [url startAccessingSecurityScopedResource];
+    [NSFileManager.defaultManager copyItemAtPath:url.path
+                                          toPath:[docs stringByAppendingPathComponent:url.lastPathComponent]
+                                           error:nil];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+  }
 }
 @end
 
