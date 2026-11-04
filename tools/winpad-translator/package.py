@@ -3,7 +3,8 @@ WinPad Translator.app on a Mac (zipped, so that the app keeps its permissions).
 
 Usage: package.py OUT_DIR [TOOLKIT_DIR]
 TOOLKIT_DIR (FEXOfflineCompiler.exe and dispatcher.bin of the WinPad Wine build the
-IPA comes from, CI's WinPadTranslator-toolkit) is put inside the app.
+IPA comes from, CI's WinPadTranslator-toolkit, and rcodesign from fetch-rcodesign.py)
+is put inside the app.
 """
 import os
 import shutil
@@ -26,10 +27,13 @@ def main(argv):
     for folder in ("tests/fex-wow64", "tools/cache2macho", "tools/fxcc-inspect"):
         args += ["--paths", os.path.join(root, folder)]
     for module in ("codemap", "discover", "drcov2codemap", "cache2macho", "aotindex", "fxcc_inspect",
-                   "xxhash", "pefile", "capstone"):
+                   "xxhash", "pefile", "capstone", "nacl", "cryptography"):
         args += ["--hidden-import", module]
     args += ["--collect-all", "capstone"]
     args += ["--add-data", f"{os.path.join(here, 'data')}{sep}tools/winpad-translator/data"]
+    # The cloud signing job runs signipa.py on its own: its source goes into the user's repository.
+    args += ["--add-data", f"{os.path.join(here, 'winpad_translator', 'signipa.py')}{sep}"
+             "tools/winpad-translator/data/cloud-sign"]
     if toolkit:
         args += ["--add-data", f"{toolkit}{sep}toolkit"]
     if sys.platform == "darwin":

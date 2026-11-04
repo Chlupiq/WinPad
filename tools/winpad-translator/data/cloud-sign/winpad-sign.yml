@@ -1,0 +1,76 @@
+# WinPad Translator's signing job: put into your own PRIVATE repository by
+# winpad-translator --cloud-setup (tools/winpad-translator/winpad_translator/cloud.py).
+# The translator uploads the app (IPA with your games' images) to a draft release, starts
+# this job, downloads the signed IPA from the same release and deletes the release.
+# Secrets (Settings > Secrets and variables > Actions): WINPAD_P12 (the .p12 in base64),
+# WINPAD_P12_PASSWORD, WINPAD_PROFILE (the .mobileprovision in base64).
+name: WinPad sign
+run-name: WinPad sign ${{ inputs.release_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: the draft release with unsigned.ipa
+        required: true
+        type: string
+      bundle_id:
+        description: bundle identifier (empty - the profile's choice)
+        required: false
+        type: string
+        default: ""
+      app_name:
+        description: name under the icon (empty - as it is)
+        required: false
+        type: string
+        default: ""
+permissions:
+  contents: write
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RCODESIGN: "0.29.0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: rcodesign
+        run: |
+          set -eu
+          name=apple-codesign-$RCODESIGN-x86_64-unknown-linux-musl
+          curl -fsSL -o "$RUNNER_TEMP/rc.tar.gz" \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F$RCODESIGN/$name.tar.gz"
+          tar -xzf "$RUNNER_TEMP/rc.tar.gz" -C "$RUNNER_TEMP"
+          install -m 755 "$RUNNER_TEMP/$name/rcodesign" "$RUNNER_TEMP/rcodesign"
+          "$RUNNER_TEMP/rcodesign" --version
+      - name: Sign
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release_id }}
+          WINPAD_P12: ${{ secrets.WINPAD_P12 }}
+          WINPAD_P12_PASSWORD: ${{ secrets.WINPAD_P12_PASSWORD }}
+          WINPAD_PROFILE: ${{ secrets.WINPAD_PROFILE }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          set -eu
+          [ -n "$WINPAD_P12" ] && [ -n "$WINPAD_PROFILE" ] ||
+            { echo "::error::the secrets WINPAD_P12 and WINPAD_PROFILE are missing"; exit 1; }
+          umask 077
+          w=$RUNNER_TEMP/sign
+          mkdir -p "$w"
+          echo "$WINPAD_P12" | base64 -d >"$w/cert.p12"
+          echo "$WINPAD_PROFILE" | base64 -d >"$w/profile.mobileprovision"
+          printf %s "$WINPAD_P12_PASSWORD" >"$w/password"
+          asset=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE/assets" --jq '.[] | select(.name=="unsigned.ipa") | .id')
+          [ -n "$asset" ] || { echo "::error::no unsigned.ipa in release $RELEASE"; exit 1; }
+          gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$asset" >"$w/unsigned.ipa"
+          set -- --profile "$w/profile.mobileprovision" --p12 "$w/cert.p12" --p12-password-file "$w/password" \
+            --rcodesign "$RUNNER_TEMP/rcodesign"
+          [ -z "$BUNDLE_ID" ] || set -- "$@" --bundle-id "$BUNDLE_ID"
+          [ -z "$APP_NAME" ] || set -- "$@" --app-name "$APP_NAME"
+          python3 winpad-sign/signipa.py "$w/unsigned.ipa" "$w/signed.ipa" "$@"
+          upload=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE" --jq .upload_url | sed 's/{.*//')
+          curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" \
+            --data-binary "@$w/signed.ipa" "$upload?name=signed.ipa" >/dev/null
+          rm -rf "$w"
+          echo "signed.ipa is in release $RELEASE"

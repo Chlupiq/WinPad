@@ -146,4 +146,71 @@ refuses it (a signature from another team than the app's: install the app from
 Xcode with the same Apple ID). Code maps themselves cannot be turned into code
 on the iPad: that would take a JIT.
 
-Tests: `python3 -m unittest discover -s tools/winpad-translator/tests`.
+## Sign and install in one step
+
+Translated code is executable code, and an iPad runs only code signed for it, so the
+image runs from an app signed with your Apple certificate. With `--install` ("Sign and
+install on the iPad" in the window, both tabs) the translator signs the app with the new
+image and installs it on the iPad, connected by cable or on the same Wi-Fi, right after
+translating (winpad_translator/install.py). Installed over the old app (same bundle
+identifier), it keeps its Documents and games.
+
+| Computer | What signs | What it needs |
+|---|---|---|
+| Mac with the `WinPadWine-xcode` project (`--xcode-project`) | `xcodebuild` builds the app for your team; Xcode makes the certificate and profile itself and registers a new iPad (`-allowProvisioningUpdates`) | your Apple ID in Xcode (Settings › Accounts), free or paid; the team is your Apple Development identity's (`--team` otherwise) |
+| Mac with only the IPA | `codesign` with your Apple Development identity and the profile Xcode made for the app | one Run of WinPadWine from Xcode with your team (that makes the profile), or `--profile` |
+| Windows PC, Linux | `rcodesign` (apple-codesign; the packaged app brings it) | your certificate as a `.p12` (`--p12`, `--p12-password` or `WINPAD_P12_PASSWORD`) and a profile (`--profile`): paid Apple Developer account |
+| Windows PC, nothing installed | a GitHub Actions job in your own private repository (`--cloud-sign OWNER/REPO`) | the same `.p12` and profile, once stored in that repository |
+
+The app goes onto the iPad with Xcode's `devicectl` on a Mac and with `ideviceinstaller`
+(libimobiledevice) elsewhere when it is installed; otherwise the translator writes
+`…-signed.ipa`, which installs as it is (Sideloadly with Signing mode "Normal install",
+Apple Configurator). `--device` picks the iPad when several are connected; `--sign-only`
+only writes the signed IPA; `--bundle-id` sets another bundle identifier (with a free
+Apple ID it must be one nobody else registered). The first app from a new certificate
+needs Settings › General › VPN & Device Management › trust, and iOS 16+ Developer Mode.
+
+```
+# Mac: translate, build for your team, install
+winpad-translator --game ~/Games/NFSU2 --ipad-maps ~/from-ipad/fexcache \
+    --xcode-project ~/Developer/wine-app/WinPadWine-xcode --install
+# a library of games, the same way
+winpad-translator --library --build --ipad-maps ~/from-ipad/fexcache --install
+```
+
+### A certificate without a Mac
+
+developer.apple.com takes a certificate signing request; the translator makes one and
+turns Apple's certificate into the `.p12` (winpad_translator/applecert.py):
+
+```
+winpad-translator --cert-request you@example.com
+#   upload ~/WinPadTranslator/certificate/winpad.certSigningRequest at developer.apple.com ›
+#   Certificates › + › Apple Development, download the .cer
+winpad-translator --cert-p12 development.cer --p12-password SECRET
+#   then Profiles › + › iOS App Development: the app's identifier
+#   (com.chlupiq.winpad.wine or your own), this certificate, your iPad › download
+```
+
+### Signing in the cloud
+
+For a Windows PC with nothing to sign with. Once:
+
+```
+winpad-translator --cloud-setup you/winpad-sign --github-token TOKEN \
+    --p12 winpad.p12 --p12-password SECRET --profile WinPad.mobileprovision
+```
+
+makes the private repository `you/winpad-sign` (or takes yours), puts the signing job
+(data/cloud-sign/winpad-sign.yml) and `signipa.py` into it and stores the certificate,
+its password and the profile as its Actions secrets, encrypted for the repository
+(PyNaCl). The token (a fine-grained one for that repository with Contents, Actions,
+Secrets and Administration, or a classic one with `repo` and `workflow`) is kept in
+`~/WinPadTranslator/github-token`. Then `--cloud-sign you/winpad-sign` uploads the IPA to a
+draft release of the repository, starts the job, downloads the signed IPA and deletes the
+release. The IPA holds your games' translated code, so a public repository is refused.
+On GitHub's free plan a private repository has 2,000 Actions minutes a month; one
+signing takes about a minute.
+
+Tests: `python3 -m unittest discover -s tools/winpad-translator/tests` (signing needs
+rcodesign: `python3 tools/winpad-translator/fetch-rcodesign.py FOLDER`).
