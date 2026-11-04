@@ -73,7 +73,9 @@ class DynamoRioTest(unittest.TestCase):
         with zipfile.ZipFile(buf, "w") as z:
             z.writestr("DynamoRIO-Windows-11.3.0/bin32/drrun.exe", b"MZ")
             z.writestr("DynamoRIO-Windows-11.3.0/bin64/drrun.exe", b"MZ")
-        releases = [{"tag_name": "cronbuild-11.90", "prerelease": True, "assets": []},
+        releases = [{"tag_name": "cronbuild-11.91.20756", "assets": [
+                        {"name": "DynamoRIO-Windows-11.91.20756.zip", "browser_download_url": "https://x/cron"}]},
+                    {"tag_name": "cronbuild-11.90", "prerelease": True, "assets": []},
                     {"tag_name": "release_11.3.0", "assets": [
                         {"name": "DynamoRIO-Linux-11.3.0.tar.gz", "browser_download_url": "https://x/linux"},
                         {"name": "DynamoRIO-Windows-11.3.0.zip", "browser_download_url": "https://x/win"}]}]

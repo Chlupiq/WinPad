@@ -106,12 +106,13 @@ def latest_dynamorio_asset(urlopen=urllib.request.urlopen):
     # GitHub answers 60 anonymous API requests an hour per address; a token raises that.
     if os.environ.get("GITHUB_TOKEN"):
         headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
-    req = urllib.request.Request(DYNAMORIO_RELEASES + "?per_page=10", headers=headers)
+    req = urllib.request.Request(DYNAMORIO_RELEASES + "?per_page=50", headers=headers)
     with urlopen(req, timeout=60) as r:
         releases = json.load(r)
-    for rel in releases:
-        if rel.get("draft") or rel.get("prerelease"):
-            continue
+    # Releases (release_X.Y.Z) first: the weekly cronbuild-* ones are listed as releases too.
+    ordered = sorted((r for r in releases if not r.get("draft") and not r.get("prerelease")),
+                     key=lambda r: not r.get("tag_name", "").startswith("release_"))
+    for rel in ordered:
         for a in rel.get("assets", []):
             if DYNAMORIO_ASSET.match(a.get("name", "")):
                 return rel.get("tag_name", ""), a["name"], a["browser_download_url"]

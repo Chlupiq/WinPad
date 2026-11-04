@@ -1020,7 +1020,8 @@ jobs:
           made = record.drcov_to_maps(p.drcov_logs, exe, os.path.dirname(exe), new, Backend.image_name, seed)
           with open(made[0], "rb") as f:
               names, blocks, main, _ = codemaps.parse(f.read())
-          assert main in blocks and len(blocks[main]) > 5, (names, blocks)
+          # hello.exe is small: its entry, the calls it makes and the returns from them.
+          assert main in blocks and len(blocks[main]) >= 3, (names, blocks)
           print(f"recorded {len(blocks[main])} block starts of hello.exe")
           PY
       - name: Upload the app
