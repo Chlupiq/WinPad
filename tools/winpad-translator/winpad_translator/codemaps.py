@@ -47,7 +47,9 @@ def map_files(folder):
     """Every non-empty code map under FOLDER, new or ready (the runtime/ code ranges are not maps)."""
     found = []
     for dirpath, dirnames, filenames in os.walk(folder):
-        dirnames[:] = sorted(d for d in dirnames if d != "runtime" and not d.startswith("."))
+        # Not FEX's own code caches either: their names end like ready maps' (a whole fexcache
+        # folder off the iPad, every game's maps in fexcache/<game>/codemap, may be given).
+        dirnames[:] = sorted(d for d in dirnames if d not in ("runtime", "cache") and not d.startswith("."))
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             if ((name.endswith(".bin") or READY_MAP.search(name)) and not name.startswith(".")
@@ -56,12 +58,24 @@ def map_files(folder):
     return found
 
 
-def import_maps(source, cache_dir, tag):
+def map_folders(path):
+    """The iPad Documents folders (games) the images of the map at PATH are in."""
+    with open(path, "rb") as f:
+        names = parse(f.read())[0]
+    return ipad_folders(names.values())
+
+
+def import_maps(source, cache_dir, tag, folder=None):
     """Copies the code maps under SOURCE (an iPad's codemap/new, copied off it) and the
-    runtime code ranges next to them into CACHE_DIR/codemap/new. Returns how many maps."""
+    runtime code ranges next to them into CACHE_DIR/codemap/new. With FOLDER, the maps of
+    other games are left out: one that names an image in another of the iPad's game
+    folders and none in FOLDER (the app keeps the maps of all its games in one place).
+    Returns how many maps."""
     new = os.path.join(cache_dir, "codemap", "new")
     os.makedirs(new, exist_ok=True)
     maps = map_files(source)
+    if folder:
+        maps = [m for m in maps if not map_folders(m) or folder.lower() in (f.lower() for f in map_folders(m))]
     for i, path in enumerate(maps):
         # The compiler only takes *.bin from codemap/new.
         name = os.path.basename(path)

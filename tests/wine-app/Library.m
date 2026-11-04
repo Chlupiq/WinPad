@@ -6,12 +6,23 @@
 // and its largest .exe that is no installer or helper is the program. Its
 // cover is cover.png or cover.jpg in the folder. A game's AOT image is
 // Frameworks/fexaot-FOLDER.dylib (WinPadGameImage), else fexaot-game.dylib,
-// the one tests/wine-app/game-aot.sh makes.
+// the one tests/wine-app/game-aot.sh makes. So one app holds the images of
+// any number of games (WinPad Translator's library writes them into one IPA).
+// An image in the game folder itself, fexaot.dylib, comes first: WinPad
+// Translator signs it on the Mac with the developer identity the app is
+// signed with (--sign-identity), so a game is added without installing the
+// app again. It is used only when its fexaot.build names this build of the
+// app (winpad-build.txt in the bundle), and main.m falls back to the bundle's
+// image if iOS refuses to load it.
 //
-// The focused game shows large above the row of all of them. A game
-// controller (the d-pad or left stick picks, A starts, Y opens the
-// settings, B closes them), a hardware keyboard (arrows, Enter) or a tap
-// picks and starts one. Wine runs once per process, so a game starts in
+// It looks like a console's home screen: a row of square tiles, the focused
+// one large with a white frame and its title, tags and Spustit below, on a
+// backdrop picked in the settings (Nastavení › Vzhled: four glows, the
+// focused game's cover blurred, or a picture of the user's own, with or
+// without the waves). On an iPhone, which runs it on its side, everything is
+// smaller. A game controller (the d-pad or left stick picks, A starts, Y
+// opens the settings, B closes them), a hardware keyboard (arrows, Enter) or
+// a tap picks and starts one. Wine runs once per process, so a game starts in
 // place of the library (main.m) and the app is started again for the next.
 //
 // With the "libraryTest" setting (CI, tests/wine-app/build-xcode.sh) the
@@ -20,6 +31,7 @@
 #import "Library.h"
 
 #import <GameController/GameController.h>
+#import <PhotosUI/PhotosUI.h>
 
 #include <math.h>
 #include <string.h>
@@ -57,6 +69,30 @@ static NSString* WinPadGameImage(NSString* folder) {
     if ([NSFileManager.defaultManager fileExistsAtPath:path]) return path;
   }
   return nil;
+}
+
+// The build of this app (build-xcode.sh's winpad-build.txt), or nil.
+static NSString* AppBuild(void) {
+  NSString* path = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"winpad-build.txt"];
+  NSString* build = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+  build = [build stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  return build.length ? build : nil;
+}
+
+// The game folder's own image, if it is for this build of the app; else nil, with why in *note.
+static NSString* FolderImage(NSString* dir, NSString** note) {
+  NSString* image = [dir stringByAppendingPathComponent:@"fexaot.dylib"];
+  if (![NSFileManager.defaultManager fileExistsAtPath:image]) return nil;
+  NSString* app = AppBuild();
+  NSString* made = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"fexaot.build"]
+                                             encoding:NSUTF8StringEncoding
+                                                error:nil];
+  made = [made stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (app && ![made isEqualToString:app]) {
+    *note = [NSString stringWithFormat:@"fexaot.dylib is for app build %@, this is %@", made.length ? made : @"?", app];
+    return nil;
+  }
+  return image;
 }
 
 // An installer, an uninstaller, a settings tool and the like, by its name.
@@ -121,7 +157,12 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     NSString* title = [info[@"title"] isKindOfClass:NSString.class] ? info[@"title"] : nil;
     game.title = title.length ? title : folder;
     game.arch = ProgramArch([docs stringByAppendingPathComponent:game.exe]);
-    game.image = WinPadGameImage(folder);
+    game.bundleImage = WinPadGameImage(folder);
+    NSString* note = nil;
+    NSString* own = FolderImage(dir, &note);
+    game.image = own ?: game.bundleImage;
+    game.imageInFolder = own != nil;
+    game.folderImageNote = note;
     for (NSString* f in files) {
       if ([@[ @"cover.png", @"cover.jpg", @"cover.jpeg" ] containsObject:f.lowercaseString]) {
         game.cover = [UIImage imageWithContentsOfFile:[dir stringByAppendingPathComponent:f]];
@@ -274,6 +315,215 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
   return view;
 }
 
+// The backgrounds the library and the settings can have (Nastavení › Vzhled, the "background"
+// setting): a glow from the top left in three shades, the focused game's cover blurred, or
+// the user's own picture, Documents/background.jpg (from Photos in the settings, or copied in).
+typedef struct {
+  const char* id;
+  const char* name;
+  uint32_t glow, mid, edge;
+} WinPadBackground;
+static const WinPadBackground Backgrounds[] = {
+    {"blue", "Modrá vlna", 0x1B4F9C, 0x0B2A63, 0x04122E},
+    {"midnight", "Půlnoc", 0x2A3142, 0x12161F, 0x06080C},
+    {"dusk", "Fialový soumrak", 0x6A35A0, 0x2E1858, 0x0E0620},
+    {"emerald", "Smaragd", 0x1F7A5A, 0x0E3D2E, 0x04140F},
+    {"cover", "Obal vybrané hry", 0x3B4250, 0x1A1E26, 0x0A0E16},
+    {"custom", "Vlastní obrázek", 0x3A3F4A, 0x1A1D24, 0x0A0C10},
+};
+enum { BackgroundCount = sizeof(Backgrounds) / sizeof(Backgrounds[0]) };
+
+static NSString* CustomBackgroundPath(void) {
+  return [Documents() stringByAppendingPathComponent:@"background.jpg"];
+}
+
+static const WinPadBackground* CurrentBackground(void) {
+  NSString* saved = [NSUserDefaults.standardUserDefaults stringForKey:@"background"];
+  for (int i = 0; i < BackgroundCount; i++)
+    if ([saved isEqualToString:@(Backgrounds[i].id)]) return &Backgrounds[i];
+  return &Backgrounds[0];
+}
+
+static BOOL BackgroundWaves(void) {
+  id waves = [NSUserDefaults.standardUserDefaults objectForKey:@"backgroundWaves"];
+  return !waves || [waves boolValue];
+}
+
+// The background itself; it follows the settings as they change.
+@interface WinPadBackdrop : UIView
+@property(nonatomic, strong) UIImage* cover;  // the focused game's cover, for the "cover" background
+@end
+
+@interface WinPadBackdrop ()
+@property(nonatomic, strong) CAGradientLayer* glow;
+@property(nonatomic, strong) UIImageView* picture;
+@property(nonatomic, strong) UIVisualEffectView* blur;
+@property(nonatomic, strong) UIView* dim;
+@property(nonatomic, strong) CAShapeLayer* wave1;
+@property(nonatomic, strong) CAShapeLayer* wave2;
+@property(nonatomic, strong) id observer;
+- (void)refresh;
+@end
+
+@implementation WinPadBackdrop
+- (instancetype)initWithFrame:(CGRect)frame {
+  self = [super initWithFrame:frame];
+  self.userInteractionEnabled = NO;
+  self.clipsToBounds = YES;
+  self.glow = [CAGradientLayer layer];
+  self.glow.type = kCAGradientLayerRadial;
+  self.glow.startPoint = CGPointMake(0.2, 0);
+  self.glow.endPoint = CGPointMake(1.4, 0.9);
+  self.glow.locations = @[ @0, @0.45, @1 ];
+  [self.layer addSublayer:self.glow];
+  self.picture = [UIImageView new];
+  self.picture.contentMode = UIViewContentModeScaleAspectFill;
+  [self addSubview:self.picture];
+  self.blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
+  [self addSubview:self.blur];
+  self.dim = [UIView new];
+  self.dim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
+  [self addSubview:self.dim];
+  self.wave1 = [CAShapeLayer layer];
+  self.wave2 = [CAShapeLayer layer];
+  for (CAShapeLayer* wave in @[ self.wave1, self.wave2 ]) {
+    wave.fillColor = UIColor.clearColor.CGColor;
+    wave.lineWidth = 2;
+    [self.layer addSublayer:wave];
+  }
+  self.wave1.strokeColor = [Hex(0x7FB2FF) colorWithAlphaComponent:0.18].CGColor;
+  self.wave2.strokeColor = [Hex(0x7FB2FF) colorWithAlphaComponent:0.10].CGColor;
+  __weak WinPadBackdrop* weak = self;
+  self.observer = [NSNotificationCenter.defaultCenter addObserverForName:NSUserDefaultsDidChangeNotification
+                                                                  object:nil
+                                                                   queue:NSOperationQueue.mainQueue
+                                                              usingBlock:^(NSNotification* note) {
+                                                                [weak refresh];
+                                                              }];
+  [self refresh];
+  return self;
+}
+
+- (void)dealloc {
+  [NSNotificationCenter.defaultCenter removeObserver:self.observer];
+}
+
+- (void)setCover:(UIImage*)cover {
+  _cover = cover;
+  [self refresh];
+}
+
+- (void)refresh {
+  const WinPadBackground* bg = CurrentBackground();
+  self.glow.colors = @[ (id)Hex(bg->glow).CGColor, (id)Hex(bg->mid).CGColor, (id)Hex(bg->edge).CGColor ];
+  UIImage* picture = nil;
+  if (!strcmp(bg->id, "cover")) picture = self.cover;
+  if (!strcmp(bg->id, "custom")) picture = [UIImage imageWithContentsOfFile:CustomBackgroundPath()];
+  self.picture.image = picture;
+  self.picture.hidden = self.dim.hidden = !picture;
+  // A cover is blurred to a backdrop; the user's own picture shows as it is, a little darker.
+  self.blur.hidden = !picture || strcmp(bg->id, "cover");
+  self.wave1.hidden = self.wave2.hidden = !BackgroundWaves();
+}
+
+- (void)layoutSubviews {
+  [super layoutSubviews];
+  const CGRect b = self.bounds;
+  [CATransaction begin];
+  [CATransaction setDisableActions:YES];
+  self.glow.frame = b;
+  const CGFloat w = b.size.width, h = b.size.height;
+  for (int i = 0; i < 2; i++) {
+    const CGFloat y = h * (0.70 + 0.04 * i);
+    UIBezierPath* path = [UIBezierPath bezierPath];
+    [path moveToPoint:CGPointMake(0, y)];
+    [path addCurveToPoint:CGPointMake(w * 0.66, y + h * 0.01) controlPoint1:CGPointMake(w * 0.23, y - h * 0.08)
+            controlPoint2:CGPointMake(w * 0.45, y + h * 0.12)];
+    [path addCurveToPoint:CGPointMake(w, y - h * 0.02) controlPoint1:CGPointMake(w * 0.85, y - h * 0.08)
+            controlPoint2:CGPointMake(w * 0.95, y - h * 0.05)];
+    (i ? self.wave2 : self.wave1).path = path.CGPath;
+  }
+  [CATransaction commit];
+  self.picture.frame = self.blur.frame = self.dim.frame = b;
+}
+@end
+
+// Picks the background: one of Backgrounds, a picture from Photos for "custom".
+@interface WinPadBackgroundViewController : UITableViewController <PHPickerViewControllerDelegate>
+@end
+
+@implementation WinPadBackgroundViewController
+- (instancetype)init {
+  return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.title = @"Pozadí";
+  self.tableView.backgroundView = [WinPadBackdrop new];
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  return BackgroundCount;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
+  return @"Vlastní obrázek vybereš z Fotek, nebo ho nahraj jako background.jpg do Soubory › WinPad Wine.";
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
+  UITableViewCell* cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+  const WinPadBackground* bg = &Backgrounds[path.row];
+  cell.textLabel.text = @(bg->name);
+  cell.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+  // A swatch of its colours.
+  UIGraphicsImageRenderer* r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(44, 30)];
+  cell.imageView.image = [r imageWithActions:^(UIGraphicsImageRendererContext* ctx) {
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGGradientRef g = CGGradientCreateWithColors(
+        space, (__bridge CFArrayRef) @[ (id)Hex(bg->glow).CGColor, (id)Hex(bg->mid).CGColor, (id)Hex(bg->edge).CGColor ], NULL);
+    [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 44, 30) cornerRadius:5] addClip];
+    CGContextDrawRadialGradient(ctx.CGContext, g, CGPointMake(8, 0), 0, CGPointMake(8, 0), 52, kCGGradientDrawsAfterEndLocation);
+    CGGradientRelease(g);
+    CGColorSpaceRelease(space);
+  }];
+  cell.accessoryType = bg == CurrentBackground() ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+  return cell;
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
+  [tableView deselectRowAtIndexPath:path animated:YES];
+  const WinPadBackground* bg = &Backgrounds[path.row];
+  if (!strcmp(bg->id, "custom")) {
+    PHPickerConfiguration* config = [PHPickerConfiguration new];
+    config.filter = PHPickerFilter.imagesFilter;
+    config.selectionLimit = 1;
+    PHPickerViewController* picker = [[PHPickerViewController alloc] initWithConfiguration:config];
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+    return;
+  }
+  [NSUserDefaults.standardUserDefaults setObject:@(bg->id) forKey:@"background"];
+  [tableView reloadData];
+}
+
+- (void)picker:(PHPickerViewController*)picker didFinishPicking:(NSArray<PHPickerResult*>*)results {
+  [picker dismissViewControllerAnimated:YES completion:nil];
+  NSItemProvider* item = results.firstObject.itemProvider;
+  if (![item canLoadObjectOfClass:UIImage.class]) return;
+  __weak WinPadBackgroundViewController* weak = self;
+  [item loadObjectOfClass:UIImage.class
+        completionHandler:^(id<NSItemProviderReading> object, NSError* error) {
+          NSData* jpeg = [object isKindOfClass:UIImage.class] ? UIImageJPEGRepresentation((UIImage*)object, 0.9) : nil;
+          dispatch_async(dispatch_get_main_queue(), ^{
+            if (![jpeg writeToFile:CustomBackgroundPath() atomically:YES]) return;
+            [NSUserDefaults.standardUserDefaults setObject:@"custom" forKey:@"background"];
+            [weak.tableView reloadData];
+          });
+        }];
+}
+@end
+
 // The settings: touch controls, the controller's keys, the last log, the test programs.
 @interface WinPadLogViewController : UIViewController
 @end
@@ -299,6 +549,9 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 }
 @end
 
+// The settings' section 0 is the look; the others follow it, numbered from 0 after it in the code.
+enum { AppearanceSection = 0 };
+
 @interface WinPadSettingsViewController : UITableViewController
 @property(nonatomic, copy) void (^run)(NSString* program);
 @end
@@ -311,6 +564,7 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 - (void)viewDidLoad {
   [super viewDidLoad];
   self.title = @"Nastavení";
+  self.tableView.backgroundView = [WinPadBackdrop new];
   self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                                                          target:self
                                                                                          action:@selector(done)];
@@ -332,18 +586,22 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
-  return 4;
+  return 5;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  if (section == AppearanceSection) return 2;
+  section -= 1;
   return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"O aplikaci" ][section];
+  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
+  if (section == AppearanceSection) return @"Pozadí knihovny a nastavení, na iPadu i iPhonu.";
+  section -= 1;
   if (section == 0) return @"Ovladač na obrazovce se ukáže jen tehdy, když není připojený herní ovladač.";
   if (section == 1)
     return @"Klávesa, kterou hra dostane za každé tlačítko ovladače. Nahoru až doprava jsou křížový ovladač "
@@ -356,6 +614,23 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 
 - (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
   UITableViewCell* cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+  cell.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+  if (path.section == AppearanceSection && path.row == 0) {
+    cell.textLabel.text = @"Pozadí";
+    cell.detailTextLabel.text = @(CurrentBackground()->name);
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+  }
+  if (path.section == AppearanceSection) {
+    cell.textLabel.text = @"Vlny na pozadí";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = BackgroundWaves();
+    [toggle addTarget:self action:@selector(wavesChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - 1];
   if (path.section == 0 && path.row == 0) {
     cell.textLabel.text = @"Dotykové ovládání";
     UISwitch* toggle = [UISwitch new];
@@ -399,6 +674,10 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
   return cell;
 }
 
+- (void)wavesChanged:(UISwitch*)toggle {
+  [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"backgroundWaves"];
+}
+
 - (void)touchChanged:(UISwitch*)toggle {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"touchControls"];
 }
@@ -409,6 +688,11 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
   [tableView deselectRowAtIndexPath:path animated:YES];
+  if (path.section == AppearanceSection) {
+    if (path.row == 0) [self.navigationController pushViewController:[WinPadBackgroundViewController new] animated:YES];
+    return;
+  }
+  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - 1];
   if (path.section == 1 && path.row < PadCount) {
     WinPadKeyPickerViewController* picker = [WinPadKeyPickerViewController new];
     picker.input = (int)path.row;
@@ -417,7 +701,7 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
   }
   if (path.section == 1) {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"padKeys"];
-    [tableView reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationNone];
+    [tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
     return;
   }
   if (path.section != 2 || path.row == 0) return;
@@ -436,15 +720,15 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 @interface LibraryViewController ()
 @property(nonatomic, strong) NSArray<WinPadGame*>* games;
 @property(nonatomic) NSInteger focus;
-@property(nonatomic, strong) UILabel* logo;
+@property(nonatomic, strong) WinPadBackdrop* backdrop;
 @property(nonatomic, strong) UIButton* settings;
-@property(nonatomic, strong) UIImageView* heroCover;
-@property(nonatomic, strong) UILabel* heroPlaceholder;
-@property(nonatomic, strong) UILabel* kicker;
+@property(nonatomic, strong) UILabel* clock;
+@property(nonatomic, strong) NSTimer* clockTimer;
 @property(nonatomic, strong) UILabel* heroTitle;
 @property(nonatomic, strong) UIStackView* tags;
 @property(nonatomic, strong) UIButton* play;
-@property(nonatomic, strong) UILabel* rowTitle;
+@property(nonatomic, strong) UIView* info;
+@property(nonatomic, strong) UILabel* infoText;
 @property(nonatomic, strong) UIScrollView* row;
 @property(nonatomic, strong) NSMutableArray<UIButton*>* cards;
 @property(nonatomic, strong) UILabel* addGame;
@@ -453,8 +737,10 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 @property(nonatomic, strong) NSMutableArray* observers;
 @property(nonatomic) unsigned pad;  // the controller buttons held at the last change (Nav*)
 @property(nonatomic) BOOL started;
+@property(nonatomic, readonly) BOOL compact;  // an iPhone's height: smaller, no hints or info card
 - (void)reload;
 - (void)showFocus;
+- (void)tick;
 - (void)moveFocusBy:(NSInteger)by;
 - (void)startFocused;
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game;
@@ -464,45 +750,70 @@ static UIImageView* CoverView(UILabel** placeholder, CGFloat font) {
 @end
 
 enum { NavLeft = 1, NavRight = 2, NavA = 4, NavB = 8, NavY = 16 };
-// A card's parts; its own tag is the game's index.
-enum { CoverTag = 1001, TitleTag = 1002 };
+// A card's cover; the card's own tag is the game's index.
+enum { CoverTag = 1001 };
+
+// The game's tags: on the backdrop they are light and see-through.
+static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
+  WinPadTag* tag = Tag(text, fg, 0);
+  tag.backgroundColor = bg;
+  tag.layer.cornerRadius = 4;
+  return tag;
+}
 
 @implementation LibraryViewController
+// The look of a console's home screen: a row of square tiles at the top, the focused one
+// larger with a white frame, its title, tags and Spustit below, on the chosen backdrop. On
+// an iPhone (on its side) everything is smaller, without the hints and the info card.
+- (BOOL)compact {
+  return self.view.bounds.size.height < 500;
+}
+
 - (void)viewDidLoad {
   [super viewDidLoad];
-  self.view.backgroundColor = Hex(0x0E1116);
+  self.view.backgroundColor = Hex(0x04122E);
   self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
 
-  self.logo = [UILabel new];
-  self.logo.text = @"WinPad";
-  self.logo.font = [UIFont systemFontOfSize:32 weight:UIFontWeightBold];
-  self.logo.textColor = Hex(0xE8ECF2);
-  [self.view addSubview:self.logo];
+  self.backdrop = [WinPadBackdrop new];
+  [self.view addSubview:self.backdrop];
 
   self.settings = [UIButton buttonWithType:UIButtonTypeSystem];
-  [self.settings setImage:[UIImage systemImageNamed:@"gearshape.fill"] forState:UIControlStateNormal];
-  self.settings.tintColor = Hex(0xE8ECF2);
-  self.settings.backgroundColor = Hex(0x171B22);
-  self.settings.layer.cornerRadius = 26;
+  [self.settings setImage:[UIImage systemImageNamed:@"slider.horizontal.3"] forState:UIControlStateNormal];
+  self.settings.tintColor = UIColor.whiteColor;
+  self.settings.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
   self.settings.accessibilityLabel = @"Nastavení";
   [self.settings addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
   [self.view addSubview:self.settings];
 
-  UILabel* placeholder;
-  self.heroCover = CoverView(&placeholder, 28);
-  self.heroCover.layer.cornerRadius = 20;
-  self.heroPlaceholder = placeholder;
-  [self.view addSubview:self.heroCover];
+  self.clock = [UILabel new];
+  self.clock.textColor = Hex(0xDCE8FF);
+  self.clock.textAlignment = NSTextAlignmentRight;
+  [self.view addSubview:self.clock];
+  [self tick];
+  __weak LibraryViewController* clock_owner = self;
+  self.clockTimer = [NSTimer scheduledTimerWithTimeInterval:10
+                                                    repeats:YES
+                                                      block:^(NSTimer* timer) {
+                                                        [clock_owner tick];
+                                                      }];
 
-  self.kicker = [UILabel new];
-  self.kicker.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-  self.kicker.textColor = Hex(0x8FB8FF);
-  [self.view addSubview:self.kicker];
+  self.row = [UIScrollView new];
+  self.row.showsHorizontalScrollIndicator = NO;
+  self.row.clipsToBounds = NO;
+  [self.view addSubview:self.row];
+
+  self.addGame = [UILabel new];
+  self.addGame.text = @"Přidat hru\n\nPřelož ji na Macu a složku zkopíruj do Soubory › WinPad Wine";
+  self.addGame.numberOfLines = 0;
+  self.addGame.textAlignment = NSTextAlignmentCenter;
+  self.addGame.textColor = Hex(0xDCE8FF);
+  self.addGame.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+  self.addGame.layer.cornerRadius = 6;
+  self.addGame.layer.masksToBounds = YES;
+  [self.row addSubview:self.addGame];
 
   self.heroTitle = [UILabel new];
-  self.heroTitle.font = [UIFont systemFontOfSize:48 weight:UIFontWeightBold];
-  self.heroTitle.textColor = Hex(0xE8ECF2);
-  self.heroTitle.numberOfLines = 2;
+  self.heroTitle.textColor = UIColor.whiteColor;
   self.heroTitle.adjustsFontSizeToFitWidth = YES;
   self.heroTitle.minimumScaleFactor = 0.5;
   [self.view addSubview:self.heroTitle];
@@ -514,38 +825,25 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   [self.view addSubview:self.tags];
 
   UIButtonConfiguration* config = [UIButtonConfiguration filledButtonConfiguration];
-  config.baseBackgroundColor = Hex(0xE8ECF2);
-  config.baseForegroundColor = Hex(0x0E1116);
-  config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-  config.image = [UIImage systemImageNamed:@"a.circle.fill"];
-  config.imagePadding = 12;
+  config.baseBackgroundColor = UIColor.whiteColor;
+  config.baseForegroundColor = Hex(0x0B2A63);
+  config.cornerStyle = UIButtonConfigurationCornerStyleFixed;
+  config.background.cornerRadius = 4;
+  config.image = [UIImage systemImageNamed:@"play.fill"];
+  config.imagePadding = 10;
   config.title = @"Spustit";
-  config.contentInsets = NSDirectionalEdgeInsetsMake(16, 20, 16, 28);
+  config.contentInsets = NSDirectionalEdgeInsetsMake(14, 32, 14, 40);
   self.play = [UIButton buttonWithConfiguration:config primaryAction:nil];
   [self.play addTarget:self action:@selector(startFocused) forControlEvents:UIControlEventTouchUpInside];
   [self.view addSubview:self.play];
 
-  self.rowTitle = [UILabel new];
-  self.rowTitle.text = @"Knihovna";
-  self.rowTitle.font = [UIFont systemFontOfSize:22 weight:UIFontWeightSemibold];
-  self.rowTitle.textColor = Hex(0xE8ECF2);
-  [self.view addSubview:self.rowTitle];
-
-  self.row = [UIScrollView new];
-  self.row.showsHorizontalScrollIndicator = NO;
-  self.row.clipsToBounds = NO;
-  [self.view addSubview:self.row];
-
-  self.addGame = [UILabel new];
-  self.addGame.text = @"Přidat hru\n\nPřelož hru na Macu a zkopíruj její složku do Soubory › WinPad Wine";
-  self.addGame.numberOfLines = 0;
-  self.addGame.textAlignment = NSTextAlignmentCenter;
-  self.addGame.font = [UIFont systemFontOfSize:14];
-  self.addGame.textColor = Hex(0xB4BDCA);
-  self.addGame.layer.borderColor = Hex(0x3A4352).CGColor;
-  self.addGame.layer.borderWidth = 2;
-  self.addGame.layer.cornerRadius = 16;
-  [self.row addSubview:self.addGame];
+  self.info = [UIView new];
+  self.info.backgroundColor = [Hex(0x04122E) colorWithAlphaComponent:0.55];
+  self.info.layer.cornerRadius = 6;
+  self.infoText = [UILabel new];
+  self.infoText.numberOfLines = 0;
+  [self.info addSubview:self.infoText];
+  [self.view addSubview:self.info];
 
   self.empty = [UILabel new];
   self.empty.text = @"Zatím tu není žádná hra.\n\nPřelož hru na Macu a její složku zkopíruj přes Finder → iPad → "
@@ -553,13 +851,14 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   self.empty.numberOfLines = 0;
   self.empty.textAlignment = NSTextAlignmentCenter;
   self.empty.font = [UIFont systemFontOfSize:20];
-  self.empty.textColor = Hex(0xB4BDCA);
+  self.empty.textColor = Hex(0xDCE8FF);
   [self.view addSubview:self.empty];
 
   self.hints = [UILabel new];
-  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓨ Nastavení     Ťuknutím vybereš, druhým ťuknutím spustíš";
+  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓨ Nastavení     Ťuknutím vybereš, druhým spustíš";
   self.hints.font = [UIFont systemFontOfSize:16];
-  self.hints.textColor = Hex(0xB4BDCA);
+  self.hints.textColor = Hex(0xDCE8FF);
+  self.hints.textAlignment = NSTextAlignmentRight;
   [self.view addSubview:self.hints];
 
   self.cards = [NSMutableArray new];
@@ -590,8 +889,8 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   tested = YES;
   NSMutableString* report = [NSMutableString stringWithFormat:@"library: %lu games\n", (unsigned long)self.games.count];
   for (WinPadGame* game in self.games)
-    [report appendFormat:@"library: %@ | %@ | %@ | image %@\n", game.title, game.exe, game.arch ?: @"?",
-                         game.image.lastPathComponent ?: @"none"];
+    [report appendFormat:@"library: %@ | %@ | %@ | image %@%@\n", game.title, game.exe, game.arch ?: @"?",
+                         game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @""];
   [report writeToFile:[Documents() stringByAppendingPathComponent:@"library.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
     [self moveFocusBy:1];
@@ -601,6 +900,18 @@ enum { CoverTag = 1001, TitleTag = 1002 };
 
 - (BOOL)canBecomeFirstResponder {
   return YES;
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+  [super viewWillDisappear:animated];
+  if (self.started) [self.clockTimer invalidate];
+}
+
+- (void)tick {
+  NSDateFormatter* f = [NSDateFormatter new];
+  f.timeStyle = NSDateFormatterShortStyle;
+  f.dateStyle = NSDateFormatterNoStyle;
+  self.clock.text = [f stringFromDate:NSDate.date];
 }
 
 - (void)reload {
@@ -618,23 +929,18 @@ enum { CoverTag = 1001, TitleTag = 1002 };
     card.tag = (NSInteger)i;
     card.accessibilityLabel = self.games[i].title;
     UILabel* placeholder;
-    UIImageView* cover = CoverView(&placeholder, 17);
-    cover.layer.cornerRadius = 16;
+    UIImageView* cover = CoverView(&placeholder, 15);
+    cover.layer.cornerRadius = 6;
     cover.tag = CoverTag;
+    cover.userInteractionEnabled = NO;
     ShowCover(cover, placeholder, self.games[i]);
     [card addSubview:cover];
-    UILabel* title = [UILabel new];
-    title.text = self.games[i].title;
-    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    title.textColor = Hex(0xE8ECF2);
-    title.tag = TitleTag;
-    [card addSubview:title];
     [card addTarget:self action:@selector(tapCard:) forControlEvents:UIControlEventTouchUpInside];
     [self.row addSubview:card];
     [self.cards addObject:card];
   }
   const BOOL none = self.games.count == 0;
-  for (UIView* v in @[ self.heroCover, self.kicker, self.heroTitle, self.tags, self.play ]) v.hidden = none;
+  for (UIView* v in @[ self.heroTitle, self.tags, self.play, self.info ]) v.hidden = none;
   self.empty.hidden = !none;
   [self showFocus];
   [self.view setNeedsLayout];
@@ -645,18 +951,43 @@ enum { CoverTag = 1001, TitleTag = 1002 };
     UIView* cover = [card viewWithTag:CoverTag];
     const BOOL on = card.tag == self.focus;
     cover.layer.borderWidth = on ? 4 : 0;
-    cover.layer.borderColor = Hex(0x8FB8FF).CGColor;
-    ((UILabel*)[card viewWithTag:TitleTag]).textColor = Hex(on ? 0xE8ECF2 : 0xB4BDCA);
+    cover.layer.borderColor = UIColor.whiteColor.CGColor;
+    cover.alpha = on ? 1 : 0.9;
   }
-  if (!self.games.count) return;
+  [UIView animateWithDuration:0.18
+                   animations:^{
+                     [self.view setNeedsLayout];
+                     [self.view layoutIfNeeded];
+                   }];
+  if (!self.games.count) {
+    self.backdrop.cover = nil;
+    return;
+  }
   WinPadGame* game = self.games[self.focus];
-  ShowCover(self.heroCover, self.heroPlaceholder, game);
-  self.kicker.text = [game.folder isEqualToString:[NSUserDefaults.standardUserDefaults stringForKey:@"lastGame"]] ? @"NAPOSLEDY HRÁNO" : @"HRA";
+  self.backdrop.cover = game.cover;
   self.heroTitle.text = game.title;
   for (UIView* tag in self.tags.arrangedSubviews) [tag removeFromSuperview];
-  [self.tags addArrangedSubview:Tag(game.arch ? [@"Windows · " stringByAppendingString:game.arch] : @"Windows", 0xB4BDCA, 0x171B22)];
-  [self.tags addArrangedSubview:game.image ? Tag(@"Přeloženo pro iPad", 0x7DDC9A, 0x16301F)
-                                           : Tag(@"Nepřeloženo: jen s JITem z Xcode", 0xF2C46D, 0x332A14)];
+  UIColor* plain = [UIColor colorWithWhite:1 alpha:0.12];
+  UIColor* good = [Hex(0x7DDC9A) colorWithAlphaComponent:0.18];
+  UIColor* warn = [Hex(0xF2C46D) colorWithAlphaComponent:0.18];
+  [self.tags addArrangedSubview:LightTag(game.arch ? [@"Windows · " stringByAppendingString:game.arch] : @"Windows", 0xDCE8FF, plain)];
+  [self.tags addArrangedSubview:game.imageInFolder ? LightTag(@"Přeloženo (obraz ve složce hry)", 0x9BEDB5, good)
+                                 : game.image      ? LightTag(@"Přeloženo", 0x9BEDB5, good)
+                                                   : LightTag(@"Nepřeloženo", 0xF2C46D, warn)];
+  if (game.folderImageNote) [self.tags addArrangedSubview:LightTag(@"Obraz ve složce je pro jiné sestavení", 0xF2C46D, warn)];
+  NSString* state = game.image ? @"Hra běží z přeloženého obrazu. Kód, který v něm chybí, doplní příští překlad z code map."
+                               : @"Hra zatím nemá přeložený obraz: poběží pomalu v interpretu a zapíše code mapy pro překlad.";
+  NSMutableAttributedString* text = [NSMutableAttributedString new];
+  [text appendAttributedString:[[NSAttributedString alloc]
+                                   initWithString:@"STAV PŘEKLADU\n"
+                                       attributes:@{NSFontAttributeName : [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold],
+                                                    NSForegroundColorAttributeName : Hex(0x9DB9E8)}]];
+  [text appendAttributedString:[[NSAttributedString alloc]
+                                   initWithString:[NSString stringWithFormat:@"%@\nSložka %@ · %@", state, game.folder,
+                                                                             game.exe.lastPathComponent]
+                                       attributes:@{NSFontAttributeName : [UIFont systemFontOfSize:15],
+                                                    NSForegroundColorAttributeName : Hex(0xDCE8FF)}]];
+  self.infoText.attributedText = text;
   if (self.focus < (NSInteger)self.cards.count) {
     const CGRect card = self.cards[self.focus].frame;
     [self.row scrollRectToVisible:CGRectInset(card, -24, 0) animated:YES];
@@ -667,43 +998,57 @@ enum { CoverTag = 1001, TitleTag = 1002 };
   [super viewDidLayoutSubviews];
   const CGRect b = self.view.bounds;
   const UIEdgeInsets safe = self.view.safeAreaInsets;
-  const CGFloat m = b.size.width > 900 ? 56 : 24, top = safe.top + 24, w = b.size.width - 2 * m;
-  self.logo.frame = CGRectMake(m, top, 200, 52);
-  self.settings.frame = CGRectMake(b.size.width - m - 52, top, 52, 52);
+  const BOOL compact = self.compact;
+  self.backdrop.frame = b;
+  const CGFloat m = MAX(safe.left, safe.right) + (compact ? 16 : 64), top = safe.top + (compact ? 12 : 36);
+  const CGFloat w = b.size.width - 2 * m, button = compact ? 44 : 48;
+  self.settings.frame = CGRectMake(m, top, button, button);
+  self.settings.layer.cornerRadius = button / 2;
+  self.clock.font = [UIFont systemFontOfSize:compact ? 18 : 26 weight:UIFontWeightLight];
+  self.clock.frame = CGRectMake(m + w - 200, top, 200, button);
 
-  const CGFloat hints_h = 64, bottom = b.size.height - safe.bottom - hints_h;
-  self.hints.frame = CGRectMake(m, bottom, w, hints_h);
-
-  const CGFloat card_w = 260, card_h = 195, row_h = card_h + 44;
-  const CGFloat row_y = bottom - 24 - row_h;
-  self.rowTitle.frame = CGRectMake(m, row_y - 40, w, 28);
-  self.row.frame = CGRectMake(0, row_y, b.size.width, row_h);
+  // The row: the focused tile large, the others smaller, all on one bottom line.
+  const CGFloat big = compact ? 150 : 260, small = compact ? 100 : 170, gap = compact ? 12 : 18;
+  const CGFloat row_y = top + button + (compact ? 14 : 36);
+  self.row.frame = CGRectMake(0, row_y, b.size.width, big);
   self.row.contentInset = UIEdgeInsetsMake(0, m, 0, m);
   CGFloat x = 0;
   for (UIButton* card in self.cards) {
-    card.frame = CGRectMake(x, 0, card_w, row_h);
-    [card viewWithTag:CoverTag].frame = CGRectMake(0, 0, card_w, card_h);
-    [card viewWithTag:TitleTag].frame = CGRectMake(0, card_h + 12, card_w, 24);
-    x += card_w + 28;
+    const CGFloat side = card.tag == self.focus ? big : small;
+    card.frame = CGRectMake(x, big - side, side, side);
+    [card viewWithTag:CoverTag].frame = card.bounds;
+    x += side + gap;
   }
-  self.addGame.frame = CGRectMake(x, 0, card_w, card_h);
-  self.row.contentSize = CGSizeMake(x + card_w, row_h);
+  self.addGame.font = [UIFont systemFontOfSize:compact ? 11 : 14];
+  self.addGame.frame = CGRectMake(x, big - small, small, small);
+  self.row.contentSize = CGSizeMake(x + small, big);
 
-  const CGFloat hero_y = top + 52 + 32, hero_h = MAX(120, row_y - 72 - hero_y);
-  const CGFloat cover_w = MIN(MIN(w * 0.4, 520), hero_h * 4 / 3), cover_h = cover_w * 3 / 4;
-  self.heroCover.frame = CGRectMake(m, hero_y, cover_w, cover_h);
-  self.heroPlaceholder.frame = CGRectInset(self.heroCover.bounds, 16, 16);
-  const CGFloat tx = m + cover_w + 40, tw = b.size.width - m - tx;
-  CGFloat ty = hero_y + MAX(0, (cover_h - 260) / 2);
-  self.kicker.frame = CGRectMake(tx, ty, tw, 20);
-  ty += 32;
-  self.heroTitle.frame = CGRectMake(tx, ty, tw, 116);
-  ty += 132;
-  self.tags.frame = CGRectMake(tx, ty, tw, 32);
-  ty += 56;
-  const CGSize play = [self.play sizeThatFits:CGSizeMake(tw, 64)];
-  self.play.frame = CGRectMake(tx, ty, MAX(play.width, 160), 60);
-  self.empty.frame = CGRectMake(m, hero_y, w, MAX(120, row_y - 72 - hero_y));
+  // The focused game.
+  CGFloat y = row_y + big + (compact ? 12 : 36);
+  self.heroTitle.font = [UIFont systemFontOfSize:compact ? 24 : 44 weight:UIFontWeightLight];
+  const CGFloat title_h = compact ? 30 : 54;
+  const CGSize play = [self.play sizeThatFits:CGSizeMake(w, 60)];
+  if (compact) {
+    // Title and tags on the left, Spustit on the right, side by side.
+    const CGFloat pw = MAX(play.width, 140);
+    self.heroTitle.frame = CGRectMake(m, y, w - pw - 16, title_h);
+    self.tags.frame = CGRectMake(m, y + title_h + 8, w - pw - 16, 26);
+    self.play.frame = CGRectMake(m + w - pw, y + 6, pw, 48);
+    self.info.hidden = self.hints.hidden = YES;
+  } else {
+    self.heroTitle.frame = CGRectMake(m, y, MIN(w, 900), title_h);
+    y += title_h + 14;
+    self.tags.frame = CGRectMake(m, y, w, 32);
+    y += 32 + 26;
+    self.play.frame = CGRectMake(m, y, MAX(play.width, 180), 56);
+    y += 56 + 36;
+    self.info.hidden = !self.games.count;
+    self.info.frame = CGRectMake(m, y, MIN(w, 440), 120);
+    self.infoText.frame = CGRectInset(self.info.bounds, 20, 14);
+    self.hints.hidden = NO;
+    self.hints.frame = CGRectMake(m, b.size.height - safe.bottom - 56, w, 32);
+  }
+  self.empty.frame = CGRectMake(m, row_y, w, MAX(120, b.size.height - row_y - safe.bottom - 40));
 }
 
 - (void)moveFocusBy:(NSInteger)by {

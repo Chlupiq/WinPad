@@ -9,6 +9,13 @@
 # Also builds d3d9-cube.c, Madeira's tests/x86/d3d9-cube-x86.c, the way
 # Madeira's tests/x86/build-d3d9-cube.sh does.
 #
+# Direct3D 8, which games of the early 2000s use (Mafia...), is d3d8to9
+# (crosire/d3d8to9, BSD-2-Clause, its licence beside it as
+# d3d8to9-LICENSE.md): d3d8.dll turns each D3D8 call into D3D9 ones, which go
+# to the shim above. It assembles and disassembles shaders with d3dx9_43,
+# Wine's (with d3dcompiler_43 and d3dxof, which it imports). d3d8-cube.c is
+# the D3D8 cube.
+#
 # The Wine modules a 32-bit program with a window needs come first, built
 # with build.sh: user32 and what it imports, and ucrtbase, which DXMT's DLLs
 # import through api-ms-win-crt-*.
@@ -27,6 +34,7 @@ out="$work/i386-windows"
 r="$work/dxmt-root"
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 TOOLCHAIN=llvm-mingw-20260421-ucrt-macos-universal
+D3D8TO9=255338f698c8270b537f0a91a13f795f4f988250
 
 # build.sh starts i386-windows afresh with the modules it is given; what was
 # there before (modules and programs other steps built) is put back. So is
@@ -35,7 +43,7 @@ TOOLCHAIN=llvm-mingw-20260421-ucrt-macos-universal
 keep=$(mktemp -d)
 [ ! -d "$out" ] || cp -R "$out/." "$keep/"
 sh "$here/build.sh" "$work" ntdll kernelbase kernel32 user32 gdi32 win32u advapi32 sechost \
-    msvcrt ucrtbase imm32 dbghelp
+    msvcrt ucrtbase imm32 dbghelp d3dx9_43 d3dxof d3dcompiler_43
 for f in "$keep"/*; do
     [ -e "$f" ] || continue
     n=${f##*/}
@@ -101,6 +109,17 @@ p="$d/build-pe-i386/src"
 "$tc/i686-w64-mingw32-strip" -o "$out/d3d9shim.dll" "$p/d3d9shim/d3d9shim.dll"
 "$tc/i686-w64-mingw32-strip" -o "$out/d3d9-emulated.dll" "$p/d3d9/d3d9.dll"
 
+# d3d8to9, linked with its C++ runtime (no libc++.dll in the set); Release
+# builds of it log nothing (D3D8TO9NOLOG).
+d8="$r/d3d8to9-$D3D8TO9"
+if [ ! -d "$d8" ]; then
+    curl -fsSL "https://github.com/crosire/d3d8to9/archive/$D3D8TO9.tar.gz" | tar -xz -C "$r"
+fi
+"$tc/i686-w64-mingw32-clang++" -std=c++17 -O2 -DD3D8TO9NOLOG -Wno-delete-non-virtual-dtor -Wno-unknown-pragmas \
+    -shared -static -o "$r/d3d8.dll" "$d8"/source/*.cpp "$d8/res/d3d8.def" -Wl,--enable-stdcall-fixup -ld3d9 -lgdi32
+"$tc/i686-w64-mingw32-strip" -o "$out/d3d8.dll" "$r/d3d8.dll"
+cp "$d8/LICENSE.md" "$out/d3d8to9-LICENSE.md"
+
 # The test program, with the flags of Madeira's build-d3d9-cube.sh. It runs
 # for D3D9_CUBE_SECONDS of wall-clock time and exits with 43.
 "$tc/i686-w64-mingw32-clang" -O2 -g -nostdlib -ffreestanding \
@@ -108,16 +127,21 @@ p="$d/build-pe-i386/src"
     -Wl,--entry=_start -Wl,--large-address-aware \
     -DMADEIRA_D3D9_SECONDS="${D3D9_CUBE_SECONDS:-8}" \
     -o "$out/d3d9-cube.exe" "$here/d3d9-cube.c" -lkernel32 -luser32 -ld3d9
+"$tc/i686-w64-mingw32-clang" -O2 -g -nostdlib -ffreestanding \
+    -static-libgcc -Wno-unused-command-line-argument \
+    -Wl,--entry=_start -Wl,--large-address-aware \
+    -DWINPAD_D3D8_SECONDS="${D3D9_CUBE_SECONDS:-8}" \
+    -o "$out/d3d8-cube.exe" "$here/d3d8-cube.c" -lkernel32 -luser32 -ld3d8
 # MinGW's import libraries name USER32.dll and GDI32.dll, which Wine does not
 # find in these runs; see lowercase-imports.py.
 python3 -I "$here/lowercase-imports.py" "$out/winemetal.dll" "$out/d3d9.dll" "$out/d3d9shim.dll" \
-    "$out/d3d9-emulated.dll" "$out/d3d9-cube.exe"
+    "$out/d3d9-emulated.dll" "$out/d3d9-cube.exe" "$out/d3d8.dll" "$out/d3d8-cube.exe"
 
 # Every DLL a module imports has to be there (api-ms-win-* resolve through
 # the API set schema, to ucrtbase).
 missing=0
 present=$(ls "$out" | tr 'A-Z' 'a-z')
-for f in "$out"/*.dll "$out"/d3d9-cube.exe; do
+for f in "$out"/*.dll "$out"/d3d9-cube.exe "$out"/d3d8-cube.exe; do
     imports=$("$tc/llvm-objdump" -p "$f" | sed -n 's/^ *DLL Name: //p' | tr 'A-Z' 'a-z' | sort -u)
     echo "${f##*/}:" $imports
     for i in $imports; do

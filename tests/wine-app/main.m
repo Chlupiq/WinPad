@@ -39,7 +39,8 @@
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
 // interpreter (patches/fex-wow64/0019) and is written to the code map in
-// Documents/fexcache/codemap/new, so a later image can have it. If the run
+// Documents/fexcache/<game folder>/codemap/new (the test programs:
+// Documents/fexcache/codemap/new), so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
@@ -831,7 +832,10 @@ static CFTimeInterval fps_shown;
   const BOOL cube = [name isEqualToString:@"d3d9-cube"], game = [name isEqualToString:@"game"];
   NSString* bundle = NSBundle.mainBundle.bundlePath;
   NSString* prefix = MakePrefix(bundle);
-  NSString* cache = DocumentsPath(@"fexcache");
+  // Each game of the library keeps its code maps apart, in fexcache/<its folder>: one folder
+  // per game to copy off for WinPad Translator. The test programs use fexcache itself.
+  NSString* cache = self.game ? DocumentsPath([@"fexcache" stringByAppendingPathComponent:self.game.folder])
+                              : DocumentsPath(@"fexcache");
   [NSFileManager.defaultManager createDirectoryAtPath:[cache stringByAppendingPathComponent:@"codemap/new"]
                           withIntermediateDirectories:YES
                                            attributes:nil
@@ -877,6 +881,13 @@ static CFTimeInterval fps_shown;
   // The library picked a game's own image (Library.m), else fexaot-game.dylib.
   NSString* frameworks = NSBundle.mainBundle.privateFrameworksPath;
   NSString* game_image = self.game ? self.game.image : [frameworks stringByAppendingPathComponent:@"fexaot-game.dylib"];
+  if (self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
+  // An image in the game folder loads only if it is signed by the app's team; else the bundle's.
+  if (self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
+    printf("WinPad Wine: the game folder's image did not load (%s), taking %s\n", dlerror(),
+           self.game.bundleImage ? self.game.bundleImage.lastPathComponent.UTF8String : "none");
+    game_image = self.game.bundleImage;
+  }
   if (game_image && ![NSFileManager.defaultManager fileExistsAtPath:game_image]) game_image = nil;
   if (!cube && (!game || game_image)) {
     // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
@@ -884,7 +895,8 @@ static CFTimeInterval fps_shown;
                           : [frameworks stringByAppendingPathComponent:[name isEqualToString:@"hello"]
                                                                            ? @"fexaot.dylib"
                                                                            : [NSString stringWithFormat:@"fexaot-%@.dylib", name]];
-    image = path.lastPathComponent;
+    image = [path hasPrefix:frameworks] ? path.lastPathComponent
+                                        : [self.game.folder stringByAppendingPathComponent:path.lastPathComponent];
     setenv("WINEHOST_AOT_IMAGE", path.fileSystemRepresentation, 1);
     setenv("FEX_NOJIT", "1", 1);
     setenv("FEX_ENABLECODECACHINGWIP", "1", 1);
