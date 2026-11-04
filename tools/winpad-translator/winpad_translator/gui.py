@@ -6,6 +6,8 @@ import traceback
 
 from . import __version__, compile as fexcompile, library, project
 
+EXPORT_TYPES = [("WinPad code maps", "*.zip"), ("all", "*")]
+
 
 def main():
     import tkinter as tk
@@ -59,7 +61,7 @@ def main():
         buttons.grid(row=row, column=2, sticky="n")
 
         def add():
-            if kind == "dir":
+            if kind in ("dir", "maps"):
                 v = filedialog.askdirectory()
                 values = [v] if v else []
             else:
@@ -71,7 +73,14 @@ def main():
             for i in reversed(box.curselection()):
                 box.delete(i)
 
+        def add_zip():
+            for v in filedialog.askopenfilenames(filetypes=EXPORT_TYPES):
+                box.insert("end", v)
+
         ttk.Button(buttons, text="+", width=3, command=add).pack()
+        if kind == "maps":
+            # The zip the app's "Exportovat pro převodník" shared (AirDrop, Files, Mail…).
+            ttk.Button(buttons, text="zip", width=3, command=add_zip).pack()
         ttk.Button(buttons, text="−", width=3, command=remove).pack()
         entries[key] = box
         row += 1
@@ -79,8 +88,8 @@ def main():
         row += 1
 
     path_row("Game folder", "game_dir", "dir", "the game as it is in WinPad Wine's Documents on the iPad")
-    list_row("iPad code maps", "ipad_maps", "dir",
-             "folders copied off the iPad: WinPad Wine › fexcache › <game> (or all of fexcache)")
+    list_row("iPad code maps", "ipad_maps", "maps",
+             "the zip the app's Exportovat pro převodník shared, or WinPad Wine › fexcache › <game> copied off")
     list_row("PC drcov logs", "drcov_logs", [("drcov log", "*.log"), ("all", "*")],
              "optional: drrun -t drcov -- GAME.EXE on a Windows PC, played for a while")
     discover = tk.BooleanVar(value=False)
@@ -250,10 +259,15 @@ def library_tab(tabs):
     ttk.Label(frame, text="iPad code maps").grid(row=2, column=0, sticky="w", pady=2)
     maps = tk.StringVar()
     ttk.Entry(frame, textvariable=maps).grid(row=2, column=1, sticky="ew", padx=6)
-    ttk.Button(frame, text="…", width=3, command=lambda: maps.set(filedialog.askdirectory() or maps.get())).grid(
-        row=2, column=2)
-    ttk.Label(frame, text="WinPad Wine › fexcache copied off the iPad: a folder of maps per game, "
-              "each game takes its own", foreground="gray").grid(row=3, column=1, sticky="w", padx=6)
+    pick = ttk.Frame(frame)
+    pick.grid(row=2, column=2)
+    ttk.Button(pick, text="…", width=3, command=lambda: maps.set(filedialog.askdirectory() or maps.get())).pack(
+        side="left")
+    # Zips the app's "Exportovat pro převodník" shared, one per game: several at once, separated by ";".
+    ttk.Button(pick, text="zip", width=3, command=lambda: maps.set(
+        ";".join(filedialog.askopenfilenames(filetypes=EXPORT_TYPES)) or maps.get())).pack(side="left")
+    ttk.Label(frame, text="zips from the app's Exportovat pro převodník, or WinPad Wine › fexcache copied off "
+              "the iPad; each game takes its own", foreground="gray").grid(row=3, column=1, sticky="w", padx=6)
 
     fields = {}
     for row, (label, key, kind) in enumerate([("WinPad Wine IPA", "ipa", "open"), ("Write app IPA", "output_ipa", "save"),
@@ -309,7 +323,8 @@ def library_tab(tabs):
         lib.save(path)
         log.delete("1.0", "end")
         build_button.state(["disabled"])
-        threading.Thread(target=work, args=([maps.get().strip()] if maps.get().strip() else [],), daemon=True).start()
+        folders = [m.strip() for m in maps.get().split(";") if m.strip()]
+        threading.Thread(target=work, args=(folders,), daemon=True).start()
 
     def pump():
         try:

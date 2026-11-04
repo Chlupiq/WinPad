@@ -142,7 +142,7 @@ Hra třikrát proběhne v simulátoru s JITem a zapíše mapu kódu, offline
 kompilátor FEXu z ní udělá cache a ty se slinkují do `fexaot-game.dylib`
 pro simulátor i iPad. Pak stačí v Xcode dát Run; hra na iPadu poběží i bez
 debuggeru (spuštěná z plochy). Bloky, které v obrazu chybí, spustí
-interpretr FEXu a zapíše je do Soubory → WinPad Wine → `fexcache/codemap/new`.
+interpretr FEXu a zapíše je do Soubory → WinPad Wine → `fexcache/codemap/new`. Hry z knihovny je zapisují do `fexcache/<složka hry>/codemap/new`, každý blok hned, jak ho interpretr pozná (patch fex-wow64 0038), takže se neztratí ani když iPadOS aplikaci ukončí. Tlačítko **Exportovat pro převodník** v knihovně (nebo X na ovladači) je pošle jako jeden zip (AirDrop, Soubory, Mail) pro WinPad Translator; štítek pod názvem hry ukazuje, kolik map přibylo od posledního exportu.
 Tu složku zkopíruj na Mac a dej ji skriptu jako šestý argument: další obraz
 je už bude mít.
 

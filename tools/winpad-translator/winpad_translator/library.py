@@ -110,9 +110,14 @@ def has_own_maps(p, folders):
     return False
 
 
-def build(lib, ipad_maps=(), rebuild=False, log=print):
-    """Translates each game with new code maps in IPAD_MAPS (or without an image yet) and
-    writes the app with every game's image. Returns the images in it."""
+def imports_dir():
+    return os.path.join(os.path.dirname(default_path()), "imports")
+
+
+def build(lib, ipad_maps=(), rebuild=False, log=print, imports=None):
+    """Translates each game with new code maps in IPAD_MAPS (folders copied off the iPad, or zips
+    its "Exportovat pro převodník" shared; those are unpacked under IMPORTS) or without an image
+    yet, and writes the app with every game's image. Returns the images in it."""
     if not lib.games:
         raise project.TranslateError("the library has no games yet: add a game folder")
     if not lib.ipa and not lib.xcode_project:
@@ -121,8 +126,16 @@ def build(lib, ipad_maps=(), rebuild=False, log=print):
         raise project.TranslateError("say where the app goes: an IPA to write (or a WinPadWine-xcode project)")
     if lib.ipa and lib.output_ipa and os.path.abspath(lib.ipa) == os.path.abspath(lib.output_ipa):
         raise project.TranslateError("write the app to another IPA than the one it is made from")
+    ipad_maps, manifests = codemaps.unpack(ipad_maps, imports or imports_dir(), log)
+    projects = lib.projects()
+    known = {(p.ipad_folder or p.folder_name()).lower() for p in projects}
+    for manifest in manifests:
+        folder = codemaps.export_folder(manifest)
+        if folder and folder.lower() not in known:
+            log(f"##### the export of {folder} is of no game in the library: add its game folder "
+                "(--add-game, or + in Game library) and build again")
     images = []
-    for p in lib.projects():
+    for p in projects:
         for key in SHARED:
             if key in lib.settings:
                 setattr(p, key, lib.settings[key])

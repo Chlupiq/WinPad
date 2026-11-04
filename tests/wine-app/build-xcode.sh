@@ -247,6 +247,22 @@ cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Plain/fexaot.dylib"
 cp "$sim_app/winpad-build.txt" "$docs/Plain/fexaot.build"
 cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Test Game/fexaot.dylib"
 echo 0123456789abcdef >"$docs/Test Game/fexaot.build"
+# Code maps Test Game wrote in the interpreter (one empty, which does not count), with code it
+# made at run time and the iPad's CPU features: the library exports them as "Exportovat pro
+# převodník" does, to Documents/export-Test Game.zip.
+maps="$docs/fexcache/Test Game/codemap/new"
+rm -rf "$docs/fexcache/Test Game" "$docs/export-Test Game.zip"
+mkdir -p "$maps/runtime"
+PYTHONPATH="$root/tools/winpad-translator" python3 - "$maps/1234.133456789.bin" <<'PY'
+import sys
+from winpad_translator import codemaps
+name = "\\??\\Z:\\private\\var\\mobile\\Containers\\Data\\Application\\X\\Documents\\Test Game\\TEST.EXE"
+with open(sys.argv[1], "wb") as f:
+    f.write(codemaps.image_record(0x1234, name) + codemaps.ENTRY.pack(0x1234, 0x1000))
+PY
+: >"$maps/1234.133456790.bin"
+echo code >"$maps/runtime/rtcode-1.fexrc"
+echo 'AFP=1' >"$maps/hostprobe.txt"
 xcrun simctl launch "$udid" "$bundle" -libraryTest YES
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
@@ -259,11 +275,29 @@ xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
 for expect in 'library: 2 games' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
-    'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none' 'start: game Test Game/TEST.EXE, image none'; do
+    'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none' 'start: game Test Game/TEST.EXE, image none' \
+    'export: Test Game | 1 maps, 1 new | WinPad-mapy-test-game-' 'export: Test Game after it, 0 new'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty"
-echo "The game library found the games in Documents and started the one picked with the controller's buttons"
+# WinPad Translator takes the zip as it is: Test Game's map, the run-time code and the CPU features.
+echo "--- the exported zip ---"
+unzip -l "$docs/export-Test Game.zip"
+PYTHONPATH="$root/tools/winpad-translator" python3 - "$docs/export-Test Game.zip" "$out/export-check" <<'PY'
+import os, shutil, sys
+from winpad_translator import codemaps
+zip_path, work = sys.argv[1], sys.argv[2]
+shutil.rmtree(work, ignore_errors=True)
+folders, manifests = codemaps.unpack([zip_path], os.path.join(work, "imports"))
+m = manifests[0]
+assert m.get("kind") == "winpad-codemaps" and codemaps.export_folder(m) == "Test Game" and m.get("maps") == 1, m
+assert m.get("app_build"), m
+assert codemaps.import_maps(folders[0], os.path.join(work, "cache"), "ipad", "Test Game") == 1
+assert os.path.isfile(os.path.join(work, "cache", "codemap", "new", "runtime", "rtcode-1.fexrc"))
+assert codemaps.host_probe(folders[0]) == "AFP=1"
+print("WinPad Translator took the export:", m)
+PY
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/fexcache/Test Game" "$docs/export-Test Game.zip" "$out/export-check"
+echo "The game library found the games in Documents, exported a game's code maps for WinPad Translator and started the one picked with the controller's buttons"
 [ -n "$sim_window_aot" ] || exit 0
 
 # window.exe, picked by the "program" setting, given here as a launch argument

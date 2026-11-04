@@ -7,10 +7,12 @@ those names, so before it runs every name has to point at the same file on
 this computer: the game's folder here, and the i386 DLLs of the same WinPad
 Wine build the iPad has (from its IPA). Format: tests/fex-wow64/codemap.py.
 """
+import json
 import os
 import re
 import shutil
 import struct
+import zipfile
 
 from . import paths  # noqa: F401  (puts tests/fex-wow64 on sys.path)
 import codemap  # noqa: E402
@@ -90,6 +92,68 @@ def import_maps(source, cache_dir, tag, folder=None):
         for name in filenames:
             shutil.copyfile(os.path.join(dirpath, name), os.path.join(new, "runtime", name))
     return len(maps)
+
+
+# What WinPad Wine's "Exportovat pro převodník" shares (tests/wine-app/Library.m,
+# WinPadExportMaps): a zip of a folder with this file and fexcache/<game folder>/codemap/new.
+EXPORT_MANIFEST = "winpad-export.json"
+
+
+def is_export(path):
+    return os.path.isfile(path) and zipfile.is_zipfile(path)
+
+
+def unpack(paths, into, log=print):
+    """PATHS as given (folders copied off the iPad, or zips the app exported), each zip
+    unpacked into its own folder under INTO. Returns (folders, manifests): the folders to read
+    maps from, and the winpad-export.json of each export (an empty dict if it had none)."""
+    folders, manifests = [], []
+    for path in paths:
+        if not is_export(path):
+            folders.append(path)
+            continue
+        stem = os.path.splitext(os.path.basename(path))[0]
+        dest = os.path.join(into, stem)
+        shutil.rmtree(dest, ignore_errors=True)
+        os.makedirs(dest)
+        with zipfile.ZipFile(path) as z:
+            for member in z.infolist():
+                name = member.filename.replace("\\", "/")
+                parts = [x for x in name.split("/") if x not in ("", ".")]
+                # Nothing outside DEST: no absolute paths, drive letters or "..".
+                if not parts or ".." in parts or name.startswith("/") or ":" in parts[0] or member.is_dir():
+                    continue
+                if parts[0] == "__MACOSX":
+                    continue
+                target = os.path.join(dest, *parts)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with z.open(member) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+        manifest = {}
+        for dirpath, _, filenames in os.walk(dest):
+            if EXPORT_MANIFEST in filenames:
+                try:
+                    with open(os.path.join(dirpath, EXPORT_MANIFEST), encoding="utf-8") as f:
+                        manifest = json.load(f)
+                except ValueError:
+                    manifest = {}
+                break
+        game = manifest.get("game") if isinstance(manifest.get("game"), dict) else {}
+        log(f"=== {os.path.basename(path)}: "
+            + (f"code maps of {game.get('title') or game.get('folder')} (folder {game.get('folder')}), "
+               f"{manifest.get('maps', '?')} maps, exported {manifest.get('exported', '?')} "
+               f"from app build {manifest.get('app_build') or '?'}" if game else "a zip without winpad-export.json")
+            + f", unpacked into {dest}")
+        folders.append(dest)
+        manifests.append(manifest)
+    return folders, manifests
+
+
+def export_folder(manifest):
+    """The iPad game folder an export is of, or None."""
+    game = manifest.get("game") if isinstance(manifest, dict) else None
+    folder = game.get("folder") if isinstance(game, dict) else None
+    return folder if isinstance(folder, str) and folder else None
 
 
 HOST_PROBE = "hostprobe.txt"
