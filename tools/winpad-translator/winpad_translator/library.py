@@ -19,13 +19,18 @@ import dataclasses
 import json
 import os
 
-from . import codemaps, ipa as ipamod, package as packagemod, project
+import sys
+
+from . import codemaps, install as installmod, ipa as ipamod, package as packagemod, project
 
 LIBRARY = "library.json"
 APP_NAME = "WinPad"
 # The settings of how to compile, which the library gives every game.
 SHARED = ("backend", "compiler", "dispatcher", "wine", "sim_work_dir", "winpad_repo", "host_features",
           "caches_per_run", "compile_timeout", "half_barrier", "simulator_image", "sign_identity")
+# How the app is signed and installed (install.py), once for all games.
+INSTALL = ("install", "install_identity", "install_team", "install_p12", "install_profile", "cloud_repo",
+           "install_device", "install_bundle_id", "sign_only")
 
 
 def default_path():
@@ -127,6 +132,8 @@ def build(lib, ipad_maps=(), rebuild=False, log=print, imports=None):
         raise project.TranslateError("the library has no games yet: add a game folder")
     if not lib.ipa and not lib.xcode_project:
         raise project.TranslateError("give the WinPad Wine IPA from CI (or a WinPadWine-xcode project)")
+    if lib.settings.get("install") and lib.ipa and not lib.output_ipa and not (lib.xcode_project and sys.platform == "darwin"):
+        lib.output_ipa = os.path.join(os.path.dirname(default_path()), "WinPad.ipa")
     if not lib.output_ipa and not lib.xcode_project:
         raise project.TranslateError("say where the app goes: an IPA to write (or a WinPadWine-xcode project)")
     if lib.ipa and lib.output_ipa and os.path.abspath(lib.ipa) == os.path.abspath(lib.output_ipa):
@@ -147,6 +154,8 @@ def build(lib, ipad_maps=(), rebuild=False, log=print, imports=None):
         p.ipa, p.xcode_project = lib.ipa, lib.xcode_project
         p.output_ipa, p.output_dir, p.app_name, p.package = "", "", "", ""
         p.own_maps_only = True
+        # The library signs and installs the one app with every game, below.
+        p.install = False
         p.rebuild = p.rebuild or rebuild
         image = image_of(p)
         new = has_own_maps(p, ipad_maps)
@@ -179,6 +188,13 @@ def build(lib, ipad_maps=(), rebuild=False, log=print, imports=None):
     if lib.xcode_project and os.path.isfile(os.path.join(lib.xcode_project, "Info.plist")):
         ipamod.rename_app(os.path.join(lib.xcode_project, "Info.plist"), name)
         log(f"=== {lib.xcode_project}: {len(images)} games' images, app name {name}")
+    if lib.settings.get("install"):
+        s = installmod.settings_from(lib.settings)
+        xcode = lib.xcode_project if sys.platform == "darwin" and not (s.p12 or s.cloud_repo) else ""
+        installmod.install(s, xcode_project=xcode, ipa=lib.output_ipa, app_name=name,
+                           work=os.path.join(os.path.dirname(default_path()), "install"), log=log)
+        log("Done. The app is on the iPad; copy each game folder into its Documents if it is not there yet.")
+        return images
     log("Done. Install the app over the old one (its Documents stay) and copy each game folder into its "
         "Documents if it is not there yet.")
     return images

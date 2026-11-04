@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 
-from . import codemaps, compile as fexcompile, ipa as ipamod, link, package as packagemod, paths, profiles
+from . import codemaps, compile as fexcompile, install as installmod, ipa as ipamod, link, package as packagemod, paths, profiles
 
 SETTINGS = "winpad-translator.json"
 
@@ -71,6 +71,19 @@ class Project:
     # The game profile put into the game folder's winpad.json (profiles.py): "auto" (or empty)
     # finds it by the game's files or Steam app, "none" takes it out, else a profile's id.
     profile: str = "auto"
+    # Sign the app and install it on the iPad when the image is made (install.py): on a Mac
+    # with Xcode's identity (or install_identity) and team, elsewhere with install_p12 and
+    # install_profile, or in GitHub Actions of the private repository cloud_repo.
+    install: bool = False
+    install_identity: str = ""
+    install_team: str = ""
+    install_p12: str = ""
+    install_profile: str = ""
+    cloud_repo: str = ""
+    install_device: str = ""
+    install_bundle_id: str = ""
+    # Only sign (a signed IPA to install by other means), do not install.
+    sign_only: bool = False
 
     def folder_name(self):
         return os.path.basename(os.path.normpath(self.game_dir))
@@ -132,8 +145,7 @@ class TranslateError(Exception):
 
 # What goes wrong for a reason the message says (no traceback needed).
 KNOWN_ERRORS = (TranslateError, fexcompile.CompileError, link.LinkError, ipamod.IpaError, packagemod.PackageError,
-                profiles.ProfileError,
-                OSError)
+                profiles.ProfileError, installmod.InstallError, installmod.signipa.SignError, OSError)
 
 
 def _script(module, argv, log):
@@ -289,19 +301,34 @@ def run(p, log=print):
         log(f"  -> {os.path.join(p.output_dir, p.image_name())}")
     if p.sign_identity:
         into_game_folder(p, device, log)
-    if p.output_ipa:
+    output_ipa = p.output_ipa
+    if p.install and not output_ipa and p.ipa and not (p.xcode_project and sys.platform == "darwin"):
+        output_ipa = os.path.join(p.work_dir, f"WinPadWine-{p.slug()}.ipa")
+    if output_ipa:
         if not p.ipa:
             raise TranslateError("an IPA with the image needs the IPA it is made from")
-        ipamod.add_images(p.ipa, p.output_ipa, [device], p.app_name)
-        log(f"=== {p.output_ipa}: the app with {p.image_name()}, for AltStore, SideStore or Sideloadly")
+        ipamod.add_images(p.ipa, output_ipa, [device], p.app_name)
+        log(f"=== {output_ipa}: the app with {p.image_name()}, for AltStore, SideStore or Sideloadly")
     if p.package:
         write_package(p, log)
+    if p.install:
+        sign_and_install(p, output_ipa, log)
     # The maps and logs are in the cache directory now; the next run takes only new ones.
     p.ipad_maps, p.drcov_logs, p.rebuild = [], [], False
     p.save()
     log(f"Done. Copy the game folder {p.folder_name()} into WinPad Wine's Documents on the iPad (Finder or Files) "
         "and install the app with the image.")
     return [m[1] for m in made]
+
+
+def sign_and_install(p, output_ipa, log=print):
+    """Signs the app with the image (the Xcode project on a Mac, else the IPA written) and
+    installs it on the iPad (install.py)."""
+    if not output_ipa and not p.xcode_project:
+        raise TranslateError("installing needs the app: give the WinPad Wine IPA (or a WinPadWine-xcode project)")
+    xcode = p.xcode_project if sys.platform == "darwin" and not (p.install_p12 or p.cloud_repo) else ""
+    return installmod.install(installmod.settings_from(p), xcode_project=xcode, ipa=output_ipa,
+                              app_name=p.app_name, work=os.path.join(p.work_dir, "install"), log=log)
 
 
 # The image in a game folder, which the app loads in place of the one in its Frameworks

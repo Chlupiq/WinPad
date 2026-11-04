@@ -61,6 +61,32 @@ def parser():
     prof.add_argument("--list-profiles", action="store_true", help="list the game profiles there are")
     prof.add_argument("--profile-only", action="store_true",
                       help="only put the profile into --game's winpad.json, translate nothing")
+    inst = ap.add_argument_group("sign and install: the app goes onto the iPad in one step (install.py)")
+    inst.add_argument("--install", action="store_true", default=None,
+                      help="sign the app and install it on the iPad: on a Mac with Xcode's Apple ID (with "
+                      "--xcode-project Xcode builds it for your team), elsewhere with --p12 and --provisioning-profile or --cloud-sign")
+    inst.add_argument("--sign-only", action="store_true", default=None, help="only write the signed IPA, do not install")
+    inst.add_argument("--device", dest="install_device", help="the iPad's name or UDID (default: the one connected)")
+    inst.add_argument("--team", dest="install_team", help="Mac: your team ID (default: the identity's)")
+    inst.add_argument("--identity", dest="install_identity",
+                      help="Mac: the keychain identity to sign with (default: your Apple Development one)")
+    inst.add_argument("--p12", dest="install_p12", help="your certificate with its key (.p12): sign with rcodesign")
+    inst.add_argument("--p12-password", help="its password (or the WINPAD_P12_PASSWORD variable); not saved")
+    inst.add_argument("--provisioning-profile", "--mobileprovision", dest="install_profile",
+                      help="the provisioning profile (.mobileprovision); --profile is the game profile")
+    inst.add_argument("--bundle-id", dest="install_bundle_id",
+                      help="the app's bundle identifier (default: as it is, or what the profile allows)")
+    inst.add_argument("--cloud-sign", dest="cloud_repo", metavar="OWNER/REPO",
+                      help="sign in GitHub Actions of this private repository (set up with --cloud-setup)")
+    inst.add_argument("--github-token", help="for --cloud-sign/--cloud-setup (or GITHUB_TOKEN); --cloud-setup saves it")
+    inst.add_argument("--cloud-setup", metavar="OWNER/REPO",
+                      help="make the private repository (if needed), put the signing job into it and store --p12, "
+                      "its password and --provisioning-profile as its secrets; then stop")
+    inst.add_argument("--cert-request", metavar="EMAIL",
+                      help="without a Mac: make a key and a certificate request for developer.apple.com, then stop")
+    inst.add_argument("--cert-p12", metavar="CER",
+                      help="then: the certificate (.cer) Apple gave for it -> a .p12 (--p12, default "
+                      "~/WinPadTranslator/certificate/winpad.p12, password --p12-password); then stop")
     lib = ap.add_argument_group("a library of games: several games in one app")
     lib.add_argument("--library", nargs="?", const=library.default_path(), metavar="FILE",
                      help=f"work on the library in FILE (default {library.default_path()}); --ipa, --out-ipa, "
@@ -76,7 +102,42 @@ def parser():
     return ap
 
 
-PATH_KEYS = ("winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project", "package")
+PATH_KEYS = ("winpad_repo", "ipa", "compiler", "dispatcher", "output_ipa", "xcode_project", "package", "install_p12",
+             "install_profile", "cert_p12")
+# Arguments that are not settings of a game.
+NOT_SETTINGS = ("settings", "library", "add_game", "remove_game", "list_games", "build", "p12_password",
+                "github_token", "cloud_setup", "cert_request", "cert_p12", "package_dir", "package_only",
+                "list_profiles", "profile_only")
+
+
+def certificate_main(args):
+    """--cert-request, --cert-p12: the certificate as a .p12 without a Mac (applecert.py)."""
+    from . import applecert
+    folder = os.path.join(os.path.expanduser("~"), "WinPadTranslator", "certificate")
+    if args.cert_request:
+        req = applecert.request(folder, args.cert_request)
+        print(f"{req}: upload it at https://developer.apple.com/account/resources/certificates/add "
+              "(Apple Development), download the certificate and run again with --cert-p12 FILE.cer. "
+              f"Keep {os.path.join(folder, 'winpad-key.pem')}: it is your certificate's private key.")
+    if args.cert_p12:
+        if not args.p12_password:
+            raise SystemExit("error: give the .p12 a password (--p12-password)")
+        out = args.install_p12 or os.path.join(folder, "winpad.p12")
+        name = applecert.make_p12(folder, args.cert_p12, out, args.p12_password)
+        print(f"{out}: {name}. Make a profile with it: https://developer.apple.com/account/resources/profiles/add "
+              "(iOS App Development, the app's identifier, this certificate, your iPad)")
+
+
+def cloud_setup_main(args):
+    from . import cloud, install
+    tok = cloud.token(args.github_token)
+    c = cloud.Cloud(args.cloud_setup, tok)
+    ready = c.setup(args.install_p12, install.p12_password(args.p12_password) if args.install_p12 else None,
+                    args.install_profile)
+    if args.github_token:
+        print(f"token saved to {cloud.save_token(args.github_token)} (only you can read it)")
+    print(f"{args.cloud_setup} is " + ("ready: translate with --cloud-sign " + args.cloud_setup if ready
+                                       else "set up, but its secrets are missing"))
 
 
 def library_main(args):
@@ -85,7 +146,7 @@ def library_main(args):
     for key in ("ipa", "output_ipa", "xcode_project", "app_name", "package_dir", "package_game"):
         if getattr(args, key) is not None:
             setattr(lib, key, getattr(args, key))
-    for key in library.SHARED:
+    for key in library.SHARED + library.INSTALL:
         value = getattr(args, key, None)
         if value is not None:
             lib.settings[key] = value
@@ -123,7 +184,8 @@ def main(argv=None):
             print(f"{prof['id']} v{prof['version']}: {prof.get('title', '')} ({how})")
         return 0
     for key, value in vars(args).items():
-        if key in ("remove_game", "library") or value in (None, []):
+        if key in ("remove_game", "library", "cloud_setup", "cloud_repo", "github_token", "p12_password",
+                   "cert_request") or value in (None, []):
             continue
         if isinstance(value, list):
             setattr(args, key, [os.path.abspath(v) for v in value])
@@ -131,6 +193,20 @@ def main(argv=None):
             # A trailing separator says "a folder" (package.write); keep it.
             sep = os.sep if isinstance(value, str) and value.endswith(("/", os.sep)) else ""
             setattr(args, key, os.path.abspath(value) + sep)
+    if args.p12_password:
+        os.environ["WINPAD_P12_PASSWORD"] = args.p12_password
+    if args.cloud_repo and args.install is None:
+        args.install = True
+    if args.cert_request or args.cert_p12 or args.cloud_setup:
+        try:
+            if args.cert_request or args.cert_p12:
+                certificate_main(args)
+            if args.cloud_setup:
+                cloud_setup_main(args)
+        except Exception as e:  # noqa: BLE001 - one line for the user, not a traceback
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        return 0
     if args.library:
         try:
             library_main(args)
@@ -140,8 +216,7 @@ def main(argv=None):
         return 0
     p = project.Project.load(args.settings) if args.settings else project.Project()
     for key, value in vars(args).items():
-        if key in ("settings", "library", "add_game", "remove_game", "list_games", "build", "package_dir",
-                   "package_only", "list_profiles", "profile_only") or value in (None, []):
+        if key in NOT_SETTINGS or value in (None, []):
             continue
         setattr(p, key, value)
     try:
