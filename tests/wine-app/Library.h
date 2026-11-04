@@ -17,9 +17,21 @@
 // Why the folder's fexaot.dylib is not used (made for another build of the app), or nil.
 @property(nonatomic, copy) NSString* folderImageNote;
 @property(nonatomic, strong) UIImage* cover;  // cover.png or cover.jpg in its folder, or nil
+// The code maps it wrote while it ran (Documents/fexcache/FOLDER/codemap/new): code missing from
+// its image, which the interpreter ran. newMaps of them since the last "Exportovat pro převodník".
+@property(nonatomic) NSInteger maps;
+@property(nonatomic) NSInteger newMaps;
 @end
 
 NSArray<WinPadGame*>* WinPadFindGames(void);
+
+// A zip of the game's code maps for WinPad Translator, in the app's temporary folder: a folder
+// WinPad-mapy-<game>-<date> with winpad-export.json (the game, the app build, when) and
+// fexcache/FOLDER/codemap/new (the maps, runtime/ with code the game made at run time, and
+// hostprobe.txt, the iPad's CPU features). Nil, with why in *error, if it has none or it failed.
+NSURL* WinPadExportMaps(WinPadGame* game, NSError** error);
+// Remembers that the maps written up to DATE were exported: they are no longer new.
+void WinPadMarkMapsExported(WinPadGame* game, NSDate* date);
 
 // The inputs of a game controller that become keys (main.m's Gamepads), in the order the
 // settings list them.

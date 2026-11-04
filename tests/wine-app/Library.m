@@ -25,9 +25,17 @@
 // a tap picks and starts one. Wine runs once per process, so a game starts in
 // place of the library (main.m) and the app is started again for the next.
 //
+// A game without its code in the image runs it in FEX's interpreter, which
+// writes each block it learns to the game's code maps right away
+// (patches/fex-wow64/0038), so nothing is lost when iPadOS ends the app.
+// "Exportovat pro převodník" (or the controller's X) shares them as one zip
+// (AirDrop to the Mac, Files, Mail…) for WinPad Translator's next round; the
+// tag under the title counts the maps written since the last export.
+//
 // With the "libraryTest" setting (CI, tests/wine-app/build-xcode.sh) the
-// library writes the games it found to Documents/library.txt, then presses
-// right and A.
+// library writes the games it found to Documents/library.txt, exports the
+// maps of each game that has some to Documents/export-FOLDER.zip, then
+// presses right and A.
 #import "Library.h"
 
 #import <GameController/GameController.h>
@@ -35,6 +43,7 @@
 
 #include <math.h>
 #include <string.h>
+#include <sys/utsname.h>
 
 static NSString* Documents(void) {
   return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -49,7 +58,7 @@ static UIColor* Hex(uint32_t rgb) {
 
 // Frameworks/fexaot-FOLDER.dylib, FOLDER in lower case with each run of other
 // characters than letters and digits one "-"; else fexaot-game.dylib; else nil.
-static NSString* WinPadGameImage(NSString* folder) {
+static NSString* Slug(NSString* folder) {
   NSString* lower = folder.lowercaseString;
   NSMutableString* slug = [NSMutableString new];
   BOOL dash = NO;
@@ -63,6 +72,11 @@ static NSString* WinPadGameImage(NSString* folder) {
       dash = YES;
     }
   }
+  return slug;
+}
+
+static NSString* WinPadGameImage(NSString* folder) {
+  NSString* slug = Slug(folder);
   NSString* frameworks = NSBundle.mainBundle.privateFrameworksPath;
   for (NSString* name in @[ [NSString stringWithFormat:@"fexaot-%@.dylib", slug], @"fexaot-game.dylib" ]) {
     NSString* path = [frameworks stringByAppendingPathComponent:name];
@@ -114,6 +128,123 @@ static NSString* ProgramArch(NSString* path) {
   if (pe > head.length - 6 || memcmp(b + pe, "PE\0\0", 4)) return nil;
   const uint16_t machine = b[pe + 4] | b[pe + 5] << 8;
   return machine == 0x14c ? @"32bit" : machine == 0x8664 ? @"64bit" : nil;
+}
+
+// Where the game's code maps are written (main.m: FEX's cache folder Documents/fexcache/FOLDER).
+static NSString* MapsDir(NSString* folder) {
+  return [[Documents() stringByAppendingPathComponent:@"fexcache"]
+      stringByAppendingPathComponent:[folder stringByAppendingPathComponent:@"codemap/new"]];
+}
+
+// The non-empty code maps (ID.TIME.bin) in DIR, with when each was last written.
+static NSDictionary<NSString*, NSDate*>* MapFiles(NSString* dir) {
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSMutableDictionary* maps = [NSMutableDictionary new];
+  for (NSString* name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+    if (![name.pathExtension isEqualToString:@"bin"] || [name hasPrefix:@"."]) continue;
+    NSDictionary* attrs = [fm attributesOfItemAtPath:[dir stringByAppendingPathComponent:name] error:nil];
+    if ([attrs.fileType isEqualToString:NSFileTypeRegular] && attrs.fileSize > 0) maps[name] = attrs.fileModificationDate;
+  }
+  return maps;
+}
+
+// When the maps of each game folder were last exported ("mapsExported": folder → date).
+static NSDate* MapsExported(NSString* folder) {
+  id date = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"mapsExported"][folder];
+  return [date isKindOfClass:NSDate.class] ? date : nil;
+}
+
+void WinPadMarkMapsExported(WinPadGame* game, NSDate* date) {
+  NSMutableDictionary* all = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"mapsExported"] mutableCopy] ?: [NSMutableDictionary new];
+  all[game.folder] = date;
+  [NSUserDefaults.standardUserDefaults setObject:all forKey:@"mapsExported"];
+}
+
+static void CountMaps(WinPadGame* game) {
+  NSDictionary<NSString*, NSDate*>* maps = MapFiles(MapsDir(game.folder));
+  NSDate* exported = MapsExported(game.folder);
+  NSInteger fresh = 0;
+  for (NSDate* written in maps.allValues)
+    if (!exported || [written compare:exported] == NSOrderedDescending) fresh++;
+  game.maps = (NSInteger)maps.count;
+  game.newMaps = fresh;
+}
+
+static NSError* ExportError(NSString* text) {
+  return [NSError errorWithDomain:@"WinPadExport" code:1 userInfo:@{NSLocalizedDescriptionKey : text}];
+}
+
+NSURL* WinPadExportMaps(WinPadGame* game, NSError** error) {
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSString* maps = MapsDir(game.folder);
+  const NSUInteger count = MapFiles(maps).count;
+  if (!count) {
+    if (error) *error = ExportError(@"Hra zatím nezapsala žádné code mapy: zahraj si ji a zkus to znovu.");
+    return nil;
+  }
+  NSDate* now = NSDate.date;
+  NSDateFormatter* stamp = [NSDateFormatter new];
+  stamp.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+  stamp.dateFormat = @"yyyyMMdd-HHmm";
+  NSString* slug = Slug(game.folder);
+  NSString* name = [NSString stringWithFormat:@"WinPad-mapy-%@-%@", slug.length ? slug : @"hra", [stamp stringFromDate:now]];
+  NSString* work = [NSTemporaryDirectory() stringByAppendingPathComponent:@"export"];
+  [fm removeItemAtPath:work error:nil];
+  NSString* top = [work stringByAppendingPathComponent:name];
+  NSString* codemap = [[[top stringByAppendingPathComponent:@"fexcache"] stringByAppendingPathComponent:game.folder]
+      stringByAppendingPathComponent:@"codemap"];
+  NSError* e = nil;
+  // The same layout as the app's Documents/fexcache: WinPad Translator takes it as it takes that folder.
+  if (![fm createDirectoryAtPath:codemap withIntermediateDirectories:YES attributes:nil error:&e] ||
+      ![fm copyItemAtPath:maps toPath:[codemap stringByAppendingPathComponent:@"new"] error:&e]) {
+    if (error) *error = e;
+    return nil;
+  }
+  struct utsname machine;
+  uname(&machine);
+  NSISO8601DateFormatter* iso = [NSISO8601DateFormatter new];
+  NSDictionary* manifest = @{
+    @"kind" : @"winpad-codemaps",
+    @"version" : @1,
+    @"game" : @{@"folder" : game.folder, @"title" : game.title ?: game.folder, @"exe" : game.exe ?: @""},
+    @"maps" : @(count),
+    @"exported" : [iso stringFromDate:now],
+    @"app_build" : AppBuild() ?: @"",
+    @"device" : @(machine.machine),
+    @"image" : game.image.lastPathComponent ?: @"",
+  };
+  NSData* json = [NSJSONSerialization dataWithJSONObject:manifest options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&e];
+  if (!json || ![json writeToFile:[top stringByAppendingPathComponent:@"winpad-export.json"] options:0 error:&e]) {
+    if (error) *error = e;
+    return nil;
+  }
+  // Reading a folder "for uploading" makes a zip of it (removed after the block): the system's
+  // own zip, which Finder, Windows and Python open.
+  NSURL* zip = [NSURL fileURLWithPath:[work stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"zip"]]];
+  __block BOOL zipped = NO;
+  __block NSError* copy_error = nil;
+  NSError* coordinate_error = nil;
+  [[NSFileCoordinator new] coordinateReadingItemAtURL:[NSURL fileURLWithPath:top]
+                                              options:NSFileCoordinatorReadingForUploading
+                                                error:&coordinate_error
+                                           byAccessor:^(NSURL* made) {
+                                             NSError* failed = nil;
+                                             zipped = [fm copyItemAtURL:made toURL:zip error:&failed];
+                                             copy_error = failed;
+                                           }];
+  [fm removeItemAtPath:top error:nil];
+  if (!zipped) {
+    if (error) *error = copy_error ?: coordinate_error ?: ExportError(@"Zip s code mapami se nepodařilo vytvořit.");
+    return nil;
+  }
+  return zip;
+}
+
+// "1 nová code mapa", "3 nové code mapy", "5 nových code map".
+static NSString* NewMapsText(NSInteger n) {
+  return n == 1 ? @"1 nová code mapa"
+         : n >= 2 && n <= 4 ? [NSString stringWithFormat:@"%ld nové code mapy", (long)n]
+                            : [NSString stringWithFormat:@"%ld nových code map", (long)n];
 }
 
 NSArray<WinPadGame*>* WinPadFindGames(void) {
@@ -169,6 +300,7 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
         break;
       }
     }
+    CountMaps(game);
     [games addObject:game];
   }
   return games;
@@ -727,6 +859,9 @@ enum { AppearanceSection = 0 };
 @property(nonatomic, strong) UILabel* heroTitle;
 @property(nonatomic, strong) UIStackView* tags;
 @property(nonatomic, strong) UIButton* play;
+@property(nonatomic, strong) UIButton* exportMaps;  // "Exportovat pro převodník"
+@property(nonatomic) BOOL exporting;
+@property(nonatomic) BOOL exportCompact;  // the button's short title, as on an iPhone
 @property(nonatomic, strong) UIView* info;
 @property(nonatomic, strong) UILabel* infoText;
 @property(nonatomic, strong) UIScrollView* row;
@@ -743,13 +878,15 @@ enum { AppearanceSection = 0 };
 - (void)tick;
 - (void)moveFocusBy:(NSInteger)by;
 - (void)startFocused;
+- (void)exportFocused;
+- (void)titleExport:(BOOL)compact;
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game;
 - (void)openSettings;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
 @end
 
-enum { NavLeft = 1, NavRight = 2, NavA = 4, NavB = 8, NavY = 16 };
+enum { NavLeft = 1, NavRight = 2, NavA = 4, NavB = 8, NavY = 16, NavX = 32 };
 // A card's cover; the card's own tag is the game's index.
 enum { CoverTag = 1001 };
 
@@ -837,6 +974,21 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.play addTarget:self action:@selector(startFocused) forControlEvents:UIControlEventTouchUpInside];
   [self.view addSubview:self.play];
 
+  // Shares the focused game's code maps for WinPad Translator's next round.
+  UIButtonConfiguration* share = [UIButtonConfiguration filledButtonConfiguration];
+  share.baseBackgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
+  share.baseForegroundColor = UIColor.whiteColor;
+  share.cornerStyle = UIButtonConfigurationCornerStyleFixed;
+  share.background.cornerRadius = 4;
+  share.image = [UIImage systemImageNamed:@"square.and.arrow.up"];
+  share.imagePadding = 10;
+  share.title = @"Exportovat pro převodník";
+  share.contentInsets = NSDirectionalEdgeInsetsMake(14, 24, 14, 28);
+  self.exportMaps = [UIButton buttonWithConfiguration:share primaryAction:nil];
+  self.exportMaps.accessibilityLabel = @"Exportovat code mapy pro převodník";
+  [self.exportMaps addTarget:self action:@selector(exportFocused) forControlEvents:UIControlEventTouchUpInside];
+  [self.view addSubview:self.exportMaps];
+
   self.info = [UIView new];
   self.info.backgroundColor = [Hex(0x04122E) colorWithAlphaComponent:0.55];
   self.info.layer.cornerRadius = 6;
@@ -855,7 +1007,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.view addSubview:self.empty];
 
   self.hints = [UILabel new];
-  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓨ Nastavení     Ťuknutím vybereš, druhým spustíš";
+  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓧ Export map     Ⓨ Nastavení     Ťuknutím vybereš, druhým spustíš";
   self.hints.font = [UIFont systemFontOfSize:16];
   self.hints.textColor = Hex(0xDCE8FF);
   self.hints.textAlignment = NSTextAlignmentRight;
@@ -891,6 +1043,26 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   for (WinPadGame* game in self.games)
     [report appendFormat:@"library: %@ | %@ | %@ | image %@%@\n", game.title, game.exe, game.arch ?: @"?",
                          game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @""];
+  // What "Exportovat pro převodník" shares, without the share sheet: Documents/export-FOLDER.zip.
+  for (WinPadGame* game in self.games) {
+    if (!game.maps) continue;
+    NSError* error = nil;
+    NSURL* zip = WinPadExportMaps(game, &error);
+    NSString* copy = [Documents() stringByAppendingPathComponent:[NSString stringWithFormat:@"export-%@.zip", game.folder]];
+    [NSFileManager.defaultManager removeItemAtPath:copy error:nil];
+    if (zip && [NSFileManager.defaultManager moveItemAtPath:zip.path toPath:copy error:&error]) {
+      [report appendFormat:@"export: %@ | %ld maps, %ld new | %@\n", game.folder, (long)game.maps, (long)game.newMaps,
+                           zip.lastPathComponent];
+      WinPadMarkMapsExported(game, NSDate.date);
+    } else {
+      [report appendFormat:@"export: %@ failed: %@\n", game.folder, error.localizedDescription];
+    }
+  }
+  if (self.games.count) {
+    self.games = WinPadFindGames();
+    for (WinPadGame* game in self.games)
+      if (game.maps) [report appendFormat:@"export: %@ after it, %ld new\n", game.folder, (long)game.newMaps];
+  }
   [report writeToFile:[Documents() stringByAppendingPathComponent:@"library.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
     [self moveFocusBy:1];
@@ -941,6 +1113,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   }
   const BOOL none = self.games.count == 0;
   for (UIView* v in @[ self.heroTitle, self.tags, self.play, self.info ]) v.hidden = none;
+  self.exportMaps.hidden = none || !self.games[self.focus].maps;
   self.empty.hidden = !none;
   [self showFocus];
   [self.view setNeedsLayout];
@@ -961,9 +1134,11 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                    }];
   if (!self.games.count) {
     self.backdrop.cover = nil;
+    self.exportMaps.hidden = YES;
     return;
   }
   WinPadGame* game = self.games[self.focus];
+  self.exportMaps.hidden = !game.maps;
   self.backdrop.cover = game.cover;
   self.heroTitle.text = game.title;
   for (UIView* tag in self.tags.arrangedSubviews) [tag removeFromSuperview];
@@ -975,6 +1150,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                  : game.image      ? LightTag(@"Přeloženo", 0x9BEDB5, good)
                                                    : LightTag(@"Nepřeloženo", 0xF2C46D, warn)];
   if (game.folderImageNote) [self.tags addArrangedSubview:LightTag(@"Obraz ve složce je pro jiné sestavení", 0xF2C46D, warn)];
+  if (game.newMaps) [self.tags addArrangedSubview:LightTag(NewMapsText(game.newMaps), 0xF2C46D, warn)];
   NSString* state = game.image ? @"Hra běží z přeloženého obrazu. Kód, který v něm chybí, doplní příští překlad z code map."
                                : @"Hra zatím nemá přeložený obraz: poběží pomalu v interpretu a zapíše code mapy pro překlad.";
   NSMutableAttributedString* text = [NSMutableAttributedString new];
@@ -983,8 +1159,11 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                        attributes:@{NSFontAttributeName : [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold],
                                                     NSForegroundColorAttributeName : Hex(0x9DB9E8)}]];
   [text appendAttributedString:[[NSAttributedString alloc]
-                                   initWithString:[NSString stringWithFormat:@"%@\nSložka %@ · %@", state, game.folder,
-                                                                             game.exe.lastPathComponent]
+                                   initWithString:[NSString stringWithFormat:@"%@\nSložka %@ · %@%@", state, game.folder,
+                                                                             game.exe.lastPathComponent,
+                                                                             game.maps ? [NSString stringWithFormat:@" · code map %ld, nových %ld",
+                                                                                                                    (long)game.maps, (long)game.newMaps]
+                                                                                       : @""]
                                        attributes:@{NSFontAttributeName : [UIFont systemFontOfSize:15],
                                                     NSForegroundColorAttributeName : Hex(0xDCE8FF)}]];
   self.infoText.attributedText = text;
@@ -1034,6 +1213,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     self.heroTitle.frame = CGRectMake(m, y, w - pw - 16, title_h);
     self.tags.frame = CGRectMake(m, y + title_h + 8, w - pw - 16, 26);
     self.play.frame = CGRectMake(m + w - pw, y + 6, pw, 48);
+    [self titleExport:YES];
+    self.exportMaps.frame = CGRectMake(m + w - pw, y + 6 + 48 + 8, pw, 44);
     self.info.hidden = self.hints.hidden = YES;
   } else {
     self.heroTitle.frame = CGRectMake(m, y, MIN(w, 900), title_h);
@@ -1041,9 +1222,12 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     self.tags.frame = CGRectMake(m, y, w, 32);
     y += 32 + 26;
     self.play.frame = CGRectMake(m, y, MAX(play.width, 180), 56);
+    [self titleExport:NO];
+    const CGSize share = [self.exportMaps sizeThatFits:CGSizeMake(w, 60)];
+    self.exportMaps.frame = CGRectMake(CGRectGetMaxX(self.play.frame) + 16, y, share.width, 56);
     y += 56 + 36;
     self.info.hidden = !self.games.count;
-    self.info.frame = CGRectMake(m, y, MIN(w, 440), 120);
+    self.info.frame = CGRectMake(m, y, MIN(w, 440), 140);
     self.infoText.frame = CGRectInset(self.info.bounds, 20, 14);
     self.hints.hidden = NO;
     self.hints.frame = CGRectMake(m, b.size.height - safe.bottom - 56, w, 32);
@@ -1069,6 +1253,63 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 - (void)startFocused {
   if (!self.games.count) return;
   [self startProgram:@"game" game:self.games[self.focus]];
+}
+
+// The export button's title: in full, or short where there is little room (an iPhone).
+- (void)titleExport:(BOOL)compact {
+  if (self.exportCompact == compact && self.exportMaps.configuration.title) return;
+  self.exportCompact = compact;
+  UIButtonConfiguration* config = self.exportMaps.configuration;
+  config.title = compact ? @"Export map" : @"Exportovat pro převodník";
+  config.contentInsets = compact ? NSDirectionalEdgeInsetsMake(8, 10, 8, 10) : NSDirectionalEdgeInsetsMake(14, 24, 14, 28);
+  self.exportMaps.configuration = config;
+}
+
+// Zips the focused game's code maps (in the background: a long session writes megabytes) and
+// opens the share sheet with it: AirDrop to the Mac, Save to Files, Mail… The maps count as
+// exported once it was shared; the zip itself is temporary.
+- (void)exportFocused {
+  if (!self.games.count || self.presentedViewController || self.started || self.exporting) return;
+  WinPadGame* game = self.games[self.focus];
+  if (!game.maps) return;
+  self.exporting = YES;
+  UIButtonConfiguration* busy = self.exportMaps.configuration;
+  busy.showsActivityIndicator = YES;
+  self.exportMaps.configuration = busy;
+  NSDate* started = NSDate.date;
+  __weak LibraryViewController* weak = self;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    NSError* error = nil;
+    NSURL* zip = WinPadExportMaps(game, &error);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      LibraryViewController* me = weak;
+      if (!me) return;
+      me.exporting = NO;
+      UIButtonConfiguration* idle = me.exportMaps.configuration;
+      idle.showsActivityIndicator = NO;
+      me.exportMaps.configuration = idle;
+      if (!zip) {
+        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Export se nepodařil"
+                                                                       message:error.localizedDescription
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [me presentViewController:alert animated:YES completion:nil];
+        return;
+      }
+      UIActivityViewController* sheet = [[UIActivityViewController alloc] initWithActivityItems:@[ zip ]
+                                                                          applicationActivities:nil];
+      sheet.popoverPresentationController.sourceView = me.exportMaps;
+      sheet.popoverPresentationController.sourceRect = me.exportMaps.bounds;
+      sheet.completionWithItemsHandler = ^(UIActivityType type, BOOL completed, NSArray* items, NSError* failed) {
+        if (completed) {
+          WinPadMarkMapsExported(game, started);
+          [weak reload];
+        }
+        [NSFileManager.defaultManager removeItemAtURL:zip error:nil];
+      };
+      [me presentViewController:sheet animated:YES completion:nil];
+    });
+  });
 }
 
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game {
@@ -1108,7 +1349,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   float x = pad.dpad.xAxis.value;
   if (fabsf(x) < 0.5f) x = pad.leftThumbstick.xAxis.value;
   const unsigned now = (x < -0.5f ? NavLeft : 0) | (x > 0.5f ? NavRight : 0) | (pad.buttonA.pressed ? NavA : 0) |
-                       (pad.buttonB.pressed ? NavB : 0) | (pad.buttonY.pressed ? NavY : 0);
+                       (pad.buttonB.pressed ? NavB : 0) | (pad.buttonY.pressed ? NavY : 0) |
+                       (pad.buttonX.pressed ? NavX : 0);
   const unsigned pressed = now & ~self.pad;
   self.pad = now;
   if (self.presentedViewController) {
@@ -1118,6 +1360,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   if (pressed & NavLeft) [self moveFocusBy:-1];
   if (pressed & NavRight) [self moveFocusBy:1];
   if (pressed & NavY) [self openSettings];
+  if (pressed & NavX) [self exportFocused];
   if (pressed & NavA) [self startFocused];
 }
 

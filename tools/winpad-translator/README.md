@@ -16,8 +16,15 @@ Inputs, any combination:
 - **Code maps from the iPad.** Code missing from the image runs in FEX's
   interpreter on the iPad, slowly, and is recorded in the app's
   `Documents/fexcache/<game folder>/codemap/new` (with `runtime/` for code the game builds at
-  run time). Copy that folder off the iPad (Finder or Files) and add it. Each
-  round of play → copy → translate makes the game faster.
+  run time). In the app's library, **Exportovat pro převodník** (or the
+  controller's X) shares them as one zip (AirDrop to the Mac, Files, Mail);
+  add that zip (`--ipad-maps WinPad-mapy-<game>-<date>.zip`, or the **zip**
+  button in the window). Copying the folder off the iPad (Finder or Files)
+  works too. The app writes each block the moment the interpreter learns it,
+  so maps survive iPadOS ending the app. The zip's `winpad-export.json` names
+  the game folder, the app build and when it was exported; the library build
+  says when an export is of no game it has. Each round of play → export →
+  translate makes the game faster.
 - **DynamoRIO logs from a Windows PC** (`drrun -t drcov -- GAME.EXE`, play for a
   while): one session covers most of the game's own code at once
   (`tests/fex-wow64/drcov2codemap.py`).

@@ -1,0 +1,76 @@
+Write the code map at once for blocks the NoJIT interpreter learns (FEX 3bec2ac, on top of 0037)
+
+The code map writer keeps a 4 KB buffer and writes it when it is full or
+when the process ends (0002, 0016). A game on the iPad rarely ends that
+way: iOS ends an app in the background with SIGKILL, and the user closes
+it from the app switcher. Up to 4 KB of the newest blocks (about 500),
+the ones the interpreter learned last, were lost with it, and the next
+image lacked them again.
+
+CodeMapWriter::FlushPending writes what is buffered. The interpreter calls
+it after each block it learns, and NoteUnalignedAOTBlock after each block
+it records for a half-barrier compile. Both happen once per block, so the
+map is written a few thousand times a session at most; the JIT path keeps
+the buffer. WinPad Wine's "Exportovat pro převodník" then always shares
+every block played so far.
+
+diff --git a/FEXCore/Source/Interface/Core/CodeCache.cpp b/FEXCore/Source/Interface/Core/CodeCache.cpp
+index 8cff835..f4f8050 100644
+--- a/FEXCore/Source/Interface/Core/CodeCache.cpp
++++ b/FEXCore/Source/Interface/Core/CodeCache.cpp
+@@ -175,6 +175,17 @@ void CodeMapWriter::Flush(size_t Offset) {
+   Flush(Offset, Lock);
+ }
+ 
++void CodeMapWriter::FlushPending() {
++  std::unique_lock Lock {Mutex};
++  const size_t Offset = BufferOffset.load();
++  // Past the end: a thread that filled the buffer flushes it (AppendData) and knows how much of
++  // it is valid.
++  if (CodeMapFD.value_or(-1) == -1 || Offset == 0 || Offset > Buffer.size()) {
++    return;
++  }
++  Flush(Offset, Lock);
++}
++
+ void CodeMapWriter::Flush(size_t Offset, std::unique_lock<std::shared_mutex>&) {
+   write(*CodeMapFD, Buffer.data(), Offset);
+   BufferOffset = 0;
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 466f40c..63043e0 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -2408,6 +2408,7 @@ void ContextImpl::NoteUnalignedAOTBlock(FEXCore::Core::InternalThreadState* Thre
+     auto Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
+     if (Region && Region->FileStartVA != 0) {
+       CodeMapWriter->AppendBlock(*Region, GuestRIP, CodeMap::HalfBarrierTSOBlock);
++      CodeMapWriter->FlushPending();
+     }
+   }
+ }
+@@ -2457,6 +2458,9 @@ ContextImpl::GenerateInterpreterIR(FEXCore::Core::InternalThreadState* Thread, u
+         auto Region = SyscallHandler->LookupExecutableFileSection(Thread, GuestRIP);
+         if (Region && Region->FileStartVA != 0) {
+           CodeMapWriter->AppendBlock(*Region, GuestRIP);
++          // WinPad: on the disk at once (see CodeMapWriter::FlushPending): the app may be ended
++          // any time, and these blocks are what the next image needs.
++          CodeMapWriter->FlushPending();
+         }
+       }
+     }
+diff --git a/FEXCore/include/FEXCore/Core/CodeCache.h b/FEXCore/include/FEXCore/Core/CodeCache.h
+index 38c4488..3b730b8 100644
+--- a/FEXCore/include/FEXCore/Core/CodeCache.h
++++ b/FEXCore/include/FEXCore/Core/CodeCache.h
+@@ -162,6 +162,11 @@ public:
+   // Thread-safely commit any pending data to disk
+   void Flush(size_t Offset);
+ 
++  // WinPad: writes what is buffered now, if the map is open. The NoJIT interpreter learns few
++  // blocks, each worth keeping: iOS ends an app in the background with SIGKILL, and the up to
++  // 4 KB a full buffer would wait for were lost with it.
++  void FlushPending();
++
+ private:
+   // Queues data into an internal ring buffer.
+   // Call Flush() to commit the data to disk.
