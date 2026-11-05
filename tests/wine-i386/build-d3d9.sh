@@ -13,7 +13,8 @@
 # (crosire/d3d8to9, BSD-2-Clause, its licence beside it as
 # d3d8to9-LICENSE.md): d3d8.dll turns each D3D8 call into D3D9 ones, which go
 # to the shim above. It assembles and disassembles shaders with d3dx9_43,
-# Wine's (with d3dcompiler_43). d3d8-cube.c is the D3D8 cube.
+# Wine's (with d3dcompiler_43 and d3dxof, which it imports). d3d8-cube.c is
+# the D3D8 cube.
 #
 # The Wine modules a 32-bit program with a window needs come first, built
 # with build.sh: user32 and what it imports, and ucrtbase, which DXMT's DLLs
@@ -42,7 +43,7 @@ D3D8TO9=255338f698c8270b537f0a91a13f795f4f988250
 keep=$(mktemp -d)
 [ ! -d "$out" ] || cp -R "$out/." "$keep/"
 sh "$here/build.sh" "$work" ntdll kernelbase kernel32 user32 gdi32 win32u advapi32 sechost \
-    msvcrt ucrtbase imm32 dbghelp d3dx9_43 d3dcompiler_43
+    msvcrt ucrtbase imm32 dbghelp d3dx9_43 d3dcompiler_43 d3dxof
 for f in "$keep"/*; do
     [ -e "$f" ] || continue
     n=${f##*/}

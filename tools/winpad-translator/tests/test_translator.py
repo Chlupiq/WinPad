@@ -301,6 +301,21 @@ class LibraryTest(unittest.TestCase):
             again.remove("Game A")
             self.assertEqual([p.folder_name() for p in again.projects()], ["Game B"])
 
+    def test_game_given_as_its_exe(self):
+        with tempfile.TemporaryDirectory() as t:
+            exe = os.path.join(t, "My Game", "Bin", "GAME.EXE")
+            pe(exe)
+            self.assertEqual(project.split_game_path(exe), (os.path.dirname(exe), "GAME.EXE"))
+            self.assertEqual(project.split_game_path(os.path.dirname(exe), "x.exe"), (os.path.dirname(exe), "x.exe"))
+            lib = library.Library()
+            p = lib.add(exe, work_dir=os.path.join(t, "work"))
+            self.assertEqual((p.game_dir, p.exe, p.folder_name()), (os.path.dirname(exe), "GAME.EXE", "Bin"))
+            from winpad_translator import cli
+            with mock.patch.object(project, "run") as run:
+                cli.main(["--game", exe, "--work", os.path.join(t, "work2"), "--ipa", os.path.join(t, "x.ipa")])
+            given = run.call_args[0][0]
+            self.assertEqual((given.game_dir, given.exe), (os.path.dirname(exe), "GAME.EXE"))
+
     def test_signed_into_game_folder(self):
         with tempfile.TemporaryDirectory() as t:
             game = os.path.join(t, "Game")

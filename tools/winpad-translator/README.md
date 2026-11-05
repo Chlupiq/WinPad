@@ -132,6 +132,11 @@ winpad-translator --game "D:\Games\My Game" --ipad-maps "D:\from-ipad\new" \
 `--xcode-project`. The bundle identifier stays, so the renamed app replaces
 WinPad Wine on the iPad and keeps its Documents.
 
+`--game` also takes the game's .exe (`--game "D:\Games\My Game\GAME.EXE"`): the folder
+it is in is the game, and the .exe its program (as `--exe`). In the window, **Game program
+(.exe)** picks it and fills the game folder; in the game library, **+** adds a game by its
+.exe and **dir** by its folder.
+
 Then copy the game folder into WinPad Wine's Documents on the iPad and install
 the new IPA. The settings of a game are kept in its work folder
 (`winpad-translator.json`, `--settings`), so the next round only needs the new
