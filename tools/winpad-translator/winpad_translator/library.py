@@ -73,7 +73,9 @@ class Library:
         return [project.Project.load(os.path.join(w, project.SETTINGS)) for w in self.games]
 
     def add(self, game_dir, exe="", ipad_folder="", work_dir="", profile=""):
-        """Adds the game in GAME_DIR (or updates its program and iPad folder). Returns its Project."""
+        """Adds the game in GAME_DIR, or the game whose .exe GAME_DIR is (its folder is the game),
+        or updates its program and iPad folder. Returns its Project."""
+        game_dir, exe = project.split_game_path(game_dir, exe)
         game_dir = os.path.abspath(game_dir)
         if not os.path.isdir(game_dir):
             raise project.TranslateError(f"no folder {game_dir}")

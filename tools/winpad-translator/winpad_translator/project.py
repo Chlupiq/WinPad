@@ -12,6 +12,15 @@ from . import codemaps, compile as fexcompile, record as recordmod, install as i
 SETTINGS = "winpad-translator.json"
 
 
+def split_game_path(path, exe=""):
+    """A game given as its program: GAME_FOLDER/GAME.EXE -> (GAME_FOLDER, "GAME.EXE"), since the
+    folder the .exe is in is the game. A folder comes back as it is, with EXE."""
+    if path and os.path.isfile(path) and path.lower().endswith(".exe"):
+        folder = os.path.dirname(os.path.abspath(path))
+        return folder, os.path.basename(path)
+    return path, exe
+
+
 @dataclasses.dataclass
 class Project:
     game_dir: str = ""
