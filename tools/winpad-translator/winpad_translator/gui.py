@@ -17,6 +17,59 @@ def same_folder(a, b):
     return bool(a) and bool(b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
+def scrolled_tab(tabs, text):
+    """A notebook tab whose content scrolls (scrollbar, mouse wheel, trackpad), so the buttons
+    at its bottom stay reachable on a small screen. Returns the frame to fill."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    outer = ttk.Frame(tabs)
+    tabs.add(outer, text=text)
+    canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+    bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=bar.set)
+    bar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    frame = ttk.Frame(canvas, padding=12)
+    item = canvas.create_window((0, 0), window=frame, anchor="nw")
+
+    def fit(*_):
+        # The content is as wide as the window, and at least as tall: the log takes what is left.
+        need = frame.winfo_reqheight()
+        canvas.itemconfigure(item, width=canvas.winfo_width(), height=max(need, canvas.winfo_height()))
+        canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), max(need, canvas.winfo_height())))
+
+    frame.bind("<Configure>", fit)
+    canvas.bind("<Configure>", fit)
+    frame.bind("<Map>", fit)
+    outer.after_idle(fit)
+
+    def inside(widget):
+        while widget is not None:
+            if widget is outer:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def wheel(event):
+        widget = event.widget if not isinstance(event.widget, str) else None
+        # The log and the lists scroll themselves; elsewhere the wheel scrolls the tab.
+        if widget is None or not inside(widget) or widget.winfo_class() in ("Text", "Listbox", "TCombobox"):
+            return
+        if getattr(event, "num", None) in (4, 5):
+            step = -1 if event.num == 4 else 1
+        elif abs(event.delta) >= 120:  # Windows: 120 a notch
+            step = -int(event.delta / 120)
+        else:  # macOS: small deltas from the trackpad and the wheel
+            step = -event.delta
+        if step and canvas.yview() != (0.0, 1.0):
+            canvas.yview_scroll(step, "units")
+
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        outer.bind_all(seq, wheel, add="+")
+    return frame
+
+
 def main():
     import tkinter as tk
     from tkinter import filedialog, ttk
@@ -24,14 +77,14 @@ def main():
 
     root = tk.Tk()
     root.title(f"WinPad Translator {__version__}")
-    root.minsize(760, 640)
+    root.minsize(760, 420)
+    root.geometry(f"900x{min(900, root.winfo_screenheight() - 80)}")
     p = project.Project()
     lines = queue.Queue()
 
     tabs = ttk.Notebook(root)
     tabs.pack(fill="both", expand=True)
-    frame = ttk.Frame(tabs, padding=12)
-    tabs.add(frame, text="One game")
+    frame = scrolled_tab(tabs, "One game")
     library_tab(tabs)
     frame.columnconfigure(1, weight=1)
     row = 0
@@ -381,8 +434,7 @@ def library_tab(tabs):
     path = library.default_path()
     lib = library.Library.load(path)
     lines = queue.Queue()
-    frame = ttk.Frame(tabs, padding=12)
-    tabs.add(frame, text="Game library")
+    frame = scrolled_tab(tabs, "Game library")
     frame.columnconfigure(1, weight=1)
 
     ttk.Label(frame, text="Games").grid(row=0, column=0, sticky="nw", pady=2)
