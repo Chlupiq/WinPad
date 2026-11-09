@@ -447,6 +447,14 @@ static void publish_host_probe(void) {
 // executable view from a debugger). The simulator lets a process map it
 // itself. WINE_IOS_JIT_RX/RW/SIZE hand it to Wine, as ContentView.swift does.
 static int publish_jit_pool(size_t size) {
+  // An app may have its pool already: on an iPad with TXM StikDebug's script makes the
+  // executable view, and the app its writable alias (tests/wine-app/JITPool.c).
+  const char* have = getenv("WINE_IOS_JIT_RX");
+  if (have && *have && getenv("WINE_IOS_JIT_RW") && getenv("WINE_IOS_JIT_SIZE")) {
+    printf("winehost: JIT pool from the app: RX %s RW %s, size %s\n", have, getenv("WINE_IOS_JIT_RW"),
+           getenv("WINE_IOS_JIT_SIZE"));
+    return 0;
+  }
   // WINEHOST_JIT_POOL_MB overrides the size: FEX's offline compiler compiling
   // many modules in one process needs more than a program does.
   const char* mb = getenv("WINEHOST_JIT_POOL_MB");

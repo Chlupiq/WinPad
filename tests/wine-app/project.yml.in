@@ -14,6 +14,11 @@ targets:
       # WinPad packages (.winpad): a game in one file, opened from AirDrop or Files.
       - Package.h
       - Package.c
+      # FEX's JIT with StikDebug: the JIT pool its universal.js script makes executable.
+      - JITPool.h
+      - JITPool.c
+      - WinPadJIT.h
+      - WinPadJIT.m
       # The "program" setting in the Settings app (main.m, ProgramName).
       - Settings.bundle
     postBuildScripts:

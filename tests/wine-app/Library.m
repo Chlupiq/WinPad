@@ -49,6 +49,7 @@
 #import "Library.h"
 
 #import "Package.h"
+#import "WinPadJIT.h"
 
 #import <GameController/GameController.h>
 #import <PhotosUI/PhotosUI.h>
@@ -877,17 +878,17 @@ enum { AppearanceSection = 0 };
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
-  return 5;
+  return 6;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
   if (section == AppearanceSection) return 2;
   section -= 1;
-  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : 2;
+  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : section == 3 ? 3 : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"O aplikaci" ][section];
+  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT (StikDebug)", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -900,6 +901,10 @@ enum { AppearanceSection = 0 };
   if (section == 2)
     return @"Ukazatel FPS ukáže ve hře snímky za sekundu, nejdelší snímek za poslední sekundu a rozlišení. "
            @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
+  if (section == 3)
+    return @"S JITem (StikDebug připojený k aplikaci) hra běží bez vlastního AOT obrazu: co ještě neběželo, FEX "
+           @"přeloží za běhu. Bez JITu hra běží ze svého AOT obrazu a interpretu. Když StikDebug není "
+           @"nainstalovaný, aplikace ho neotevírá.";
   return @"Hry se přidávají ve Finderu: iPad → Soubory → WinPad Wine, každá ve své složce.";
 }
 
@@ -954,6 +959,18 @@ enum { AppearanceSection = 0 };
   } else if (path.section == 2) {
     cell.textLabel.text = @[ @"Poslední log", @"Spustit hello.exe", @"Spustit window.exe" ][path.row - 1];
     cell.accessoryType = path.row == 1 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+  } else if (path.section == 3 && path.row < 2) {
+    cell.textLabel.text = path.row == 0 ? @"Hrát s JITem, když je k dispozici" : @"Před hrou otevřít StikDebug";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = path.row == 0 ? WinPadJITWanted() : WinPadJITAskWanted();
+    toggle.tag = path.row;
+    [toggle addTarget:self action:@selector(jitChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+  } else if (path.section == 3) {
+    cell.textLabel.text = @"Stav";
+    cell.detailTextLabel.text = WinPadJITStatus();
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
   } else {
     NSDictionary* info = NSBundle.mainBundle.infoDictionary;
     cell.textLabel.text = path.row == 0 ? @"Verze" : @"Hry";
@@ -975,6 +992,10 @@ enum { AppearanceSection = 0 };
 
 - (void)fpsChanged:(UISwitch*)toggle {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"fpsOverlay"];
+}
+
+- (void)jitChanged:(UISwitch*)toggle {
+  [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:toggle.tag == 0 ? @"jit" : @"jitStikDebug"];
 }
 
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
@@ -1036,6 +1057,8 @@ enum { AppearanceSection = 0 };
 // installs said (for libraryTest's report).
 @property(nonatomic, strong) NSMutableArray<NSURL*>* packages;
 @property(nonatomic) BOOL installing;
+// StikDebug was asked for the JIT before this start (WinPadJIT.m): asked once per launch.
+@property(nonatomic) BOOL jitAsked;
 @property(nonatomic, strong) NSMutableString* installReport;
 - (void)reload;
 - (void)showFocus;
@@ -1045,6 +1068,7 @@ enum { AppearanceSection = 0 };
 - (void)exportFocused;
 - (void)titleExport:(BOOL)compact;
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game;
+- (void)waitForJITThen:(void (^)(void))start;
 - (void)openSettings;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
@@ -1584,6 +1608,17 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game {
   if (self.started || self.installing) return;
+  // A game without the JIT: StikDebug turns it on first (WinPadJIT.m), if it is installed and the
+  // settings want it. The game starts once a debugger is attached, or without the JIT after 60 s
+  // or when the user says so.
+  if (game && !self.jitAsked && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+      WinPadJITShouldAskStikDebug()) {
+    self.jitAsked = YES;
+    [self waitForJITThen:^{
+      [self startProgram:program game:game];
+    }];
+    return;
+  }
   self.started = YES;
   if (game) [NSUserDefaults.standardUserDefaults setObject:game.folder forKey:@"lastGame"];
   // The game reads the controllers itself (main.m's Gamepads).
@@ -1591,6 +1626,46 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.observers removeAllObjects];
   for (GCController* pad in GCController.controllers) pad.extendedGamepad.valueChangedHandler = nil;
   if (self.start) self.start(program, game);
+}
+
+- (void)waitForJITThen:(void (^)(void))start {
+  UIAlertController* alert =
+      [UIAlertController alertControllerWithTitle:@"Zapínám JIT"
+                                          message:@"StikDebug se připojuje k WinPad Wine. Pokud se neotevře sám, "
+                                                  @"vrať se sem po zapnutí JITu ve StikDebugu."
+                                   preferredStyle:UIAlertControllerStyleAlert];
+  __block NSTimer* timer = nil;
+  __block BOOL finished = NO;
+  void (^finish)(void) = ^{
+    if (finished) return;
+    finished = YES;
+    [timer invalidate];
+    // The JIT pool right away, while StikDebug's script waits for it.
+    NSString* note = nil;
+    WinPadJITPrepare(&note);
+    NSLog(@"WinPad Wine: JIT: %@", note);
+    if (alert.presentingViewController)
+      [alert dismissViewControllerAnimated:YES completion:start];
+    else
+      start();
+  };
+  [alert addAction:[UIAlertAction actionWithTitle:@"Spustit bez JITu"
+                                            style:UIAlertActionStyleCancel
+                                          handler:^(UIAlertAction* action) {
+                                            finished = YES;
+                                            [timer invalidate];
+                                            dispatch_async(dispatch_get_main_queue(), start);
+                                          }]];
+  [self presentViewController:alert animated:YES completion:nil];
+  const CFAbsoluteTime begin = CFAbsoluteTimeGetCurrent();
+  timer = [NSTimer scheduledTimerWithTimeInterval:0.25
+                                          repeats:YES
+                                            block:^(NSTimer* t) {
+                                              if (WinPadJITAttached() || CFAbsoluteTimeGetCurrent() - begin > 60) finish();
+                                            }];
+  WinPadJITAskStikDebug(^(BOOL opened) {
+    if (!opened) finish();
+  });
 }
 
 - (void)openSettings {

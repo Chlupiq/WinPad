@@ -148,6 +148,13 @@ jobs:
           path: ${{ runner.temp }}/xcode/WinPadProbe-xcode
           if-no-files-found: error
 
+  jit-protocol:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: The app asks StikDebug's script for the JIT pool (the script played by a signal handler), and the code builds for an iPad
+        run: sh tests/wine-app/jit-protocol-test.sh "$RUNNER_TEMP/jit"
+
   pe2macho:
     runs-on: macos-15
     steps:

@@ -31,10 +31,12 @@
 // game has a Metal layer, its first window's GDI frames show there instead
 // (a launcher, a message box), and a status line above says how long it has
 // run and how many frames it has drawn.
-// An iPad with TXM runs no JIT code even under the debugger, so the game
+// An iPad with TXM runs no JIT code under Xcode's debugger, so the game
 // runs with NoJIT from Frameworks/fexaot-game.dylib when the project has one
 // (game-aot.sh builds it on the Mac with the game), FEX's interpreter running
-// the blocks it lacks.
+// the blocks it lacks. With StikDebug attached (its universal.js script, which
+// makes the JIT pool executable: JITPool.c, WinPadJIT.m) the game runs with
+// FEX's JIT instead and needs no image.
 //
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
@@ -48,6 +50,7 @@
 #import <UIKit/UIKit.h>
 
 #import "Library.h"
+#import "WinPadJIT.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -1077,9 +1080,21 @@ static CFTimeInterval fps_shown;
   // The library picked a game's own image (Library.m), else fexaot-game.dylib.
   NSString* frameworks = NSBundle.mainBundle.privateFrameworksPath;
   NSString* game_image = self.game ? self.game.image : [frameworks stringByAppendingPathComponent:@"fexaot-game.dylib"];
-  if (self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
+  // With the JIT (StikDebug attached, WinPadJIT.m) the game runs from FEX's JIT and needs no
+  // image: what it has not run yet is translated as it runs, at the JIT's speed instead of the
+  // interpreter's. Without it, its image and the interpreter, as before.
+  if (game && !self.record) {
+    NSString* jit_note = nil;
+    const BOOL jit = WinPadJITPrepare(&jit_note);
+    if (jit_note) printf("WinPad Wine: JIT: %s\n", jit_note.UTF8String);
+    if (jit) {
+      game_image = nil;
+      printf("WinPad Wine: the game runs with FEX's JIT, not an AOT image\n");
+    }
+  }
+  if (game_image && self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
   // An image in the game folder loads only if it is signed by the app's team; else the bundle's.
-  if (!self.record && self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
+  if (!self.record && game_image && self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
     printf("WinPad Wine: the game folder's image did not load (%s), taking %s\n", dlerror(),
            self.game.bundleImage ? self.game.bundleImage.lastPathComponent.UTF8String : "none");
     game_image = self.game.bundleImage;
@@ -1271,6 +1286,13 @@ static CFTimeInterval fps_shown;
 
 @implementation WineAppDelegate
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)options {
+  // StikDebug started the app with its script attached: the JIT pool is made now, while the
+  // script waits for it (WinPadJIT.m).
+  if (WinPadJITAttached()) {
+    NSString* note = nil;
+    WinPadJITPrepare(&note);
+    NSLog(@"WinPad Wine: JIT at launch: %@", note);
+  }
   return YES;
 }
 
