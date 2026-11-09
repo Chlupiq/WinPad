@@ -262,12 +262,14 @@ class Docker(Backend):
 
     def shareable_compiler(self):
         """Docker Desktop on a Mac mounts only shared folders (by default /Users, /Volumes,
-        /private, /tmp, /var/folders), not /Applications with the app's toolkit in it: copy
-        the toolkit next to the cache directory."""
+        /private, /tmp, /var/folders), not /Applications with the app's toolkit in it, and the
+        app's own path has a space: copy the toolkit next to the cache directory."""
         if sys.platform != "darwin":
             return
         src = os.path.dirname(os.path.abspath(self.compiler))
-        if any(src == d or src.startswith(d + os.sep) for d in DOCKER_SHARED):
+        # Wine in the container also gets the compiler's path, which must not have spaces in it
+        # ("WinPad Translator.app"): the CI runs, which work, never had any.
+        if " " not in src and any(src == d or src.startswith(d + os.sep) for d in DOCKER_SHARED):
             return
         dst = os.path.join(os.path.dirname(self.cache_dir), "toolkit")
         shutil.rmtree(dst, ignore_errors=True)
