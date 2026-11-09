@@ -55,6 +55,8 @@ int winpad_jit_under_xcode(void) {
 
 // TXM's region in the device tree's memory map, as StikJIT looks for it (ProcessInfo+TXM.swift).
 // IOKit has no headers in the iOS SDK: its functions come from dlsym. -1 when it cannot tell.
+// Only a device has it (the simulator never asks).
+#if !TARGET_OS_SIMULATOR
 static int txm_in_device_tree(void) {
   void* iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY);
   if (!iokit) return -1;
@@ -81,6 +83,7 @@ static int os_major(void) {
   if (sysctlbyname("kern.osproductversion", version, &size, NULL, 0)) return 0;
   return atoi(version);
 }
+#endif
 
 int winpad_jit_has_txm(void) {
   const char* force = getenv("WINPAD_JIT_TXM");
