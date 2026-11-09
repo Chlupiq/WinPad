@@ -47,6 +47,8 @@ targets:
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks @executable_path/../../Frameworks"
         "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]": "$(PROJECT_DIR)/StikJIT/iphoneos"
         "OTHER_LDFLAGS[sdk=iphoneos*]": "-framework StikJIT"
+        # One binary, also in Debug: no WinPadJITHelper.debug.dylib beside a stub that loads it.
+        ENABLE_DEBUG_DYLIB: NO
   WinPadWine:
     type: application
     platform: iOS
