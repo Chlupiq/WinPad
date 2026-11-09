@@ -159,18 +159,37 @@ int winpad_jit_failed_before(const char* marker) {
   return 1;
 }
 
-// The region [address, address + size) is mapped, one region, and executable.
+// The region [address, address + size) is mapped and executable throughout. The debugger's
+// writes to each page can split it into many VM entries, so each one is checked in turn.
+static char region_note[96];
 static int executable_region(vm_address_t address, size_t size) {
-  vm_address_t start = address;
-  vm_size_t length = 0;
-  vm_region_basic_info_data_64_t info;
-  mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-  mach_port_t object = MACH_PORT_NULL;
-  if (vm_region_64(mach_task_self(), &start, &length, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count,
-                   &object) != KERN_SUCCESS)
-    return 0;
-  if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
-  return start <= address && start + length >= address + size && (info.protection & VM_PROT_EXECUTE);
+  region_note[0] = 0;
+  const vm_address_t end = address + size;
+  vm_address_t at = address;
+  while (at < end) {
+    vm_address_t start = at;
+    vm_size_t length = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &start, &length, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count,
+                     &object) != KERN_SUCCESS) {
+      snprintf(region_note, sizeof(region_note), "nothing mapped at %#lx", (unsigned long)at);
+      return 0;
+    }
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    if (start > at || !length) {
+      snprintf(region_note, sizeof(region_note), "nothing mapped at %#lx", (unsigned long)at);
+      return 0;
+    }
+    if (!(info.protection & VM_PROT_EXECUTE)) {
+      snprintf(region_note, sizeof(region_note), "%#lx is not executable (prot %d/%d)", (unsigned long)at,
+               info.protection, info.max_protection);
+      return 0;
+    }
+    at = start + length;
+  }
+  return 1;
 }
 
 static int prepare(size_t size, const char* marker, char* why, size_t why_size) {
@@ -184,7 +203,8 @@ static int prepare(size_t size, const char* marker, char* why, size_t why_size) 
   const vm_address_t rx = (vm_address_t)jit26_prepare_region(NULL, size);
   if (!rx || (rx & (page - 1)) || !executable_region(rx, size)) {
     jit26_detach();
-    say(why, why_size, "StikDebug's script gave no executable region (%#lx): is it universal.js?", (unsigned long)rx);
+    say(why, why_size, "StikDebug's script gave no executable region (%#lx, %s): is it universal.js?",
+        (unsigned long)rx, region_note[0] ? region_note : "not on a 16 KB page");
     return -1;
   }
   if (rx + size > WINPAD_JIT_ADDRESS_LIMIT) {
