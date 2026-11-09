@@ -13,7 +13,9 @@
 // its JIT pool prepared and the script has detached (JITPool.c). "prepare" only checks the
 // tunnel and mounts the Developer Disk Image.
 import Foundation
-#if canImport(StikJIT)
+// On a device StikJIT must be there (build-stikjit.sh): an import that fails is a build error,
+// not a helper that quietly cannot do anything. The simulator has no StikJIT.
+#if !targetEnvironment(simulator)
 import StikJIT
 #endif
 
@@ -36,7 +38,7 @@ private enum Work {
     static let queue = DispatchQueue(label: "winpad.jit-helper")
 
     static func handle(_ request: WinPadJITRequest) -> WinPadJITResponse {
-#if canImport(StikJIT)
+#if !targetEnvironment(simulator)
         let files = FileManager.default
         let root = files.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("StikJIT", isDirectory: true)
