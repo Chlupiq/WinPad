@@ -1,23 +1,43 @@
 {
   "id": "mafia",
-  "version": 1,
+  "version": 2,
   "title": "Mafia",
   "match": [
-    {"steamAppId": 40990},
-    {"exe": "GameV12.exe"},
-    {"exe": "Game.exe", "files": ["Setup.exe", "LS3DF.dll"]}
+    {
+      "steamAppId": 40990
+    },
+    {
+      "exe": "GameV12.exe"
+    },
+    {
+      "exe": "Game.exe",
+      "files": [
+        "Setup.exe",
+        "LS3DF.dll"
+      ]
+    }
   ],
   "settings": {
-    "dllOverrides": {"d3d8": "n,b"}
+    "dllOverrides": {
+      "d3d8": "n,b"
+    },
+    "registry": {
+      "HKCU\\Software\\Illusion Softworks\\Mafia": {
+        "LS3D_setup": {
+          "hex": "1400000500000004000020000000000000000000000001000000010001000101000100000000010000803f0000803f02000000020000000300000002000000"
+        }
+      }
+    }
   },
   "notes": [
     "Direct3D 8 jde přes d3d8to9 z aplikace; d3d8.dll v herní složce (třeba z Mafia Widescreen Fix) má přednost.",
-    "Rozlišení a grafiku ukládá Setup.exe binárně do registru; bez něj hra začne s výchozím nastavením. Antialiasing nech vypnutý (pády při startu).",
+    "Nastavení grafiky (LS3D_setup) dává profil předem: bez něj hra spouští Setup.exe, a druhý 32bitový program na iPadu nenaběhne, takže by hra čekala navždy. Hodnota je z instalátoru Lutris (GOG); antialiasing nech vypnutý (pády při startu).",
     "Původní CD verze má SafeDisc 2, který ve Wine nefunguje: použij verzi ze Steamu nebo GOG.",
     "Hra počítá s nejvýš 63 FPS; vyšší snímková frekvence rozbíjí řízení aut."
   ],
   "sources": [
     "https://www.pcgamingwiki.com/wiki/Mafia",
-    "https://store.steampowered.com/app/40990"
+    "https://store.steampowered.com/app/40990",
+    "https://lutris.net/games/install/9246/view"
   ]
 }
