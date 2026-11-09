@@ -181,8 +181,12 @@ def run(p, log=print):
         raise TranslateError(f"no game folder: {p.game_dir}")
     p.work_dir = p.work_dir or default_work_dir(p.game_dir)
     p.backend = p.backend or fexcompile.default_backend()
-    p.compiler = p.compiler or find_in_toolkit("FEXOfflineCompiler.exe")
-    p.dispatcher = p.dispatcher or find_in_toolkit("dispatcher.bin")
+    # A saved path that is gone (macOS runs a quarantined app from a new random AppTranslocation
+    # folder each launch) falls back to the bundled toolkit.
+    if not (p.compiler and os.path.isfile(p.compiler)):
+        p.compiler = find_in_toolkit("FEXOfflineCompiler.exe") or p.compiler
+    if not (p.dispatcher and os.path.isfile(p.dispatcher)):
+        p.dispatcher = find_in_toolkit("dispatcher.bin") or p.dispatcher
     cache_dir = os.path.join(p.work_dir, "fexcache")
     new = os.path.join(cache_dir, "codemap", "new")
     os.makedirs(new, exist_ok=True)
