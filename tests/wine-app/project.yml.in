@@ -3,6 +3,27 @@ options:
   deploymentTarget:
     iOS: "@MIN_IOS@"
 targets:
+  # The built-in JIT helper (JITHelper/): StikJIT (build-stikjit.sh, device only) in an app
+  # extension the app starts to enable its own JIT. StikJIT.framework goes into the app's
+  # Frameworks (the app's script below), which the helper finds two folders up.
+  WinPadJITHelper:
+    type: app-extension
+    platform: iOS
+    sources:
+      - JITHelper/WinPadJITHelper.swift
+    settings:
+      base:
+        INFOPLIST_FILE: JITHelper/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@.JITHelper
+        PRODUCT_NAME: WinPadJITHelper
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        ARCHS: arm64
+        CODE_SIGN_STYLE: Automatic
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks @executable_path/../../Frameworks"
+        "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]": "$(PROJECT_DIR)/StikJIT/iphoneos"
+        "OTHER_LDFLAGS[sdk=iphoneos*]": "-framework StikJIT"
   WinPadWine:
     type: application
     platform: iOS
@@ -21,6 +42,8 @@ targets:
       - WinPadJIT.m
       # The "program" setting in the Settings app (main.m, ProgramName).
       - Settings.bundle
+    dependencies:
+      - target: WinPadJITHelper
     postBuildScripts:
       # Wine's files for the platform being built, laid out next to the
       # executable as in Madeira's app, and the AOT images in Frameworks/
@@ -48,10 +71,18 @@ targets:
           if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; fi
           mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
           cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          # StikJIT for the built-in JIT helper (PlugIns/WinPadJITHelper.appex), on a device only.
+          stikjit="$PROJECT_DIR/StikJIT/$PLATFORM_NAME/StikJIT.framework"
+          rm -rf "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
+          if [ -d "$stikjit" ]; then cp -R "$stikjit" "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"; fi
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
             for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib; do
               codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
             done
+            if [ -d "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework" ]; then
+              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none \
+                "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
+            fi
           fi
     settings:
       base:

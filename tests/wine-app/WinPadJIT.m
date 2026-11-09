@@ -4,7 +4,19 @@
 
 #import <UIKit/UIKit.h>
 
+#include <dlfcn.h>
+
 #include "JITPool.h"
+
+// The private NSExtension API (ExtensionFoundation) that starts an app extension of the app's
+// own by its bundle ID, as LiveContainer and Madeira start theirs.
+@interface NSObject (WinPadNSExtension)
++ (id)extensionWithIdentifier:(NSString*)identifier error:(NSError**)error;
+- (void)beginExtensionRequestWithInputItems:(NSArray*)items completion:(void (^)(NSUUID* request))completion;
+- (void)setRequestCompletionBlock:(void (^)(NSUUID* request, NSArray* items))block;
+- (void)setRequestCancellationBlock:(void (^)(NSUUID* request, NSError* error))block;
+- (void)setRequestInterruptionBlock:(void (^)(NSUUID* request))block;
+@end
 
 // The pool FEX writes its code into: as winehost.c's own (WINEHOST_JIT_POOL_MB overrides it).
 static size_t PoolSize(void) {
@@ -91,7 +103,7 @@ BOOL WinPadJITShouldAskStikDebug(void) {
 #else
   if (!WinPadJITWanted() || !WinPadJITAskWanted() || WinPadJITAttached() || winpad_jit_under_xcode()) return NO;
   if (winpad_jit_pool_ready()) return NO;
-  return WinPadJITStikDebugInstalled();
+  return WinPadJITCanTurnOn();
 #endif
 }
 
@@ -115,4 +127,189 @@ BOOL WinPadJITUsable(void) {
 
 BOOL WinPadJITStikDebugInstalled(void) {
   return [UIApplication.sharedApplication canOpenURL:[NSURL URLWithString:@"stikdebug://"]];
+}
+
+static NSString* const HelperFile = @"WinPadJITHelper.appex";
+
+static NSString* Documents(void) {
+  return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+}
+
+NSString* WinPadJITPairingPath(void) {
+  return [Documents() stringByAppendingPathComponent:@"StikJIT/pairingFile.plist"];
+}
+
+static BOOL LooksLikePairing(NSString* name) {
+  NSString* lower = name.lowercaseString;
+  return [lower.pathExtension isEqualToString:@"mobiledevicepairing"] ||
+         ([lower.pathExtension isEqualToString:@"plist"] && [lower containsString:@"pair"]);
+}
+
+BOOL WinPadJITImportPairing(NSURL* url, NSString** error) {
+  const BOOL scoped = [url startAccessingSecurityScopedResource];
+  NSData* data = [NSData dataWithContentsOfURL:url];
+  if (scoped) [url stopAccessingSecurityScopedResource];
+  // A pairing file is a property list with the host's certificate and keys.
+  id plist = data ? [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil] : nil;
+  if (![plist isKindOfClass:NSDictionary.class] || (!plist[@"HostID"] && !plist[@"DeviceCertificate"])) {
+    if (error) *error = @"Tohle není párovací soubor (chybí v něm HostID a certifikát).";
+    return NO;
+  }
+  NSString* path = WinPadJITPairingPath();
+  [NSFileManager.defaultManager createDirectoryAtPath:path.stringByDeletingLastPathComponent
+                          withIntermediateDirectories:YES
+                                           attributes:nil
+                                                error:nil];
+  if (![data writeToFile:path atomically:YES]) {
+    if (error) *error = @"Párovací soubor se nepodařilo uložit.";
+    return NO;
+  }
+  return YES;
+}
+
+BOOL WinPadJITHasPairing(void) {
+  NSFileManager* files = NSFileManager.defaultManager;
+  for (NSString* name in [files contentsOfDirectoryAtPath:Documents() error:nil]) {
+    if (!LooksLikePairing(name)) continue;
+    NSString* path = [Documents() stringByAppendingPathComponent:name];
+    if (WinPadJITImportPairing([NSURL fileURLWithPath:path], nil)) [files removeItemAtPath:path error:nil];
+  }
+  return [files fileExistsAtPath:WinPadJITPairingPath()];
+}
+
+// get-task-allow: a debugger may attach to the app at all (a development signature; SideStore,
+// AltStore and Xcode keep it). Security's SecTask calls are not in the iOS SDK's headers.
+static int HasGetTaskAllow(void) {
+  void* security = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+  void* (*create)(CFAllocatorRef) = security ? dlsym(security, "SecTaskCreateFromSelf") : NULL;
+  CFTypeRef (*copy)(void*, CFStringRef, CFErrorRef*) = security ? dlsym(security, "SecTaskCopyValueForEntitlement") : NULL;
+  if (!create || !copy) return -1;
+  void* task = create(NULL);
+  if (!task) return -1;
+  CFTypeRef value = copy(task, CFSTR("get-task-allow"), NULL);
+  const int allowed = value == kCFBooleanTrue;
+  if (value) CFRelease(value);
+  CFRelease(task);
+  return allowed;
+}
+
+static NSString* HelperIdentifier(void) {
+  NSURL* url = [NSBundle.mainBundle.builtInPlugInsURL URLByAppendingPathComponent:HelperFile];
+  return url ? [NSBundle bundleWithURL:url].bundleIdentifier : nil;
+}
+
+NSString* WinPadJITBuiltInUnavailableReason(void) {
+#if TARGET_OS_SIMULATOR
+  return @"Vestavěný JIT funguje jen na skutečném iPadu nebo iPhonu.";
+#else
+  if (getenv("LC_HOME_PATH")) return @"V LiveContainer vestavěný JIT nejde: použij StikDebug.";
+  if (!HelperIdentifier()) return @"V téhle instalaci chybí pomocník JITu (WinPadJITHelper.appex).";
+  if (HasGetTaskAllow() == 0)
+    return @"Aplikace je podepsaná bez get-task-allow: nainstaluj ji z Xcode, SideStore nebo AltStore.";
+  return nil;
+#endif
+}
+
+BOOL WinPadJITCanTurnOn(void) {
+  return (!WinPadJITBuiltInUnavailableReason() && WinPadJITHasPairing()) || WinPadJITStikDebugInstalled();
+}
+
+// Requests that have started and not finished, kept alive until they do.
+static NSMutableSet* running;
+
+void WinPadJITBuiltInSend(NSString* operation, void (^done)(BOOL ok, NSString* message)) {
+  void (^finish)(BOOL, NSString*) = ^(BOOL ok, NSString* message) {
+    NSLog(@"WinPad Wine: JIT helper %@: %@ %@", operation, ok ? @"ok" : @"failed", message);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      if (done) done(ok, message);
+    });
+  };
+  NSString* reason = WinPadJITBuiltInUnavailableReason();
+  if (reason) { finish(NO, reason); return; }
+  NSData* pairing = [NSData dataWithContentsOfFile:WinPadJITPairingPath()];
+  if (!pairing.length) { finish(NO, @"Chybí párovací soubor."); return; }
+  if (!NSClassFromString(@"NSExtension"))
+    dlopen("/System/Library/Frameworks/ExtensionFoundation.framework/ExtensionFoundation", RTLD_NOW);
+  Class factory = NSClassFromString(@"NSExtension");
+  if (!factory) { finish(NO, @"iOS nedává rozhraní, které pomocník JITu potřebuje."); return; }
+  NSError* error = nil;
+  id extension = [factory extensionWithIdentifier:HelperIdentifier() error:&error];
+  if (!extension)
+    { finish(NO, [NSString stringWithFormat:@"Pomocník JITu se nenašel: %@", error.localizedDescription]); return; }
+  NSDictionary* request = @{
+    @"operation" : operation,
+    @"pid" : @(getpid()),
+    @"pairing" : [pairing base64EncodedStringWithOptions:0],
+    @"txm" : @(winpad_jit_has_txm() != 0),
+  };
+  NSData* json = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+  if (!running) running = [NSMutableSet new];
+  [running addObject:extension];
+  __block BOOL over = NO;
+  void (^end)(BOOL, NSString*) = ^(BOOL ok, NSString* message) {
+    @synchronized(running) {
+      if (over) return;
+      over = YES;
+      [running removeObject:extension];
+    }
+    finish(ok, message);
+  };
+  [extension setRequestCompletionBlock:^(NSUUID* uuid, NSArray* items) {
+    NSExtensionItem* item = items.firstObject;
+    NSData* payload = [item isKindOfClass:NSExtensionItem.class] ? item.userInfo[@"winpad-jit-response"] : nil;
+    NSDictionary* answer = payload ? [NSJSONSerialization JSONObjectWithData:payload options:0 error:nil] : nil;
+    if (![answer isKindOfClass:NSDictionary.class]) { end(NO, @"Pomocník JITu skončil bez odpovědi."); return; }
+    end([answer[@"success"] boolValue], [answer[@"message"] description]);
+  }];
+  [extension setRequestCancellationBlock:^(NSUUID* uuid, NSError* cancelled) {
+    end(NO, [NSString stringWithFormat:@"Pomocník JITu skončil: %@", cancelled.localizedDescription ?: @"zrušeno"]);
+  }];
+  [extension setRequestInterruptionBlock:^(NSUUID* uuid) {
+    end(NO, @"Pomocník JITu nečekaně skončil.");
+  }];
+  NSExtensionItem* item = [NSExtensionItem new];
+  item.userInfo = @{@"winpad-jit-request" : json};
+  [extension beginExtensionRequestWithInputItems:@[ item ]
+                                      completion:^(NSUUID* uuid) {
+                                        if (!uuid) end(NO, @"Pomocník JITu se nespustil.");
+                                      }];
+}
+
+void WinPadJITTurnOn(void (^done)(BOOL ok, NSString* message)) {
+  __block BOOL over = NO;
+  __block NSTimer* timer = nil;
+  void (^end)(BOOL, NSString*) = ^(BOOL ok, NSString* message) {
+    if (over) return;
+    over = YES;
+    [timer invalidate];
+    if (done) done(ok, message);
+  };
+  // Once a debugger is attached, the JIT pool right away, while its script waits for it
+  // (the app's own main thread: the brk stops it until the script has answered).
+  const CFAbsoluteTime begin = CFAbsoluteTimeGetCurrent();
+  const BOOL builtin = !WinPadJITBuiltInUnavailableReason() && WinPadJITHasPairing();
+  // The built-in helper may first download and mount the Developer Disk Image.
+  const double limit = builtin ? 300 : 90;
+  timer = [NSTimer scheduledTimerWithTimeInterval:0.25
+                                          repeats:YES
+                                          block:^(NSTimer* t) {
+                                            if (WinPadJITAttached()) {
+                                              NSString* note = nil;
+                                              const BOOL ok = WinPadJITPrepare(&note);
+                                              end(ok, note);
+                                            } else if (CFAbsoluteTimeGetCurrent() - begin > limit) {
+                                              end(NO, builtin ? @"Pomocník JITu se nepřipojil včas (je zapnutá LocalDevVPN?)."
+                                                              : @"StikDebug se nepřipojil včas.");
+                                            }
+                                          }];
+  if (builtin) {
+    WinPadJITBuiltInSend(@"enable", ^(BOOL ok, NSString* message) {
+      // Success arrives after the pool (the timer); a failure before it ends the wait.
+      if (!ok) end(NO, message);
+    });
+    return;
+  }
+  WinPadJITAskStikDebug(^(BOOL opened) {
+    if (!opened) end(NO, @"StikDebug se nepodařilo otevřít.");
+  });
 }

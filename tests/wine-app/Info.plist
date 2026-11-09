@@ -87,6 +87,14 @@
 			</dict>
 		</dict>
 	</array>
+	<!-- The built-in JIT helper (JITHelper/) finds the device's Remote Pairing service over
+	     LocalDevVPN, as StikJIT does. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>WinPad Wine se přes LocalDevVPN připojí samo k sobě jako debugger, aby mohlo zapnout JIT.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_remotepairing._tcp</string>
+	</array>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>stikdebug</string>

@@ -64,3 +64,27 @@ Pak job přeloží `JITPool.c` a `WinPadJIT.m` pro iphoneos i simulátor. Celou 
 - Štítek hry ukazuje „Poběží s JITem“, „Přeloženo“ nebo „Potřebuje JIT“.
 - Hru bez přeloženého obrazu bez JITu aplikace nespustí, protože by spadla. Místo toho nabídne průvodce.
 - Když se aplikace vrátí do popředí a StikDebug je mezitím připojený, pool se připraví hned.
+
+## Vestavěný JIT (bez aplikace StikDebug)
+
+WinPad Wine má v sobě vlastního pomocníka JITu: rozšíření aplikace `PlugIns/WinPadJITHelper.appex` (`tests/wine-app/JITHelper/`). Obsahuje knihovnu StikJIT (StikDebug/StikJIT 2.0.1, MPL-2.0), kterou `tests/wine-app/build-stikjit.sh` přeloží stejným Xcode jako zbytek aplikace. Je to samostatný proces, protože proces, který by se ladil sám, se s debuggerem zastaví.
+
+- Aplikace spouští pomocníka přes soukromé API `NSExtension` (`extensionWithIdentifier:`, `beginExtensionRequestWithInputItems:`) podle jeho bundle ID. Stejně to dělají LiveContainer a Madeira. Rozšíření je na bodu `com.apple.ar.viewer`, takže ho SideStore i AltStore přejmenují spolu s aplikací.
+- Žádost je JSON s operací `enable`, PID aplikace, párovacím souborem a příznakem TXM. Pomocník:
+  - připojí se přes LocalDevVPN (10.7.0.1) k debugovací službě iPadu;
+  - poprvé po restartu stáhne a připojí vývojářský obraz disku;
+  - připojí k aplikaci skript `universal.js`.
+- Aplikace pak připraví JIT pool stejně jako se StikDebugem (`JITPool.c`). Skript se odpojí a pomocník odpoví.
+- Párovací soubor leží v `Documents/StikJIT/pairingFile.plist`. Nahrává se v průvodci, nebo stačí přetáhnout `*.mobiledevicepairing` či `.plist` s „pair“ v názvu do Finder → iPad → Soubory → WinPad Wine. Aplikace si ho sama přesune.
+- Způsob se volí sám: vestavěný pomocník, když je párovací soubor. Jinak StikDebug, když je nainstalovaný.
+- Pomocník potřebuje `get-task-allow`, což mají instalace z Xcode, SideStore a AltStore. Kontroluje se přes SecTask.
+
+Uživatel na iPadu jednou:
+
+1. zapne Režim pro vývojáře;
+2. nainstaluje LocalDevVPN z App Storu;
+3. nahraje párovací soubor.
+
+Pak už jen ťuká na Spustit, jen při hraní musí být zapnutá LocalDevVPN.
+
+Neověřeno: celý vestavěný postup na iPadu (spuštění rozšíření, stažení obrazu disku, připojení), podepisování rozšíření v SideStore a AltStore a podpis z `--install` převodníku (rcodesign) s vnořeným rozšířením.

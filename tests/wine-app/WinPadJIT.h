@@ -5,7 +5,7 @@
 #import <Foundation/Foundation.h>
 
 // The settings: "jit" (default on) runs games with the JIT when it is there; "jitStikDebug"
-// (default on) opens StikDebug before a game when it is not.
+// (default on) turns it on before a game when it is not (built-in, or StikDebug).
 BOOL WinPadJITWanted(void);
 BOOL WinPadJITAskWanted(void);
 
@@ -31,3 +31,25 @@ BOOL WinPadJITAttached(void);
 BOOL WinPadJITUsable(void);
 // YES when StikDebug is installed (its URL scheme opens).
 BOOL WinPadJITStikDebugInstalled(void);
+
+// The built-in JIT (JITHelper/, StikJIT in an app extension of the app): no StikDebug app,
+// only LocalDevVPN and a pairing file. Nil when it can be used, else why not.
+NSString* WinPadJITBuiltInUnavailableReason(void);
+// The pairing file: Documents/StikJIT/pairingFile.plist. A pairing file copied straight into
+// Documents (Finder, Files: *.mobiledevicepairing, or a .plist with "pair" in its name) is
+// moved there first.
+NSString* WinPadJITPairingPath(void);
+BOOL WinPadJITHasPairing(void);
+// Copies the pairing file at URL (from a document picker) into place. NO with why in *ERROR.
+BOOL WinPadJITImportPairing(NSURL* url, NSString** error);
+// Asks the helper to attach to the app ("enable") or only to check the tunnel and mount the
+// Developer Disk Image ("prepare"). DONE runs on the main thread with the helper's answer;
+// for "enable" once the JIT pool is prepared and the debugger gone.
+void WinPadJITBuiltInSend(NSString* operation, void (^done)(BOOL ok, NSString* message));
+// YES when a game can get the JIT now without the user's help: built-in (pairing file there)
+// or StikDebug installed.
+BOOL WinPadJITCanTurnOn(void);
+// Turns the JIT on the best way there is: built-in, else StikDebug, and prepares the JIT pool
+// as soon as the debugger is attached. DONE (main thread, once) says whether the JIT is on, and
+// why not.
+void WinPadJITTurnOn(void (^done)(BOOL ok, NSString* message));

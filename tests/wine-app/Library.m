@@ -53,6 +53,7 @@
 
 #import <GameController/GameController.h>
 #import <PhotosUI/PhotosUI.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include <math.h>
 #include <string.h>
@@ -888,7 +889,7 @@ enum { AppearanceSection = 0 };
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT (StikDebug)", @"O aplikaci" ][section];
+  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -902,9 +903,9 @@ enum { AppearanceSection = 0 };
     return @"Ukazatel FPS ukáže ve hře snímky za sekundu, nejdelší snímek za poslední sekundu a rozlišení. "
            @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
   if (section == 3)
-    return @"S JITem (StikDebug připojený k aplikaci) hra běží bez vlastního AOT obrazu: co ještě neběželo, FEX "
-           @"přeloží za běhu. Bez JITu hra běží ze svého AOT obrazu a interpretu. Když StikDebug není "
-           @"nainstalovaný, aplikace ho neotevírá.";
+    return @"S JITem hra běží bez vlastního AOT obrazu: co ještě neběželo, FEX přeloží za běhu. JIT zapíná "
+           @"vestavěný pomocník (potřebuje LocalDevVPN a párovací soubor), nebo aplikace StikDebug. Bez JITu hra "
+           @"běží ze svého AOT obrazu a interpretu. Návod je pod štítkem JIT v knihovně.";
   return @"Hry se přidávají ve Finderu: iPad → Soubory → WinPad Wine, každá ve své složce.";
 }
 
@@ -960,7 +961,7 @@ enum { AppearanceSection = 0 };
     cell.textLabel.text = @[ @"Poslední log", @"Spustit hello.exe", @"Spustit window.exe" ][path.row - 1];
     cell.accessoryType = path.row == 1 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
   } else if (path.section == 3 && path.row < 2) {
-    cell.textLabel.text = path.row == 0 ? @"Hrát s JITem, když je k dispozici" : @"Před hrou otevřít StikDebug";
+    cell.textLabel.text = path.row == 0 ? @"Hrát s JITem, když je k dispozici" : @"Před hrou zapnout JIT";
     UISwitch* toggle = [UISwitch new];
     toggle.on = path.row == 0 ? WinPadJITWanted() : WinPadJITAskWanted();
     toggle.tag = path.row;
@@ -1031,9 +1032,11 @@ enum { AppearanceSection = 0 };
 
 // How to turn the JIT on, step by step, with what is already done ticked. Opened from the
 // library's JIT badge and when a game needs the JIT.
-@interface WinPadJITGuideViewController : UITableViewController
+@interface WinPadJITGuideViewController : UITableViewController <UIDocumentPickerDelegate>
 @property(nonatomic, copy) void (^closed)(void);
 @property(nonatomic, strong) id observer;
+@property(nonatomic) BOOL busy;              // turning the JIT on
+@property(nonatomic, copy) NSString* lastError;  // why it did not, or why a pairing file was refused
 @end
 
 @implementation WinPadJITGuideViewController
@@ -1078,12 +1081,22 @@ enum { AppearanceSection = 0 };
   return section == 0 ? @"Stav" : @"Jednou na iPadu";
 }
 
+// The built-in JIT, unless this installation cannot have it: then StikDebug.
+- (BOOL)builtin {
+  return WinPadJITBuiltInUnavailableReason() == nil;
+}
+
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
   if (section == 0)
     return @"S JITem běží každá hra hned, bez překladu předem. Bez JITu běží jen hry přeložené "
            @"převodníkem WinPad Translator.";
-  return @"Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine sám otevře StikDebug, ten JIT zapne a "
-         @"hra se spustí. Když se aplikace nevrátí sama, přepni se do ní zpátky. JIT platí do zavření aplikace.";
+  if (self.builtin)
+    return @"Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine si JIT zapne sám, bez další aplikace. "
+           @"Při spuštění musí být zapnutá LocalDevVPN. JIT platí do zavření aplikace. "
+           @"Místo vestavěného JITu jde použít i aplikace StikDebug.";
+  return [NSString stringWithFormat:@"%@ Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine sám otevře "
+                                    @"StikDebug, ten JIT zapne a hra se spustí.",
+                                    WinPadJITBuiltInUnavailableReason()];
 }
 
 - (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
@@ -1093,32 +1106,63 @@ enum { AppearanceSection = 0 };
   cell.detailTextLabel.textColor = Hex(0xB8C8E8);
   if (path.section == 0) {
     const BOOL on = WinPadJITUsable();
-    cell.textLabel.text = on ? @"JIT je zapnutý" : @"JIT je vypnutý";
-    cell.detailTextLabel.text = WinPadJITStatus();
+    cell.textLabel.text = self.busy ? @"Zapínám JIT…" : on ? @"JIT je zapnutý" : @"JIT je vypnutý";
+    cell.detailTextLabel.text = self.lastError ?: WinPadJITStatus();
     cell.imageView.image = [UIImage systemImageNamed:on ? @"bolt.fill" : @"bolt.slash"];
     cell.imageView.tintColor = on ? Hex(0x9BEDB5) : Hex(0xF2C46D);
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     return cell;
   }
-  const BOOL installed = WinPadJITStikDebugInstalled(), on = WinPadJITUsable();
-  NSString* titles[] = {@"1. Režim pro vývojáře", @"2. Nainstaluj StikDebug", @"3. Párovací soubor a VPN",
-                        @"4. Zapnout JIT teď"};
-  NSString* details[] = {
-      @"Nastavení → Soukromí a zabezpečení → Režim pro vývojáře → zapnout a restartovat iPad. "
-      @"Bývá zapnutý, pokud už sem instaluješ aplikace z Xcode nebo SideStore.",
-      installed ? @"Nainstalovaný." : @"Přes SideStore nebo AltStore (stikdebug.org). Ťukni pro stránku StikDebugu.",
-      @"StikDebug při prvním spuštění chce párovací soubor (na Macu ho vyrobí jitterbugpair) a VPN "
-      @"LocalDevVPN z App Storu. Stačí jednou.",
-      on ? @"Hotovo, JIT je zapnutý." : installed ? @"Otevře StikDebug, ten se připojí k WinPad Wine a vrátí tě sem."
-                                                   : @"Až bude StikDebug nainstalovaný.",
-  };
-  const BOOL ticked[] = {installed || on, installed, on, on};
-  cell.textLabel.text = titles[path.row];
-  cell.detailTextLabel.text = details[path.row];
-  cell.imageView.image = [UIImage systemImageNamed:ticked[path.row] ? @"checkmark.circle.fill" : @"circle"];
-  cell.imageView.tintColor = ticked[path.row] ? Hex(0x9BEDB5) : Hex(0xB8C8E8);
-  const BOOL action = (path.row == 1 && !installed) || (path.row == 3 && installed && !on);
-  if (path.row == 3 && installed && !on) cell.textLabel.textColor = UIColor.systemBlueColor;
+  const BOOL builtin = self.builtin, on = WinPadJITUsable();
+  const BOOL pairing = builtin && WinPadJITHasPairing(), stikdebug = WinPadJITStikDebugInstalled();
+  const BOOL can = WinPadJITCanTurnOn();
+  NSString* title = nil;
+  NSString* detail = nil;
+  BOOL ticked = NO, action = NO;
+  switch (path.row) {
+    case 0:
+      title = @"1. Režim pro vývojáře";
+      detail = @"Nastavení → Soukromí a zabezpečení → Režim pro vývojáře → zapnout a restartovat iPad. "
+               @"Bývá zapnutý, pokud sem instaluješ aplikace z Xcode nebo SideStore.";
+      ticked = can || on;
+      break;
+    case 1:
+      title = @"2. LocalDevVPN";
+      detail = @"Zdarma z App Storu (ťukni). Zapni ji před hraním: přes ni se WinPad Wine připojí sám k sobě "
+               @"jako debugger. Pokud máš SideStore, nejspíš ji už máš.";
+      action = YES;
+      break;
+    case 2:
+      if (builtin) {
+        title = @"3. Párovací soubor";
+        detail = pairing ? @"Nahraný."
+                         : @"Ťukni a vyber ho, nebo ho na Macu přetáhni do Finder → iPad → Soubory → WinPad Wine. "
+                           @"Vyrobí ho jitterbugpair nebo idevice_pair (návod StikDebugu, stačí jednou). "
+                           @"Pokud používáš SideStore, je to tentýž soubor.";
+        ticked = pairing;
+        action = YES;
+      } else {
+        title = @"3. StikDebug";
+        detail = stikdebug ? @"Nainstalovaný." : @"Nainstaluj ho přes SideStore nebo AltStore (ťukni pro stikdebug.org).";
+        ticked = stikdebug;
+        action = !stikdebug;
+      }
+      break;
+    default:
+      title = @"4. Zapnout JIT teď";
+      detail = on ? @"Hotovo, JIT je zapnutý."
+             : self.busy ? @"Zapínám…"
+             : can ? @"Vyzkouší to hned. Jinak se JIT zapne sám při spuštění hry."
+                   : @"Až budou hotové kroky nahoře.";
+      ticked = on;
+      action = can && !on && !self.busy;
+      if (action) cell.textLabel.textColor = UIColor.systemBlueColor;
+      break;
+  }
+  cell.textLabel.text = title;
+  cell.detailTextLabel.text = detail;
+  cell.imageView.image = [UIImage systemImageNamed:ticked ? @"checkmark.circle.fill" : @"circle"];
+  cell.imageView.tintColor = ticked ? Hex(0x9BEDB5) : Hex(0xB8C8E8);
   cell.accessoryType = action ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
   cell.selectionStyle = action ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
   return cell;
@@ -1127,10 +1171,38 @@ enum { AppearanceSection = 0 };
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
   [tableView deselectRowAtIndexPath:path animated:YES];
   if (path.section != 1) return;
-  if (path.row == 1 && !WinPadJITStikDebugInstalled())
-    [UIApplication.sharedApplication openURL:[NSURL URLWithString:@"https://stikdebug.org"] options:@{} completionHandler:nil];
-  else if (path.row == 3 && WinPadJITStikDebugInstalled() && !WinPadJITUsable())
-    WinPadJITAskStikDebug(nil);
+  UIApplication* app = UIApplication.sharedApplication;
+  if (path.row == 1) {
+    [app openURL:[NSURL URLWithString:@"itms-apps://search.itunes.apple.com/WebObjects/MZSearch.woa/wa/"
+                                      @"search?media=software&term=LocalDevVPN"]
+          options:@{}
+        completionHandler:nil];
+  } else if (path.row == 2 && self.builtin) {
+    UIDocumentPickerViewController* picker =
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeItem ] asCopy:YES];
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+  } else if (path.row == 2) {
+    [app openURL:[NSURL URLWithString:@"https://stikdebug.org"] options:@{} completionHandler:nil];
+  } else if (path.row == 3 && WinPadJITCanTurnOn() && !WinPadJITUsable() && !self.busy) {
+    self.busy = YES;
+    self.lastError = nil;
+    [tableView reloadData];
+    __weak WinPadJITGuideViewController* weak = self;
+    WinPadJITTurnOn(^(BOOL ok, NSString* message) {
+      WinPadJITGuideViewController* me = weak;
+      me.busy = NO;
+      me.lastError = ok ? nil : message;
+      [me.tableView reloadData];
+    });
+  }
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController*)picker didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
+  NSString* error = nil;
+  if (urls.firstObject && !WinPadJITImportPairing(urls.firstObject, &error)) self.lastError = error;
+  else self.lastError = nil;
+  [self.tableView reloadData];
 }
 @end
 
@@ -1819,42 +1891,58 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 }
 
 - (void)waitForJITThen:(void (^)(void))start {
-  UIAlertController* alert =
-      [UIAlertController alertControllerWithTitle:@"Zapínám JIT"
-                                          message:@"StikDebug se připojuje k WinPad Wine. Pokud se neotevře sám, "
-                                                  @"vrať se sem po zapnutí JITu ve StikDebugu."
-                                   preferredStyle:UIAlertControllerStyleAlert];
-  __block NSTimer* timer = nil;
+  const BOOL builtin = !WinPadJITBuiltInUnavailableReason() && WinPadJITHasPairing();
+  UIAlertController* alert = [UIAlertController
+      alertControllerWithTitle:@"Zapínám JIT"
+                       message:builtin ? @"Vestavěný JIT se připojuje k WinPad Wine. Poprvé po restartu iPadu to může "
+                                         @"chvíli trvat (stahuje se vývojářský obraz disku)."
+                                       : @"StikDebug se připojuje k WinPad Wine. Pokud se neotevře sám, vrať se sem "
+                                         @"po zapnutí JITu ve StikDebugu."
+                preferredStyle:UIAlertControllerStyleAlert];
   __block BOOL finished = NO;
-  void (^finish)(void) = ^{
-    if (finished) return;
-    finished = YES;
-    [timer invalidate];
-    // The JIT pool right away, while StikDebug's script waits for it.
-    NSString* note = nil;
-    WinPadJITPrepare(&note);
-    NSLog(@"WinPad Wine: JIT: %@", note);
-    if (alert.presentingViewController)
-      [alert dismissViewControllerAnimated:YES completion:start];
-    else
-      start();
-  };
   [alert addAction:[UIAlertAction actionWithTitle:@"Spustit bez JITu"
                                             style:UIAlertActionStyleCancel
                                           handler:^(UIAlertAction* action) {
                                             finished = YES;
-                                            [timer invalidate];
                                             dispatch_async(dispatch_get_main_queue(), start);
                                           }]];
   [self presentViewController:alert animated:YES completion:nil];
-  const CFAbsoluteTime begin = CFAbsoluteTimeGetCurrent();
-  timer = [NSTimer scheduledTimerWithTimeInterval:0.25
-                                          repeats:YES
-                                            block:^(NSTimer* t) {
-                                              if (WinPadJITAttached() || CFAbsoluteTimeGetCurrent() - begin > 60) finish();
-                                            }];
-  WinPadJITAskStikDebug(^(BOOL opened) {
-    if (!opened) finish();
+  __weak LibraryViewController* weak = self;
+  WinPadJITTurnOn(^(BOOL ok, NSString* message) {
+    if (finished) return;
+    if (ok) {
+      finished = YES;
+      [weak refreshJIT];
+      if (alert.presentingViewController)
+        [alert dismissViewControllerAnimated:YES completion:start];
+      else
+        start();
+      return;
+    }
+    // Why not, with the choice still there: without the JIT, or how to get it.
+    finished = YES;
+    UIAlertController* why = [UIAlertController alertControllerWithTitle:@"JIT se nezapnul"
+                                                                 message:message
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [why addAction:[UIAlertAction actionWithTitle:@"Jak zapnout JIT"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction* action) {
+                                            LibraryViewController* me = weak;
+                                            me.jitAsked = NO;
+                                            [me openJITGuide];
+                                          }]];
+    [why addAction:[UIAlertAction actionWithTitle:@"Spustit bez JITu"
+                                            style:UIAlertActionStyleCancel
+                                          handler:^(UIAlertAction* action) {
+                                            dispatch_async(dispatch_get_main_queue(), start);
+                                          }]];
+    void (^show)(void) = ^{
+      [weak presentViewController:why animated:YES completion:nil];
+    };
+    if (alert.presentingViewController)
+      [alert dismissViewControllerAnimated:YES completion:show];
+    else
+      show();
   });
 }
 
