@@ -150,10 +150,11 @@ BOOL WinPadJITImportPairing(NSURL* url, NSString** error) {
   const BOOL scoped = [url startAccessingSecurityScopedResource];
   NSData* data = [NSData dataWithContentsOfURL:url];
   if (scoped) [url stopAccessingSecurityScopedResource];
-  // A pairing file is a property list with the host's certificate and keys.
+  // A pairing file is a property list: a lockdown one (HostID, DeviceCertificate: idevice_pair,
+  // jitterbugpair) or an RPPairing one (iloader). StikJIT itself decides whether it can use it.
   id plist = data ? [NSPropertyListSerialization propertyListWithData:data options:0 format:NULL error:nil] : nil;
-  if (![plist isKindOfClass:NSDictionary.class] || (!plist[@"HostID"] && !plist[@"DeviceCertificate"])) {
-    if (error) *error = @"Tohle není párovací soubor (chybí v něm HostID a certifikát).";
+  if (![plist isKindOfClass:NSDictionary.class] || [plist count] == 0) {
+    if (error) *error = @"Tohle není párovací soubor (není to seznam vlastností plist).";
     return NO;
   }
   NSString* path = WinPadJITPairingPath();
