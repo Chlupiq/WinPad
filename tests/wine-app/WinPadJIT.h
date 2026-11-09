@@ -26,3 +26,8 @@ BOOL WinPadJITShouldAskStikDebug(void);
 void WinPadJITAskStikDebug(void (^done)(BOOL opened));
 // YES once a debugger is attached that can give the JIT (WinPadJITPrepare would do it).
 BOOL WinPadJITAttached(void);
+
+// YES when a game started now runs with the JIT (a simulator, or a debugger attached that gives it).
+BOOL WinPadJITUsable(void);
+// YES when StikDebug is installed (its URL scheme opens).
+BOOL WinPadJITStikDebugInstalled(void);

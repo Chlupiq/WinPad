@@ -1029,12 +1029,119 @@ enum { AppearanceSection = 0 };
 }
 @end
 
+// How to turn the JIT on, step by step, with what is already done ticked. Opened from the
+// library's JIT badge and when a game needs the JIT.
+@interface WinPadJITGuideViewController : UITableViewController
+@property(nonatomic, copy) void (^closed)(void);
+@property(nonatomic, strong) id observer;
+@end
+
+@implementation WinPadJITGuideViewController
+- (instancetype)init {
+  return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.title = @"Zapnout JIT";
+  self.tableView.backgroundView = [WinPadBackdrop new];
+  self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                                                         target:self
+                                                                                         action:@selector(done)];
+  __weak UITableView* table = self.tableView;
+  self.observer = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                                  object:nil
+                                                                   queue:NSOperationQueue.mainQueue
+                                                              usingBlock:^(NSNotification* note) {
+                                                                [table reloadData];
+                                                              }];
+}
+
+- (void)dealloc {
+  if (self.observer) [NSNotificationCenter.defaultCenter removeObserver:self.observer];
+}
+
+- (void)done {
+  void (^closed)(void) = self.closed;
+  [self dismissViewControllerAnimated:YES completion:closed];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
+  return 2;
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  return section == 0 ? 1 : 4;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
+  return section == 0 ? @"Stav" : @"Jednou na iPadu";
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
+  if (section == 0)
+    return @"S JITem běží každá hra hned, bez překladu předem. Bez JITu běží jen hry přeložené "
+           @"převodníkem WinPad Translator.";
+  return @"Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine sám otevře StikDebug, ten JIT zapne a "
+         @"hra se spustí. Když se aplikace nevrátí sama, přepni se do ní zpátky. JIT platí do zavření aplikace.";
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
+  UITableViewCell* cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+  cell.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+  cell.detailTextLabel.numberOfLines = 0;
+  cell.detailTextLabel.textColor = Hex(0xB8C8E8);
+  if (path.section == 0) {
+    const BOOL on = WinPadJITUsable();
+    cell.textLabel.text = on ? @"JIT je zapnutý" : @"JIT je vypnutý";
+    cell.detailTextLabel.text = WinPadJITStatus();
+    cell.imageView.image = [UIImage systemImageNamed:on ? @"bolt.fill" : @"bolt.slash"];
+    cell.imageView.tintColor = on ? Hex(0x9BEDB5) : Hex(0xF2C46D);
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+  const BOOL installed = WinPadJITStikDebugInstalled(), on = WinPadJITUsable();
+  NSString* titles[] = {@"1. Režim pro vývojáře", @"2. Nainstaluj StikDebug", @"3. Párovací soubor a VPN",
+                        @"4. Zapnout JIT teď"};
+  NSString* details[] = {
+      @"Nastavení → Soukromí a zabezpečení → Režim pro vývojáře → zapnout a restartovat iPad. "
+      @"Bývá zapnutý, pokud už sem instaluješ aplikace z Xcode nebo SideStore.",
+      installed ? @"Nainstalovaný." : @"Přes SideStore nebo AltStore (stikdebug.org). Ťukni pro stránku StikDebugu.",
+      @"StikDebug při prvním spuštění chce párovací soubor (na Macu ho vyrobí jitterbugpair) a VPN "
+      @"LocalDevVPN z App Storu. Stačí jednou.",
+      on ? @"Hotovo, JIT je zapnutý." : installed ? @"Otevře StikDebug, ten se připojí k WinPad Wine a vrátí tě sem."
+                                                   : @"Až bude StikDebug nainstalovaný.",
+  };
+  const BOOL ticked[] = {installed || on, installed, on, on};
+  cell.textLabel.text = titles[path.row];
+  cell.detailTextLabel.text = details[path.row];
+  cell.imageView.image = [UIImage systemImageNamed:ticked[path.row] ? @"checkmark.circle.fill" : @"circle"];
+  cell.imageView.tintColor = ticked[path.row] ? Hex(0x9BEDB5) : Hex(0xB8C8E8);
+  const BOOL action = (path.row == 1 && !installed) || (path.row == 3 && installed && !on);
+  if (path.row == 3 && installed && !on) cell.textLabel.textColor = UIColor.systemBlueColor;
+  cell.accessoryType = action ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+  cell.selectionStyle = action ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+  return cell;
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
+  [tableView deselectRowAtIndexPath:path animated:YES];
+  if (path.section != 1) return;
+  if (path.row == 1 && !WinPadJITStikDebugInstalled())
+    [UIApplication.sharedApplication openURL:[NSURL URLWithString:@"https://stikdebug.org"] options:@{} completionHandler:nil];
+  else if (path.row == 3 && WinPadJITStikDebugInstalled() && !WinPadJITUsable())
+    WinPadJITAskStikDebug(nil);
+}
+@end
+
 @interface LibraryViewController ()
 @property(nonatomic, strong) NSArray<WinPadGame*>* games;
 @property(nonatomic) NSInteger focus;
 @property(nonatomic, strong) WinPadBackdrop* backdrop;
 @property(nonatomic, strong) UIButton* settings;
 @property(nonatomic, strong) UILabel* clock;
+// Is the JIT on: a tap opens the guide to turning it on (WinPadJITGuideViewController).
+@property(nonatomic, strong) UIButton* jitBadge;
 @property(nonatomic, strong) NSTimer* clockTimer;
 @property(nonatomic, strong) UILabel* heroTitle;
 @property(nonatomic, strong) UIStackView* tags;
@@ -1069,6 +1176,8 @@ enum { AppearanceSection = 0 };
 - (void)titleExport:(BOOL)compact;
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game;
 - (void)waitForJITThen:(void (^)(void))start;
+- (void)refreshJIT;
+- (void)openJITGuide;
 - (void)openSettings;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
@@ -1111,6 +1220,11 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.settings.accessibilityLabel = @"Nastavení";
   [self.settings addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
   [self.view addSubview:self.settings];
+
+  self.jitBadge = [UIButton buttonWithConfiguration:[UIButtonConfiguration filledButtonConfiguration] primaryAction:nil];
+  [self.jitBadge addTarget:self action:@selector(openJITGuide) forControlEvents:UIControlEventTouchUpInside];
+  [self.view addSubview:self.jitBadge];
+  [self refreshJIT];
 
   self.clock = [UILabel new];
   self.clock.textColor = Hex(0xDCE8FF);
@@ -1222,6 +1336,19 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                         usingBlock:^(NSNotification* note) {
                                                                           [weak attach:note.object];
                                                                         }]];
+  // Back from StikDebug: the JIT pool right away, while its script waits for it.
+  [self.observers addObject:[NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                                            object:nil
+                                                                             queue:NSOperationQueue.mainQueue
+                                                                        usingBlock:^(NSNotification* note) {
+                                                                          if (WinPadJITWanted() && WinPadJITAttached()) {
+                                                                            NSString* why = nil;
+                                                                            WinPadJITPrepare(&why);
+                                                                            NSLog(@"WinPad Wine: JIT: %@", why);
+                                                                          }
+                                                                          [weak refreshJIT];
+                                                                          [weak showFocus];
+                                                                        }]];
   for (GCController* pad in GCController.controllers) [self attach:pad];
   if (!self.packages) self.packages = [NSMutableArray new];
   self.installReport = [NSMutableString new];
@@ -1241,6 +1368,15 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [super viewDidAppear:animated];
   [self becomeFirstResponder];
   [self openPackages:@[]];
+#if !TARGET_OS_SIMULATOR
+  // The first launch on a device without the JIT: how to turn it on, once.
+  if (![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:@"jitGuideShown"] && !WinPadJITUsable() &&
+      !self.installing && !self.presentedViewController) {
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"jitGuideShown"];
+    [self openJITGuide];
+  }
+#endif
   static BOOL tested;
   if (tested || ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
   tested = YES;
@@ -1353,13 +1489,19 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   UIColor* good = [Hex(0x7DDC9A) colorWithAlphaComponent:0.18];
   UIColor* warn = [Hex(0xF2C46D) colorWithAlphaComponent:0.18];
   [self.tags addArrangedSubview:LightTag(game.arch ? [@"Windows · " stringByAppendingString:game.arch] : @"Windows", 0xDCE8FF, plain)];
-  [self.tags addArrangedSubview:game.imageInFolder ? LightTag(@"Přeloženo (obraz ve složce hry)", 0x9BEDB5, good)
+  // A simulator keeps running a game with an image from its image (main.m).
+  const BOOL jit = WinPadJITUsable() && (!TARGET_OS_SIMULATOR || !game.image);
+  [self.tags addArrangedSubview:jit                ? LightTag(@"Poběží s JITem", 0x9BEDB5, good)
+                                 : game.imageInFolder ? LightTag(@"Přeloženo (obraz ve složce hry)", 0x9BEDB5, good)
                                  : game.image      ? LightTag(@"Přeloženo", 0x9BEDB5, good)
-                                                   : LightTag(@"Nepřeloženo", 0xF2C46D, warn)];
+                                                   : LightTag(@"Potřebuje JIT", 0xF2C46D, warn)];
   if (game.folderImageNote) [self.tags addArrangedSubview:LightTag(@"Obraz ve složce je pro jiné sestavení", 0xF2C46D, warn)];
   if (game.newMaps) [self.tags addArrangedSubview:LightTag(NewMapsText(game.newMaps), 0xF2C46D, warn)];
-  NSString* state = game.image ? @"Hra běží z přeloženého obrazu. Kód, který v něm chybí, doplní příští překlad z code map."
-                               : @"Hra zatím nemá přeložený obraz: poběží pomalu v interpretu a zapíše code mapy pro překlad.";
+  NSString* state = jit ? @"JIT je zapnutý: hra se přeloží za běhu, žádný překlad předem není potřeba."
+                    : game.image ? @"Hra běží z přeloženého obrazu. Rychlejší a bez překladu předem je to s JITem "
+                                   @"(ťukni na JIT nahoře)."
+                                 : @"Hra nemá přeložený obraz: zapni JIT (ťukni na JIT nahoře), nebo ji přelož "
+                                   @"převodníkem WinPad Translator.";
   NSMutableAttributedString* text = [NSMutableAttributedString new];
   [text appendAttributedString:[[NSAttributedString alloc]
                                    initWithString:@"STAV PŘEKLADU\n"
@@ -1390,6 +1532,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   const CGFloat w = b.size.width - 2 * m, button = compact ? 44 : 48;
   self.settings.frame = CGRectMake(m, top, button, button);
   self.settings.layer.cornerRadius = button / 2;
+  [self.jitBadge sizeToFit];
+  self.jitBadge.frame = CGRectMake(m + button + 12, top, MAX(self.jitBadge.bounds.size.width, 120), button);
   self.clock.font = [UIFont systemFontOfSize:compact ? 18 : 26 weight:UIFontWeightLight];
   self.clock.frame = CGRectMake(m + w - 200, top, 200, button);
 
@@ -1619,6 +1763,23 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     }];
     return;
   }
+  // Without the JIT a game without an image cannot run on a device: say how to get one.
+  if (game && !game.image && !WinPadJITUsable() && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
+    self.jitAsked = NO;
+    UIAlertController* alert =
+        [UIAlertController alertControllerWithTitle:@"Hra potřebuje JIT"
+                                            message:@"Tahle hra nemá přeložený obraz, takže na iPadu poběží jen s JITem. "
+                                                    @"Zapni ho přes StikDebug, nebo hru přelož převodníkem WinPad Translator."
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Jak zapnout JIT"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction* action) {
+                                              [self openJITGuide];
+                                            }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Zavřít" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return;
+  }
   self.started = YES;
   if (game) [NSUserDefaults.standardUserDefaults setObject:game.folder forKey:@"lastGame"];
   // The game reads the controllers itself (main.m's Gamepads).
@@ -1626,6 +1787,35 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.observers removeAllObjects];
   for (GCController* pad in GCController.controllers) pad.extendedGamepad.valueChangedHandler = nil;
   if (self.start) self.start(program, game);
+}
+
+- (void)refreshJIT {
+  const BOOL on = WinPadJITUsable();
+  UIButtonConfiguration* config = [UIButtonConfiguration filledButtonConfiguration];
+  config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+  config.title = on ? @"JIT zapnutý" : @"JIT vypnutý";
+  config.image = [UIImage systemImageNamed:on ? @"bolt.fill" : @"bolt.slash"];
+  config.imagePadding = 8;
+  config.contentInsets = NSDirectionalEdgeInsetsMake(0, 16, 0, 18);
+  config.baseForegroundColor = on ? Hex(0x9BEDB5) : Hex(0xDCE8FF);
+  config.baseBackgroundColor = on ? [Hex(0x7DDC9A) colorWithAlphaComponent:0.22] : [UIColor colorWithWhite:1 alpha:0.12];
+  self.jitBadge.configuration = config;
+  self.jitBadge.accessibilityLabel = on ? @"JIT je zapnutý" : @"JIT je vypnutý, ťukni pro návod";
+  [self.view setNeedsLayout];
+}
+
+- (void)openJITGuide {
+  if (self.presentedViewController || self.started) return;
+  WinPadJITGuideViewController* guide = [WinPadJITGuideViewController new];
+  __weak LibraryViewController* weak = self;
+  guide.closed = ^{
+    [weak refreshJIT];
+    [weak showFocus];
+  };
+  UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:guide];
+  nav.modalPresentationStyle = UIModalPresentationFormSheet;
+  nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)waitForJITThen:(void (^)(void))start {

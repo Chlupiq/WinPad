@@ -91,7 +91,7 @@ BOOL WinPadJITShouldAskStikDebug(void) {
 #else
   if (!WinPadJITWanted() || !WinPadJITAskWanted() || WinPadJITAttached() || winpad_jit_under_xcode()) return NO;
   if (winpad_jit_pool_ready()) return NO;
-  return [UIApplication.sharedApplication canOpenURL:[NSURL URLWithString:@"stikdebug://"]];
+  return WinPadJITStikDebugInstalled();
 #endif
 }
 
@@ -103,4 +103,16 @@ void WinPadJITAskStikDebug(void (^done)(BOOL opened)) {
                          completionHandler:^(BOOL success) {
                            if (done) done(success);
                          }];
+}
+
+BOOL WinPadJITUsable(void) {
+#if TARGET_OS_SIMULATOR
+  return YES;
+#else
+  return WinPadJITWanted() && WinPadJITAttached();
+#endif
+}
+
+BOOL WinPadJITStikDebugInstalled(void) {
+  return [UIApplication.sharedApplication canOpenURL:[NSURL URLWithString:@"stikdebug://"]];
 }

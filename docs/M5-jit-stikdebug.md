@@ -56,3 +56,11 @@ Pak job přeloží `JITPool.c` a `WinPadJIT.m` pro iphoneos i simulátor. Celou 
 - Jestli StikDebug přepne zpátky do WinPad Wine sám. Jestli jeho skript běží dál, když je StikDebug na pozadí, než se uživatel vrátí. Pool se proto připravuje hned, jak se aplikace vrátí do popředí.
 - Jak se 512MB pool připravuje dlouho. Je to 32 768 zápisů po 128 v dávce přes tunel StikDebugu.
 - Jestli FEX JIT s Madeirou na zařízení dělá všechno ostatní správně (vyprázdnění cache instrukcí přes RX alias a podobně). V simulátoru to funguje.
+
+## Pro uživatele v aplikaci
+
+- V knihovně vedle tlačítka nastavení je štítek „JIT zapnutý“ nebo „JIT vypnutý“. Ťuknutím se otevře průvodce „Zapnout JIT“ se čtyřmi kroky. Hotové kroky mají fajfku: Režim pro vývojáře, StikDebug (ťuknutím se otevře stikdebug.org), párovací soubor a VPN, Zapnout JIT teď.
+- Na zařízení bez JITu se průvodce při prvním spuštění ukáže sám, jednou.
+- Štítek hry ukazuje „Poběží s JITem“, „Přeloženo“ nebo „Potřebuje JIT“.
+- Hru bez přeloženého obrazu bez JITu aplikace nespustí, protože by spadla. Místo toho nabídne průvodce.
+- Když se aplikace vrátí do popředí a StikDebug je mezitím připojený, pool se připraví hned.
