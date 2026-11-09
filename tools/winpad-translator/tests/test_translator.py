@@ -192,6 +192,23 @@ class MacBackendTest(unittest.TestCase):
                 self.assertIn(t, os.environ["PATH"].split(os.pathsep))
 
 
+class DockerShareTest(unittest.TestCase):
+    def test_toolkit_outside_shared_folders_is_copied(self):
+        with tempfile.TemporaryDirectory() as t:
+            kit = os.path.join(t, "app", "toolkit")
+            os.makedirs(kit)
+            open(os.path.join(kit, "FEXOfflineCompiler.exe"), "w").close()
+            cache = os.path.join(t, "work", "fexcache")
+            os.makedirs(cache)
+            b = fexcompile.Docker(os.path.join(kit, "FEXOfflineCompiler.exe"), cache, log=lambda *_: None,
+                                  docker="docker")
+            with mock.patch.object(fexcompile.sys, "platform", "darwin"), \
+                    mock.patch.object(fexcompile, "DOCKER_SHARED", ("/Users",)):
+                b.shareable_compiler()
+            self.assertEqual(b.compiler, os.path.join(t, "work", "toolkit", "FEXOfflineCompiler.exe"))
+            self.assertTrue(os.path.isfile(b.compiler))
+
+
 class IpaTest(unittest.TestCase):
     def test_dlls_out_image_in(self):
         with tempfile.TemporaryDirectory() as t:

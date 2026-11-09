@@ -48,6 +48,10 @@ DOCKER_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "/Applications/Docker.app/
                os.path.expanduser("~/.docker/bin"))
 
 
+# Docker Desktop's default shared folders on a Mac.
+DOCKER_SHARED = ("/Users", "/Volumes", "/private", "/tmp")
+
+
 def find_docker():
     found = shutil.which("docker")
     if not found and sys.platform == "darwin":
@@ -256,8 +260,24 @@ class Docker(Backend):
     def stop(self):
         subprocess.run([self.docker, "kill", self.container], capture_output=True)
 
+    def shareable_compiler(self):
+        """Docker Desktop on a Mac mounts only shared folders (by default /Users, /Volumes,
+        /private, /tmp, /var/folders), not /Applications with the app's toolkit in it: copy
+        the toolkit next to the cache directory."""
+        if sys.platform != "darwin":
+            return
+        src = os.path.dirname(os.path.abspath(self.compiler))
+        if any(src == d or src.startswith(d + os.sep) for d in DOCKER_SHARED):
+            return
+        dst = os.path.join(os.path.dirname(self.cache_dir), "toolkit")
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst)
+        self.compiler = os.path.join(dst, os.path.basename(self.compiler))
+        self.log(f"=== toolkit copied to {dst} (Docker Desktop does not share {src})")
+
     def compile(self):
         self.ensure_image()
+        self.shareable_compiler()
         super().compile()
 
 
