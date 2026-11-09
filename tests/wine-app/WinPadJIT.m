@@ -2,6 +2,7 @@
 // FEX's JIT in the app (WinPadJIT.h).
 #import "WinPadJIT.h"
 
+#import <NetworkExtension/NetworkExtension.h>
 #import <UIKit/UIKit.h>
 
 #include <dlfcn.h>
@@ -177,20 +178,30 @@ BOOL WinPadJITHasPairing(void) {
   return [files fileExistsAtPath:WinPadJITPairingPath()];
 }
 
-// get-task-allow: a debugger may attach to the app at all (a development signature; SideStore,
-// AltStore and Xcode keep it). Security's SecTask calls are not in the iOS SDK's headers.
-static int HasGetTaskAllow(void) {
+// The value of one of the app's own entitlements, or NULL (to release). Security's SecTask
+// calls are not in the iOS SDK's headers.
+static CFTypeRef CopyEntitlement(CFStringRef name, int* known) {
+  *known = 0;
   void* security = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
   void* (*create)(CFAllocatorRef) = security ? dlsym(security, "SecTaskCreateFromSelf") : NULL;
   CFTypeRef (*copy)(void*, CFStringRef, CFErrorRef*) = security ? dlsym(security, "SecTaskCopyValueForEntitlement") : NULL;
-  if (!create || !copy) return -1;
+  if (!create || !copy) return NULL;
   void* task = create(NULL);
-  if (!task) return -1;
-  CFTypeRef value = copy(task, CFSTR("get-task-allow"), NULL);
+  if (!task) return NULL;
+  *known = 1;
+  CFTypeRef value = copy(task, name, NULL);
+  CFRelease(task);
+  return value;
+}
+
+// get-task-allow: a debugger may attach to the app at all (a development signature; SideStore,
+// AltStore and Xcode keep it). -1 when it cannot tell.
+static int HasGetTaskAllow(void) {
+  int known = 0;
+  CFTypeRef value = CopyEntitlement(CFSTR("get-task-allow"), &known);
   const int allowed = value == kCFBooleanTrue;
   if (value) CFRelease(value);
-  CFRelease(task);
-  return allowed;
+  return known ? allowed : -1;
 }
 
 static NSString* HelperIdentifier(void) {
@@ -275,6 +286,95 @@ void WinPadJITBuiltInSend(NSString* operation, void (^done)(BOOL ok, NSString* m
                                       }];
 }
 
+static NSString* VPNIdentifier(void) {
+  NSURL* url = [NSBundle.mainBundle.builtInPlugInsURL URLByAppendingPathComponent:@"WinPadVPN.appex"];
+  return url ? [NSBundle bundleWithURL:url].bundleIdentifier : nil;
+}
+
+BOOL WinPadVPNBuiltIn(void) {
+#if TARGET_OS_SIMULATOR
+  return NO;
+#else
+  if (!VPNIdentifier()) return NO;
+  int known = 0;
+  CFTypeRef value = CopyEntitlement(CFSTR("com.apple.developer.networking.networkextension"), &known);
+  const BOOL tunnel = value && CFGetTypeID(value) == CFArrayGetTypeID() &&
+                      [(__bridge NSArray*)value containsObject:@"packet-tunnel-provider"];
+  if (value) CFRelease(value);
+  return tunnel;
+#endif
+}
+
+// Starts the app's own VPN (its configuration made on first use: iOS asks the user once) and
+// calls DONE on the main thread once it is connected, or with why not. The VPN that was
+// already on stays on; one this started is stopped by StopVPN.
+static NETunnelProviderManager* started_vpn;
+
+static void StartVPN(void (^done)(BOOL ok, NSString* message)) {
+  void (^finish)(BOOL, NSString*) = ^(BOOL ok, NSString* message) {
+    NSLog(@"WinPad Wine: VPN %@: %@", ok ? @"on" : @"failed", message);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      done(ok, message);
+    });
+  };
+  NSString* identifier = VPNIdentifier();
+  [NETunnelProviderManager loadAllFromPreferencesWithCompletionHandler:^(NSArray<NETunnelProviderManager*>* managers,
+                                                                         NSError* error) {
+    NETunnelProviderManager* manager = nil;
+    for (NETunnelProviderManager* m in managers)
+      if ([((NETunnelProviderProtocol*)m.protocolConfiguration).providerBundleIdentifier isEqualToString:identifier])
+        manager = m;
+    if (manager.connection.status == NEVPNStatusConnected) {
+      finish(YES, @"už byla zapnutá");
+      return;
+    }
+    if (!manager) {
+      manager = [NETunnelProviderManager new];
+      NETunnelProviderProtocol* protocol = [NETunnelProviderProtocol new];
+      protocol.providerBundleIdentifier = identifier;
+      protocol.serverAddress = @"WinPad Wine (jen v iPadu)";
+      manager.protocolConfiguration = protocol;
+      manager.localizedDescription = @"WinPad JIT";
+    }
+    manager.enabled = YES;
+    [manager saveToPreferencesWithCompletionHandler:^(NSError* saved) {
+      if (saved) {
+        finish(NO, [NSString stringWithFormat:@"VPN se nepodařilo nastavit: %@", saved.localizedDescription]);
+        return;
+      }
+      [manager loadFromPreferencesWithCompletionHandler:^(NSError* loaded) {
+        NSError* failed = nil;
+        if (loaded || ![manager.connection startVPNTunnelAndReturnError:&failed]) {
+          finish(NO, [NSString stringWithFormat:@"VPN se nezapnula: %@", (loaded ?: failed).localizedDescription]);
+          return;
+        }
+        started_vpn = manager;
+        // Connected within a few seconds, or not at all.
+        __block int waited = 0;
+        __block void (^check)(void);
+        check = ^{
+          if (manager.connection.status == NEVPNStatusConnected) {
+            finish(YES, @"zapnutá");
+            check = nil;
+          } else if (++waited > 40) {
+            finish(NO, @"VPN se nepřipojila.");
+            check = nil;
+          } else {
+            void (^again)(void) = check;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), again);
+          }
+        };
+        dispatch_async(dispatch_get_main_queue(), check);
+      }];
+    }];
+  }];
+}
+
+static void StopVPN(void) {
+  [started_vpn.connection stopVPNTunnel];
+  started_vpn = nil;
+}
+
 void WinPadJITTurnOn(void (^done)(BOOL ok, NSString* message)) {
   __block BOOL over = NO;
   __block NSTimer* timer = nil;
@@ -303,10 +403,24 @@ void WinPadJITTurnOn(void (^done)(BOOL ok, NSString* message)) {
                                             }
                                           }];
   if (builtin) {
-    WinPadJITBuiltInSend(@"enable", ^(BOOL ok, NSString* message) {
-      // Success arrives after the pool (the timer); a failure before it ends the wait.
-      if (!ok) end(NO, message);
-    });
+    void (^send)(void) = ^{
+      WinPadJITBuiltInSend(@"enable", ^(BOOL ok, NSString* message) {
+        // The helper is done with the debug tunnel: the app's own VPN can go.
+        StopVPN();
+        // Success arrives after the pool (the timer); a failure before it ends the wait.
+        if (!ok) end(NO, message);
+      });
+    };
+    // The app's own VPN first, where it has one; else LocalDevVPN is the user's.
+    if (WinPadVPNBuiltIn())
+      StartVPN(^(BOOL ok, NSString* message) {
+        if (ok)
+          send();
+        else
+          end(NO, message);
+      });
+    else
+      send();
     return;
   }
   WinPadJITAskStikDebug(^(BOOL opened) {

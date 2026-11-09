@@ -1,0 +1,10 @@
+// WinPad Wine's switches for this project (Xcode reads it for every target).
+//
+// WINPAD_VPN = YES: the app carries its own loopback VPN (VPN/, PlugIns/WinPadVPN.appex) for
+// the built-in JIT, so that LocalDevVPN is not needed. It needs the Network Extension
+// capability, which only a paid Apple developer account can sign; with a free account keep NO
+// (the app then uses LocalDevVPN). xcodebuild takes it on the command line too: WINPAD_VPN=YES.
+WINPAD_VPN = NO
+
+WINPAD_VPN_ENTITLEMENTS_YES = VPN/WinPadVPN.entitlements
+WINPAD_VPN_ENTITLEMENTS_NO =

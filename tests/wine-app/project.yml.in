@@ -2,7 +2,30 @@ name: WinPadWine
 options:
   deploymentTarget:
     iOS: "@MIN_IOS@"
+# WinPad.xcconfig: the WINPAD_VPN switch (the app's own VPN for the built-in JIT).
+configFiles:
+  Debug: WinPad.xcconfig
+  Release: WinPad.xcconfig
 targets:
+  # The app's own loopback VPN for the built-in JIT (VPN/), in place of LocalDevVPN: only with
+  # WINPAD_VPN = YES (a paid account signs its Network Extension entitlement); else the app's
+  # script below leaves it out of the app.
+  WinPadVPN:
+    type: app-extension
+    platform: iOS
+    sources:
+      - VPN/WinPadVPNProvider.swift
+    settings:
+      base:
+        INFOPLIST_FILE: VPN/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@.VPN
+        PRODUCT_NAME: WinPadVPN
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        ARCHS: arm64
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
   # The built-in JIT helper (JITHelper/): StikJIT (build-stikjit.sh, device only) in an app
   # extension the app starts to enable its own JIT. StikJIT.framework goes into the app's
   # Frameworks (the app's script below), which the helper finds two folders up.
@@ -44,6 +67,7 @@ targets:
       - Settings.bundle
     dependencies:
       - target: WinPadJITHelper
+      - target: WinPadVPN
     postBuildScripts:
       # Wine's files for the platform being built, laid out next to the
       # executable as in Madeira's app, and the AOT images in Frameworks/
@@ -71,6 +95,8 @@ targets:
           if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; fi
           mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
           cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          # The app's own VPN only when it is signed for it (WinPad.xcconfig).
+          if [ "${WINPAD_VPN:-NO}" != YES ]; then rm -rf "$app/PlugIns/WinPadVPN.appex"; fi
           # StikJIT for the built-in JIT helper (PlugIns/WinPadJITHelper.appex), on a device only.
           stikjit="$PROJECT_DIR/StikJIT/$PLATFORM_NAME/StikJIT.framework"
           rm -rf "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
@@ -88,6 +114,7 @@ targets:
       base:
         INFOPLIST_FILE: Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@
+        CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         ARCHS: arm64

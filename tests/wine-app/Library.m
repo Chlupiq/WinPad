@@ -904,7 +904,7 @@ enum { AppearanceSection = 0 };
            @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
   if (section == 3)
     return @"S JITem hra běží bez vlastního AOT obrazu: co ještě neběželo, FEX přeloží za běhu. JIT zapíná "
-           @"vestavěný pomocník (potřebuje LocalDevVPN a párovací soubor), nebo aplikace StikDebug. Bez JITu hra "
+           @"vestavěný pomocník (potřebuje párovací soubor a LocalDevVPN nebo vestavěnou VPN), nebo aplikace StikDebug. Bez JITu hra "
            @"běží ze svého AOT obrazu a interpretu. Návod je pod štítkem JIT v knihovně.";
   return @"Hry se přidávají ve Finderu: iPad → Soubory → WinPad Wine, každá ve své složce.";
 }
@@ -1090,6 +1090,9 @@ enum { AppearanceSection = 0 };
   if (section == 0)
     return @"S JITem běží každá hra hned, bez překladu předem. Bez JITu běží jen hry přeložené "
            @"převodníkem WinPad Translator.";
+  if (self.builtin && WinPadVPNBuiltIn())
+    return @"Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine si zapne vlastní VPN i JIT sám, "
+           @"bez další aplikace. JIT platí do zavření aplikace.";
   if (self.builtin)
     return @"Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine si JIT zapne sám, bez další aplikace. "
            @"Při spuštění musí být zapnutá LocalDevVPN. JIT platí do zavření aplikace. "
@@ -1127,6 +1130,12 @@ enum { AppearanceSection = 0 };
       ticked = can || on;
       break;
     case 1:
+      if (builtin && WinPadVPNBuiltIn()) {
+        title = @"2. VPN";
+        detail = @"Vestavěná, zapne se sama při spuštění hry. Napoprvé iPad požádá o povolení konfigurace VPN.";
+        ticked = YES;
+        break;
+      }
       title = @"2. LocalDevVPN";
       detail = @"Zdarma z App Storu (ťukni). Zapni ji před hraním: přes ni se WinPad Wine připojí sám k sobě "
                @"jako debugger. Pokud máš SideStore, nejspíš ji už máš.";
@@ -1172,7 +1181,7 @@ enum { AppearanceSection = 0 };
   [tableView deselectRowAtIndexPath:path animated:YES];
   if (path.section != 1) return;
   UIApplication* app = UIApplication.sharedApplication;
-  if (path.row == 1) {
+  if (path.row == 1 && !(self.builtin && WinPadVPNBuiltIn())) {
     [app openURL:[NSURL URLWithString:@"itms-apps://search.itunes.apple.com/WebObjects/MZSearch.woa/wa/"
                                       @"search?media=software&term=LocalDevVPN"]
           options:@{}

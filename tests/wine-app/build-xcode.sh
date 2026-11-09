@@ -84,12 +84,12 @@ du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  
 cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 # The built-in JIT helper and StikJIT for it, built with this Xcode (build-stikjit.sh).
-cp -R "$here/JITHelper" "$proj/"
+cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
 sh "$here/build-stikjit.sh" "$proj/StikJIT/iphoneos"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
     libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
-    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers"
+    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers NetworkExtension"
     if [ -n "$d3d9" ]; then
         libs="$libs metal-display.o libdxmt_combined.a"
         frameworks="$frameworks Metal QuartzCore IOSurface"
@@ -149,6 +149,10 @@ build() {
     test -f "$product/Settings.bundle/Root.plist" || { echo "the $1 build lacks its Settings.bundle" >&2; exit 1; }
     test -f "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" ||
         { echo "the $1 build lacks the JIT helper extension" >&2; exit 1; }
+    # The app's own VPN is built, but left out without WINPAD_VPN = YES (WinPad.xcconfig).
+    test -f "$out/xcode-derived/Build/Products/Debug-$1/WinPadVPN.appex/WinPadVPN" ||
+        { echo "the $1 build did not build the VPN extension" >&2; exit 1; }
+    test ! -e "$product/PlugIns/WinPadVPN.appex" || { echo "the $1 build carries the VPN without WINPAD_VPN" >&2; exit 1; }
     if [ "$1" = iphoneos ]; then
         test -f "$product/Frameworks/StikJIT.framework/StikJIT" || { echo "the $1 build lacks StikJIT" >&2; exit 1; }
         otool -L "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" | grep -q StikJIT.framework ||

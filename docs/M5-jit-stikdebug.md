@@ -88,3 +88,14 @@ Uživatel na iPadu jednou:
 Pak už jen ťuká na Spustit, jen při hraní musí být zapnutá LocalDevVPN.
 
 Neověřeno: celý vestavěný postup na iPadu (spuštění rozšíření, stažení obrazu disku, připojení), podepisování rozšíření v SideStore a AltStore a podpis z `--install` převodníku (rcodesign) s vnořeným rozšířením.
+
+## Vestavěná VPN (volitelně, placený účet)
+
+Místo LocalDevVPN může mít WinPad Wine vlastní VPN: rozšíření `PlugIns/WinPadVPN.appex` (`tests/wine-app/VPN/`). Je to vlastní implementace stejného postupu, jaký používá StosVPN/LocalDevVPN od týmu SideStore: tunel s adresou 10.7.1.1 a cestou na 10.7.0.1, který v každém IPv4 paketu prohodí zdrojovou a cílovou adresu. Pakety pro 10.7.0.1 se tak vrátí do iPadu a pomocník JITu se dostane k jeho debugovací službě.
+
+- Rozšíření potřebuje oprávnění `com.apple.developer.networking.networkextension` (`packet-tunnel-provider`). To dává jen placený vývojářský účet. Proto je vypnuté: zapíná se v `WinPad.xcconfig` řádkem `WINPAD_VPN = YES`.
+- S `WINPAD_VPN = NO` (výchozí) se rozšíření do aplikace nezabalí a oprávnění se nepodepisuje. Pak se používá LocalDevVPN jako dřív. Bezplatný podpis i SideStore tedy fungují beze změny.
+- Aplikace (`WinPadVPNBuiltIn`) VPN použije, jen když rozšíření v aplikaci je a aplikace má oprávnění. Před žádostí na pomocníka JITu si vytvoří konfiguraci „WinPad JIT“, zapne tunel a počká, až se připojí (nejdéle 10 s). Po odpovědi pomocníka ho zase vypne. Napoprvé iOS požádá o povolení přidat konfiguraci VPN.
+- Průvodce pak krok 2 ukazuje jako hotový („Vestavěná, zapne se sama“).
+
+Neověřeno: tunel na iPadu (zda iPadOS 27 propustí pakety prohozené tímto způsobem k debugovací službě) a podpis rozšíření s oprávněním v Xcode.

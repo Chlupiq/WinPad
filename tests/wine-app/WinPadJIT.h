@@ -53,3 +53,7 @@ BOOL WinPadJITCanTurnOn(void);
 // as soon as the debugger is attached. DONE (main thread, once) says whether the JIT is on, and
 // why not.
 void WinPadJITTurnOn(void (^done)(BOOL ok, NSString* message));
+
+// The app's own loopback VPN (VPN/, with WINPAD_VPN = YES in WinPad.xcconfig): YES when this
+// installation carries it and is signed for it; the built-in JIT then needs no LocalDevVPN.
+BOOL WinPadVPNBuiltIn(void);
