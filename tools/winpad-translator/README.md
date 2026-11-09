@@ -66,7 +66,15 @@ Plus:
 Output: `fexaot-<game>.dylib` (`<game>` is the folder name in lower case,
 other characters as `-`, as the app's game library looks for it), optionally
 a copy of the IPA with the image in `Frameworks/` for AltStore, SideStore or
-Sideloadly, or the image copied into a `WinPadWine-xcode` project.
+Sideloadly, or the image copied into a `WinPadWine-xcode` project (on a Mac the window's
+"Xcode project" row; it finds the project in `~/Downloads`, `~/Desktop`,
+`~/Developer/wine-app` or `~` by itself, and touches the project's
+`fexaot.dylib` so a plain Run in Xcode embeds the new image).
+
+The packaged Mac app compiles with `docker` (Docker Desktop): it finds Docker's
+commands outside Finder's PATH, and copies its toolkit (symlinks in the app,
+under `/Applications`, which Docker Desktop does not share) into the work
+folder for the container.
 
 ## Steps
 

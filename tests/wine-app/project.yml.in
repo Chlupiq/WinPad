@@ -23,6 +23,9 @@ targets:
       # Every dylib gets signed; none is linked, Wine and the host load them
       # with dlopen.
       - name: Embed Wine and the AOT image
+        # Every build: a game's image (fexaot-GAME.dylib, which WinPad Translator copies in)
+        # is not among the input files, so dependency analysis would skip a new one.
+        basedOnDependencyAnalysis: false
         inputFiles:
           - $(PROJECT_DIR)/wine/$(PLATFORM_NAME)/aarch64-windows
           - $(PROJECT_DIR)/wine/i386-windows

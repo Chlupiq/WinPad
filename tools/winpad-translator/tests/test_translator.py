@@ -209,6 +209,19 @@ class DockerShareTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(b.compiler))
 
 
+class XcodeProjectTest(unittest.TestCase):
+    def test_project_found_in_a_picked_parent_folder(self):
+        with tempfile.TemporaryDirectory() as t:
+            proj = os.path.join(t, "WinPadWine-xcode")
+            os.makedirs(os.path.join(proj, "WinPadWine.xcodeproj"))
+            self.assertEqual(project.xcode_project_in(proj), proj)
+            self.assertEqual(project.xcode_project_in(t), proj)
+            with self.assertRaises(project.TranslateError):
+                project.xcode_project_in(os.path.join(t, "nothing"))
+            with mock.patch.object(project, "XCODE_PROJECT_PLACES", ("/nonexistent", proj)):
+                self.assertEqual(project.find_xcode_project(), proj)
+
+
 class IpaTest(unittest.TestCase):
     def test_dlls_out_image_in(self):
         with tempfile.TemporaryDirectory() as t:

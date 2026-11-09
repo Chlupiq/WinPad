@@ -222,6 +222,11 @@ def main():
     row += 1
     path_row("WinPad Wine IPA", "ipa", [("IPA", "*.ipa")], "the app the iPad runs (its Wine DLLs must match)")
     path_row("Write IPA with image", "output_ipa", "save", "optional: sign and install it with AltStore/SideStore/Sideloadly")
+    if sys.platform == "darwin":
+        path_row("Xcode project", "xcode_project", "dir",
+                 "the WinPadWine-xcode folder: the image goes into it, then Run in Xcode")
+        if not entries["xcode_project"].get():
+            entries["xcode_project"].set(project.find_xcode_project())
     path_row("Image folder", "output_dir", "dir")
     path_row("Write .winpad package", "package", "package",
              "optional: the game in one file; open it on the iPad from AirDrop or Files")
@@ -260,8 +265,7 @@ def main():
     row += 1
     adv = {}
     for i, (label, key) in enumerate([("FEXOfflineCompiler.exe", "compiler"), ("dispatcher.bin", "dispatcher"),
-                                       ("Work folder", "work_dir"), ("Simulator build dir", "sim_work_dir"),
-                                       ("Xcode project", "xcode_project")]):
+                                       ("Work folder", "work_dir"), ("Simulator build dir", "sim_work_dir")]):
         ttk.Label(advanced, text=label).grid(row=i, column=0, sticky="w")
         var = tk.StringVar(value=getattr(p, key))
         ttk.Entry(advanced, textvariable=var).grid(row=i, column=1, sticky="ew", padx=6)
@@ -357,6 +361,8 @@ def main():
         loaded = project.Project.load(path)
         for key, var in list(entries.items()) + list(adv.items()):
             value = getattr(loaded, key)
+            if key == "xcode_project" and not value:
+                continue
             if isinstance(var, tk.Listbox):
                 var.delete(0, "end")
                 for v in value:
