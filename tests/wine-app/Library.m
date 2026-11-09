@@ -4,7 +4,9 @@
 // Files → WinPad Wine), one per folder: the folder's winpad.json may name the
 // game ("title") and its program ("exe"), else the folder's name is the title
 // and its largest .exe that is no installer or helper is the program. Its
-// cover is cover.png or cover.jpg in the folder. A game's AOT image is
+// cover is cover.png or cover.jpg in the folder; a game without one gets one from the
+// internet by its title (Covers.m: Steam, Wikipedia, SteamGridDB with a key), and "Obal"
+// under the game (or a long press on its tile) picks another. A game's AOT image is
 // Frameworks/fexaot-FOLDER.dylib (WinPadGameImage), else fexaot-game.dylib,
 // the one tests/wine-app/game-aot.sh makes. So one app holds the images of
 // any number of games (WinPad Translator's library writes them into one IPA).
@@ -48,6 +50,7 @@
 // presses right and A.
 #import "Library.h"
 
+#import "Covers.h"
 #import "Package.h"
 #import "WinPadJIT.h"
 
@@ -883,7 +886,7 @@ enum { AppearanceSection = 0 };
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
-  if (section == AppearanceSection) return 2;
+  if (section == AppearanceSection) return 4;
   section -= 1;
   return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : section == 3 ? 3 : 2;
 }
@@ -893,7 +896,10 @@ enum { AppearanceSection = 0 };
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
-  if (section == AppearanceSection) return @"Pozadí knihovny a nastavení, na iPadu i iPhonu.";
+  if (section == AppearanceSection)
+    return @"Pozadí knihovny a nastavení, na iPadu i iPhonu. Obaly her bez obalu aplikace sama najde na internetu "
+           @"podle názvu (Steam, Wikipedie) a uloží jen ten, jehož název sedí; jiný vybereš tlačítkem Obal pod hrou. "
+           @"S klíčem SteamGridDB (zdarma: steamgriddb.com › Preferences › API) najde víc a hezčích obalů.";
   section -= 1;
   if (section == 0) return @"Ovladač na obrazovce se ukáže jen tehdy, když není připojený herní ovladač.";
   if (section == 1)
@@ -916,6 +922,20 @@ enum { AppearanceSection = 0 };
     cell.textLabel.text = @"Pozadí";
     cell.detailTextLabel.text = @(CurrentBackground()->name);
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+  }
+  if (path.section == AppearanceSection && path.row == 2) {
+    cell.textLabel.text = @"Stahovat obaly her";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = WinPadAutoCoversWanted();
+    [toggle addTarget:self action:@selector(coverAutoChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+  if (path.section == AppearanceSection && path.row == 3) {
+    cell.textLabel.text = @"Klíč SteamGridDB";
+    cell.detailTextLabel.text = [NSUserDefaults.standardUserDefaults stringForKey:@"steamGridDBKey"].length ? @"Zadán" : @"Nezadán";
     return cell;
   }
   if (path.section == AppearanceSection) {
@@ -987,6 +1007,44 @@ enum { AppearanceSection = 0 };
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"backgroundWaves"];
 }
 
+- (void)coverAutoChanged:(UISwitch*)toggle {
+  [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"coverAuto"];
+  // Back on: the games tried before are tried again.
+  if (toggle.on) [NSUserDefaults.standardUserDefaults removeObjectForKey:@"coverTried"];
+}
+
+- (void)askSteamGridDBKey {
+  UIAlertController* alert = [UIAlertController
+      alertControllerWithTitle:@"Klíč SteamGridDB"
+                       message:@"Na steamgriddb.com se přihlas (třeba účtem Steam), v Preferences › API vytvoř klíč a vlož ho sem. "
+                               @"Prázdné pole klíč smaže."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [alert addTextFieldWithConfigurationHandler:^(UITextField* field) {
+    field.text = [NSUserDefaults.standardUserDefaults stringForKey:@"steamGridDBKey"];
+    field.placeholder = @"API klíč";
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+  }];
+  [alert addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  __weak UIAlertController* weak_alert = alert;
+  __weak WinPadSettingsViewController* weak = self;
+  [alert addAction:[UIAlertAction actionWithTitle:@"Uložit"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction* action) {
+                                            NSString* key = [weak_alert.textFields.firstObject.text
+                                                stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+                                            if (key.length) {
+                                              [NSUserDefaults.standardUserDefaults setObject:key forKey:@"steamGridDBKey"];
+                                              // With the key, games without a cover are tried again.
+                                              [NSUserDefaults.standardUserDefaults removeObjectForKey:@"coverTried"];
+                                            } else {
+                                              [NSUserDefaults.standardUserDefaults removeObjectForKey:@"steamGridDBKey"];
+                                            }
+                                            [weak.tableView reloadData];
+                                          }]];
+  [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)touchChanged:(UISwitch*)toggle {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"touchControls"];
 }
@@ -1003,6 +1061,7 @@ enum { AppearanceSection = 0 };
   [tableView deselectRowAtIndexPath:path animated:YES];
   if (path.section == AppearanceSection) {
     if (path.row == 0) [self.navigationController pushViewController:[WinPadBackgroundViewController new] animated:YES];
+    if (path.row == 3) [self askSteamGridDBKey];
     return;
   }
   path = [NSIndexPath indexPathForRow:path.row inSection:path.section - 1];
@@ -1215,7 +1274,7 @@ enum { AppearanceSection = 0 };
 }
 @end
 
-@interface LibraryViewController ()
+@interface LibraryViewController () <UIContextMenuInteractionDelegate>
 @property(nonatomic, strong) NSArray<WinPadGame*>* games;
 @property(nonatomic) NSInteger focus;
 @property(nonatomic, strong) WinPadBackdrop* backdrop;
@@ -1228,6 +1287,7 @@ enum { AppearanceSection = 0 };
 @property(nonatomic, strong) UIStackView* tags;
 @property(nonatomic, strong) UIButton* play;
 @property(nonatomic, strong) UIButton* exportMaps;  // "Exportovat pro převodník"
+@property(nonatomic, strong) UIButton* coverButton;  // "Obal": WinPadCoverPickerViewController
 @property(nonatomic) BOOL exporting;
 @property(nonatomic) BOOL exportCompact;  // the button's short title, as on an iPhone
 @property(nonatomic, strong) UIView* info;
@@ -1254,6 +1314,9 @@ enum { AppearanceSection = 0 };
 - (void)moveFocusBy:(NSInteger)by;
 - (void)startFocused;
 - (void)exportFocused;
+- (void)pickCoverFor:(WinPadGame*)game;
+- (void)coverChanged:(WinPadGame*)game;
+- (void)coverFocused;
 - (void)titleExport:(BOOL)compact;
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game;
 - (void)waitForJITThen:(void (^)(void))start;
@@ -1375,6 +1438,16 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.exportMaps addTarget:self action:@selector(exportFocused) forControlEvents:UIControlEventTouchUpInside];
   [self.view addSubview:self.exportMaps];
 
+  // Picks the focused game's cover: one found on the internet by its title, or from Photos.
+  UIButtonConfiguration* obal = [share copy];
+  obal.image = [UIImage systemImageNamed:@"photo"];
+  obal.title = @"Obal";
+  obal.contentInsets = NSDirectionalEdgeInsetsMake(14, 20, 14, 24);
+  self.coverButton = [UIButton buttonWithConfiguration:obal primaryAction:nil];
+  self.coverButton.accessibilityLabel = @"Najít obal hry";
+  [self.coverButton addTarget:self action:@selector(coverFocused) forControlEvents:UIControlEventTouchUpInside];
+  [self.view addSubview:self.coverButton];
+
   self.info = [UIView new];
   self.info.backgroundColor = [Hex(0x04122E) colorWithAlphaComponent:0.55];
   self.info.layer.cornerRadius = 6;
@@ -1394,7 +1467,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.view addSubview:self.empty];
 
   self.hints = [UILabel new];
-  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓧ Export map     Ⓨ Nastavení     Ťuknutím vybereš, druhým spustíš";
+  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓧ Export map     Ⓨ Nastavení     Ťuknutím vybereš, druhým spustíš, podržením změníš obal";
   self.hints.font = [UIFont systemFontOfSize:16];
   self.hints.textColor = Hex(0xDCE8FF);
   self.hints.textAlignment = NSTextAlignmentRight;
@@ -1431,6 +1504,31 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                           [weak showFocus];
                                                                         }]];
   for (GCController* pad in GCController.controllers) [self attach:pad];
+  // CI: what the cover sources find for a title, in Documents/covers.txt (build-xcode.sh).
+  NSString* cover_test = [NSUserDefaults.standardUserDefaults stringForKey:@"coverTest"];
+  if (cover_test.length) {
+    WinPadGame* fake = [WinPadGame new];
+    fake.title = [cover_test stringByAppendingString:@"_v1.2 (GOG)"];
+    NSMutableString* report = [NSMutableString stringWithFormat:@"query: %@\n", WinPadCoverQuery(fake)];
+    NSString* path = [Documents() stringByAppendingPathComponent:@"covers.txt"];
+    WinPadFindCovers(cover_test, 0, ^(NSArray<WinPadCover*>* covers, NSError* error) {
+      if (error) [report appendFormat:@"error: %@\n", error.localizedDescription];
+      for (WinPadCover* c in covers) [report appendFormat:@"cover: %@ | %@ | %@\n", c.source, c.name, c.urls.firstObject];
+      void (^finish)(void) = ^{
+        [report appendString:@"== finished\n"];
+        [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+      };
+      if (!covers.count) {
+        finish();
+        return;
+      }
+      WinPadLoadCover(covers.firstObject, NO, ^(UIImage* image, NSData* data) {
+        [report appendFormat:@"loaded: %@ %.0fx%.0f\n", covers.firstObject.source, image.size.width * image.scale,
+                             image.size.height * image.scale];
+        finish();
+      });
+    });
+  }
   if (!self.packages) self.packages = [NSMutableArray new];
   self.installReport = [NSMutableString new];
   // CI: the packages waiting in Documents go in before the report, one after the other.
@@ -1532,15 +1630,72 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     ShowCover(cover, placeholder, self.games[i]);
     [card addSubview:cover];
     [card addTarget:self action:@selector(tapCard:) forControlEvents:UIControlEventTouchUpInside];
+    [card addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:self]];
     [self.row addSubview:card];
     [self.cards addObject:card];
   }
   const BOOL none = self.games.count == 0;
-  for (UIView* v in @[ self.heroTitle, self.tags, self.play, self.info ]) v.hidden = none;
+  for (UIView* v in @[ self.heroTitle, self.tags, self.play, self.info, self.coverButton ]) v.hidden = none;
   self.exportMaps.hidden = none || !self.games[self.focus].maps;
   self.empty.hidden = !none;
   [self showFocus];
   [self.view setNeedsLayout];
+  // Covers for the games without one, saved one by one as they come (not in CI's library test).
+  if (![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+      ![NSUserDefaults.standardUserDefaults stringForKey:@"coverTest"]) {
+    __weak LibraryViewController* weak = self;
+    WinPadAutoCovers(self.games, ^(WinPadGame* game) {
+      [weak coverChanged:game];
+    });
+  }
+}
+
+// GAME's cover changed (WinPadAutoCovers, the picker): its tile and the backdrop show it.
+- (void)coverChanged:(WinPadGame*)game {
+  const NSUInteger i = [self.games indexOfObjectIdenticalTo:game];
+  if (i == NSNotFound || i >= self.cards.count) return;
+  UIImageView* cover = (UIImageView*)[self.cards[i] viewWithTag:CoverTag];
+  UILabel* placeholder = (UILabel*)cover.subviews.firstObject;
+  if ([placeholder isKindOfClass:UILabel.class]) ShowCover(cover, placeholder, game);
+  if ((NSInteger)i == self.focus) self.backdrop.cover = game.cover;
+}
+
+- (void)coverFocused {
+  if (self.games.count) [self pickCoverFor:self.games[self.focus]];
+}
+
+- (void)pickCoverFor:(WinPadGame*)game {
+  if (self.presentedViewController || self.started) return;
+  WinPadCoverPickerViewController* picker = [[WinPadCoverPickerViewController alloc] initWithGame:game];
+  __weak LibraryViewController* weak = self;
+  picker.saved = ^{
+    [weak coverChanged:game];
+  };
+  UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:picker];
+  nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  nav.modalPresentationStyle = UIModalPresentationFormSheet;
+  [self presentViewController:nav animated:YES completion:nil];
+}
+
+// A long press on a tile: its game's cover.
+- (UIContextMenuConfiguration*)contextMenuInteraction:(UIContextMenuInteraction*)interaction
+                       configurationForMenuAtLocation:(CGPoint)location {
+  const NSInteger i = interaction.view.tag;
+  if (i < 0 || i >= (NSInteger)self.games.count) return nil;
+  WinPadGame* game = self.games[(NSUInteger)i];
+  __weak LibraryViewController* weak = self;
+  return [UIContextMenuConfiguration
+      configurationWithIdentifier:nil
+                  previewProvider:nil
+                   actionProvider:^UIMenu*(NSArray<UIMenuElement*>* suggested) {
+                     UIAction* find = [UIAction actionWithTitle:@"Najít obal"
+                                                          image:[UIImage systemImageNamed:@"magnifyingglass"]
+                                                     identifier:nil
+                                                        handler:^(UIAction* action) {
+                                                          [weak pickCoverFor:game];
+                                                        }];
+                     return [UIMenu menuWithTitle:game.title children:@[ find ]];
+                   }];
 }
 
 - (void)showFocus {
@@ -1563,6 +1718,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   }
   WinPadGame* game = self.games[self.focus];
   self.exportMaps.hidden = !game.maps;
+  [self.view setNeedsLayout];
   self.backdrop.cover = game.cover;
   self.heroTitle.text = game.title;
   for (UIView* tag in self.tags.arrangedSubviews) [tag removeFromSuperview];
@@ -1647,6 +1803,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     self.play.frame = CGRectMake(m + w - pw, y + 6, pw, 48);
     [self titleExport:YES];
     self.exportMaps.frame = CGRectMake(m + w - pw, y + 6 + 48 + 8, pw, 44);
+    self.coverButton.frame = CGRectMake(m + w - pw, y + 6 + 48 + 8 + (self.exportMaps.hidden ? 0 : 52), pw, 44);
     self.info.hidden = self.hints.hidden = YES;
   } else {
     self.heroTitle.frame = CGRectMake(m, y, MIN(w, 900), title_h);
@@ -1657,6 +1814,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [self titleExport:NO];
     const CGSize share = [self.exportMaps sizeThatFits:CGSizeMake(w, 60)];
     self.exportMaps.frame = CGRectMake(CGRectGetMaxX(self.play.frame) + 16, y, share.width, 56);
+    const CGSize obal = [self.coverButton sizeThatFits:CGSizeMake(w, 60)];
+    self.coverButton.frame =
+        CGRectMake(CGRectGetMaxX(self.exportMaps.hidden ? self.play.frame : self.exportMaps.frame) + 16, y, obal.width, 56);
     y += 56 + 36;
     self.info.hidden = !self.games.count;
     self.info.frame = CGRectMake(m, y, MIN(w, 440), 140);

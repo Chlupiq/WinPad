@@ -63,6 +63,9 @@ targets:
       # The game library the app opens on.
       - Library.h
       - Library.m
+      # Game covers from the internet (Steam, Wikipedia, SteamGridDB with a key).
+      - Covers.h
+      - Covers.m
       # WinPad packages (.winpad): a game in one file, opened from AirDrop or Files.
       - Package.h
       - Package.c

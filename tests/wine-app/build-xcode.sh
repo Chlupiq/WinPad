@@ -87,7 +87,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 # The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
 cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
@@ -351,6 +351,23 @@ grep -qiF "[Software\\\\Wow6432Node\\\\WinPad\\\\$run_id]" "$docs/prefix/system.
     grep -qF '"Resolution"=dword:00000002' "$docs/prefix/system.reg" &&
     grep -qF '"Mode"="fullscreen"' "$docs/prefix/user.reg" ||
     { echo "the game profile's registry values are not in the prefix" >&2; exit 1; }
+# Covers from the internet (Covers.m): what Steam, Wikipedia (and SteamGridDB, with a key) find
+# for a title, and the first one loaded. The sources are outside CI's control, so nothing found
+# is only a warning.
+rm -f "$docs/covers.txt"
+xcrun simctl launch "$udid" "$bundle" -coverTest "Need for Speed Underground 2"
+for _ in $(seq 60); do
+    grep -q '== finished' "$docs/covers.txt" 2>/dev/null && break
+    sleep 1
+done
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+echo "--- the cover search ---"
+cat "$docs/covers.txt" || true
+grep -qF 'query: Need for Speed Underground 2' "$docs/covers.txt" 2>/dev/null ||
+    { echo "the cover search did not clean up the folder name" >&2; exit 1; }
+grep -q '^loaded: .* [1-9][0-9]*x[1-9]' "$docs/covers.txt" 2>/dev/null ||
+    echo "::warning::the cover search found or loaded no cover (no internet on the runner?)"
+
 # WinPad Translator takes the zip as it is: Test Game's map, the run-time code and the CPU features.
 echo "--- the exported zip ---"
 unzip -l "$docs/export-Test Game.zip"

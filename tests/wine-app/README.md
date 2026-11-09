@@ -28,7 +28,13 @@ spustí). Ve složce hry může být:
   rozlišení). Aplikace hru spustí s nimi; vlastní klíče v `winpad.json`
   (`title`, `exe`, `args`, `dllOverrides`, `env`, `registry`) mají přednost.
   Viz tools/winpad-translator/README.md, Game profiles.
-- `cover.png` nebo `cover.jpg`, obal hry.
+- `cover.png` nebo `cover.jpg`, obal hry. Když chybí, aplikace ho sama
+  najde na internetu podle názvu hry (obchod Steam, Wikipedie; s klíčem
+  SteamGridDB v Nastavení › Vzhled i SteamGridDB) a uloží ho jako
+  `cover.jpg`, ale jen když název nalezené hry sedí. Jiný obal vybereš
+  tlačítkem Obal pod hrou nebo podržením její dlaždice: výsledky hledání
+  (název jde upravit), obrázek z Fotek, nebo žádný (Covers.m). Steam app id
+  ze `steam_appid.txt` ve složce hry dá její obal ze Steamu na první místo.
 
 Hru jde poslat i jako jeden soubor `.winpad`, který vyrobí WinPad Translator
 (`--package`). Pošli ho na iPad přes AirDrop nebo ho otevři v Souborech
