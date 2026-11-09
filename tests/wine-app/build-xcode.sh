@@ -52,6 +52,12 @@ for sdk in iphoneos iphonesimulator; do
     sh "$root/tests/wine-loader/link-host.sh" $sdk "$work" "$out/host-$sdk"
     mkdir -p "$proj/lib/$sdk" "$proj/wine/$sdk" "$proj/Frameworks/$sdk"
     cp "$out/host-$sdk/winehost-lib.o" "$proj/lib/$sdk/winehost.o"
+    # FEX flushes the code it writes through Wine's NtFlushInstructionCache, which needs a real
+    # __clear_cache (winehost.c); a stub leaves stale instructions running on an iPad.
+    if grep -qx '___clear_cache' "$out/host-$sdk/stubbed"; then
+        echo "__clear_cache is a stub for $sdk" >&2
+        exit 1
+    fi
     cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$sdk/"
     [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$sdk/"

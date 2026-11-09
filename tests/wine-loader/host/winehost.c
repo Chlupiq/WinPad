@@ -24,6 +24,7 @@
 // exit even after everything the run checks has shown up.
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+#include <libkern/OSCacheControl.h>
 #include <errno.h>
 #include <mach/mach.h>
 #include <pthread.h>
@@ -59,6 +60,17 @@ _Thread_local jmp_buf wine_ios_exit_jmpbuf;
 _Thread_local volatile int wine_ios_exit_code = 0;
 _Thread_local pthread_t wine_ios_main_thread;
 _Thread_local int wine_ios_exit_initialized = 0;
+
+// Wine's NtFlushInstructionCache calls the compiler-rt builtin __clear_cache,
+// which iOS's libSystem does not export, so link-host.sh used to stub it and
+// it did nothing. FEX (xtajit) flushes every block it writes through
+// NtFlushInstructionCache, so with the JIT on an iPad a core could run stale
+// instruction cache lines (the pool's NOP prefill) and slide into block-tail
+// data: SEGV and ILL at 64-byte line boundaries a few seconds into a game.
+// Madeira's app defines it the same way (app/Madeira/FEXBridge.mm).
+void __clear_cache(void* begin, void* end) {
+  sys_icache_invalidate(begin, (size_t)((char*)end - (char*)begin));
+}
 
 // Printed by `wine --version`; the app's build defines it.
 const char wine_build[] = "wine-9.x-winpad";
