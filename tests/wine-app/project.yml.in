@@ -26,14 +26,18 @@ targets:
         ARCHS: arm64
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
-  # The built-in JIT helper (JITHelper/): StikJIT (build-stikjit.sh, device only) in an app
-  # extension the app starts to enable its own JIT. StikJIT.framework goes into the app's
-  # Frameworks (the app's script below), which the helper finds two folders up.
+  # The built-in JIT helper (JITHelper/): an app extension the app starts to enable its own
+  # JIT, with StikJIT's sources compiled in (StikJIT/, fetched by build-stikjit.sh) and its
+  # scripts as resources. idevice's library is for a device only, so the simulator leaves
+  # StikJIT out (WinPadJITHelper.swift answers there that it works on a device only).
   WinPadJITHelper:
     type: app-extension
     platform: iOS
     sources:
       - JITHelper/WinPadJITHelper.swift
+      - StikJIT/Sources
+      - path: StikJIT/Scripts
+        buildPhase: resources
     settings:
       base:
         INFOPLIST_FILE: JITHelper/Info.plist
@@ -44,9 +48,11 @@ targets:
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         ARCHS: arm64
         CODE_SIGN_STYLE: Automatic
-        LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks @executable_path/../../Frameworks"
-        "FRAMEWORK_SEARCH_PATHS[sdk=iphoneos*]": "$(PROJECT_DIR)/StikJIT/iphoneos"
-        "OTHER_LDFLAGS[sdk=iphoneos*]": "-framework StikJIT"
+        SWIFT_INCLUDE_PATHS: "$(PROJECT_DIR)/StikJIT/idevice $(PROJECT_DIR)/StikJIT/iokit"
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/StikJIT/idevice $(PROJECT_DIR)/StikJIT/iokit"
+        LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/StikJIT/idevice"
+        "OTHER_LDFLAGS[sdk=iphoneos*]": "-Wl,-hidden-lidevice_ffi -framework JavaScriptCore -framework Network -framework Security -framework CFNetwork -framework SystemConfiguration -framework IOKit"
+        "EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]": "BundledScript.swift DDISession.swift DeveloperDiskImageService.swift EndpointProbe.swift IdeviceFFI.swift JITSession.swift ProcessInfo+TXM.swift RemotePairingPortResolver.swift ScriptRunner.swift StikJIT.swift StikJITError.swift SynchronousDDIDownloader.swift"
         # One binary, also in Debug: no WinPadJITHelper.debug.dylib beside a stub that loads it.
         ENABLE_DEBUG_DYLIB: NO
   WinPadWine:
@@ -107,18 +113,10 @@ targets:
             mkdir -p "$app/PlugIns"
             cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$app/PlugIns/"
           fi
-          # StikJIT for the built-in JIT helper (PlugIns/WinPadJITHelper.appex), on a device only.
-          stikjit="$PROJECT_DIR/StikJIT/$PLATFORM_NAME/StikJIT.framework"
-          rm -rf "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
-          if [ -d "$stikjit" ]; then cp -R "$stikjit" "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"; fi
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
             for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib; do
               codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
             done
-            if [ -d "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework" ]; then
-              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none \
-                "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
-            fi
           fi
     settings:
       base:

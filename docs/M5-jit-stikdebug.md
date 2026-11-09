@@ -67,7 +67,7 @@ Pak job přeloží `JITPool.c` a `WinPadJIT.m` pro iphoneos i simulátor. Celou 
 
 ## Vestavěný JIT (bez aplikace StikDebug)
 
-WinPad Wine má v sobě vlastního pomocníka JITu: rozšíření aplikace `PlugIns/WinPadJITHelper.appex` (`tests/wine-app/JITHelper/`). Obsahuje knihovnu StikJIT (StikDebug/StikJIT 2.0.1, MPL-2.0), kterou `tests/wine-app/build-stikjit.sh` přeloží stejným Xcode jako zbytek aplikace. Je to samostatný proces, protože proces, který by se ladil sám, se s debuggerem zastaví.
+WinPad Wine má v sobě vlastního pomocníka JITu: rozšíření aplikace `PlugIns/WinPadJITHelper.appex` (`tests/wine-app/JITHelper/`). Obsahuje knihovnu StikJIT (StikDebug/StikJIT 2.0.1, MPL-2.0): `tests/wine-app/build-stikjit.sh` stáhne její zdrojáky do projektu a Xcode je přeloží přímo do pomocníka. Předpřeložený `StikJIT.framework` nejde, protože se načte jen v Xcode, které ho přeložilo (a jiné Xcode jeho rozhraní znovu nepřeloží: modul i jeho enum se jmenují `StikJIT`). Je to samostatný proces, protože proces, který by se ladil sám, se s debuggerem zastaví.
 
 - Aplikace spouští pomocníka přes soukromé API `NSExtension` (`extensionWithIdentifier:`, `beginExtensionRequestWithInputItems:`) podle jeho bundle ID. Stejně to dělají LiveContainer a Madeira. Rozšíření je na bodu `com.apple.ar.viewer`, takže ho SideStore i AltStore přejmenují spolu s aplikací.
 - Žádost je JSON s operací `enable`, PID aplikace, párovacím souborem a příznakem TXM. Pomocník:

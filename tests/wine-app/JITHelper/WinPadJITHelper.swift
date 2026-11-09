@@ -13,11 +13,8 @@
 // its JIT pool prepared and the script has detached (JITPool.c). "prepare" only checks the
 // tunnel and mounts the Developer Disk Image.
 import Foundation
-// On a device StikJIT must be there (build-stikjit.sh): an import that fails is a build error,
-// not a helper that quietly cannot do anything. The simulator has no StikJIT.
-#if !targetEnvironment(simulator)
-import StikJIT
-#endif
+// StikJIT's sources are compiled into this extension on a device (StikJIT/, build-stikjit.sh);
+// the simulator leaves them out (project.yml.in).
 
 struct WinPadJITRequest: Codable {
     static let itemKey = "winpad-jit-request"

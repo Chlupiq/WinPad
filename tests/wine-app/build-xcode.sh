@@ -83,9 +83,9 @@ du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  
 
 cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
-# The built-in JIT helper and StikJIT for it, built with this Xcode (build-stikjit.sh).
+# The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
 cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
-sh "$here/build-stikjit.sh" "$proj/StikJIT/iphoneos"
+sh "$here/build-stikjit.sh" "$proj/StikJIT"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
     libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
@@ -154,9 +154,11 @@ build() {
         { echo "the $1 build did not build the VPN extension" >&2; exit 1; }
     test ! -e "$product/PlugIns/WinPadVPN.appex" || { echo "the $1 build carries the VPN without WINPAD_VPN" >&2; exit 1; }
     if [ "$1" = iphoneos ]; then
-        test -f "$product/Frameworks/StikJIT.framework/StikJIT" || { echo "the $1 build lacks StikJIT" >&2; exit 1; }
-        otool -L "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" | grep -q StikJIT.framework ||
-            { echo "the $1 JIT helper does not link StikJIT" >&2; exit 1; }
+        nm "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" >"$out/helper-symbols.txt"
+        grep -q JITSession "$out/helper-symbols.txt" ||
+            { echo "the $1 JIT helper lacks StikJIT" >&2; exit 1; }
+        test -f "$product/PlugIns/WinPadJITHelper.appex/universal.js" ||
+            { echo "the $1 JIT helper lacks universal.js" >&2; exit 1; }
     fi
     if [ -n "$sim_window_aot" ]; then
         for f in Frameworks/fexaot-window.dylib i386-windows/window.exe; do
