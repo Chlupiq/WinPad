@@ -28,11 +28,13 @@ shift
 # mmdevapi is no import but the COM class dsound creates for its device;
 # cryptbase and cryptsp are where advapi32 forwards its SystemFunction* exports
 # (RtlGenRandom, which mmdevapi reaches; an unresolved forward aborts the call).
+# dpnhpast (DirectPlay NAT helper) is no import either: Mafia loads it at start and
+# stops with "Init error #4214 Unsupported" without it.
 [ $# -gt 0 ] || set -- ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32 \
     dinput8 dinput dsound ddraw winmm ws2_32 tapi32 netapi32 shfolder shell32 \
     comctl32 ole32 combase coml2 oleaut32 rpcrt4 hid setupapi cfgmgr32 wined3d opengl32 \
     msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi \
-    cryptbase cryptsp
+    cryptbase cryptsp dpnhpast
 wine="$work/madeira/wine"
 b="$wine/build-i386"
 out="$work/i386-windows"

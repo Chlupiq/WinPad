@@ -42,9 +42,38 @@ class CompileError(Exception):
     pass
 
 
+# A Mac app started from Finder gets PATH=/usr/bin:/bin:/usr/sbin:/sbin, without Docker Desktop's
+# commands (docker, and docker-credential-desktop, which `docker build` runs).
+DOCKER_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "/Applications/Docker.app/Contents/Resources/bin",
+               os.path.expanduser("~/.docker/bin"))
+
+
+# Docker Desktop's default shared folders on a Mac.
+DOCKER_SHARED = ("/Users", "/Volumes", "/private", "/tmp")
+
+
+def find_docker():
+    found = shutil.which("docker")
+    if not found and sys.platform == "darwin":
+        for d in DOCKER_DIRS:
+            if os.path.isfile(os.path.join(d, "docker")):
+                found = os.path.join(d, "docker")
+                break
+    if not found:
+        raise CompileError("docker not found: install Docker Desktop (docker.com) and start it")
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    extra = [d for d in (os.path.dirname(found),) + (DOCKER_DIRS if sys.platform == "darwin" else ())
+             if os.path.isdir(d) and d not in path]
+    if extra:
+        os.environ["PATH"] = os.pathsep.join(path + extra)
+    return found
+
+
 def default_backend():
     if sys.platform == "darwin":
-        return "simulator"
+        # The packaged app has no WinPad checkout for the simulator's scripts; Docker Desktop
+        # runs the arm64 container natively on Apple Silicon.
+        return "docker" if getattr(sys, "frozen", False) else "simulator"
     if os.name == "nt":
         machine = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")
         return "native" if machine.upper() == "ARM64" else "docker"
@@ -183,9 +212,9 @@ class Docker(Backend):
     mounted at the same paths under /host, so names stay valid in and out."""
     name = "docker"
 
-    def __init__(self, *a, mounts=(), docker="docker", **kw):
+    def __init__(self, *a, mounts=(), docker=None, **kw):
         super().__init__(*a, **kw)
-        self.docker = docker
+        self.docker = docker or find_docker()
         self.mounts = [os.path.abspath(m) for m in mounts]
         # Killing `docker run` leaves its container running, so it has a name to stop it by.
         self.container = f"winpad-translator-{os.getpid()}"
@@ -231,8 +260,29 @@ class Docker(Backend):
     def stop(self):
         subprocess.run([self.docker, "kill", self.container], capture_output=True)
 
+    def shareable_compiler(self):
+        """Docker Desktop on a Mac mounts only shared folders (by default /Users, /Volumes,
+        /private, /tmp, /var/folders), not /Applications with the app's toolkit in it, and the
+        app's own path has a space: copy the toolkit next to the cache directory."""
+        if sys.platform != "darwin":
+            return
+        src = os.path.dirname(os.path.abspath(self.compiler))
+        # Wine in the container also gets the compiler's path, which must not have spaces in it
+        # ("WinPad Translator.app"): the CI runs, which work, never had any.
+        # PyInstaller's Mac app keeps the toolkit as symlinks into Contents/Resources, which
+        # the container can't follow out of the mount: copytree copies the files they point to.
+        linked = os.path.islink(self.compiler)
+        if not linked and " " not in src and any(src == d or src.startswith(d + os.sep) for d in DOCKER_SHARED):
+            return
+        dst = os.path.join(os.path.dirname(self.cache_dir), "toolkit")
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst)
+        self.compiler = os.path.join(dst, os.path.basename(self.compiler))
+        self.log(f"=== toolkit copied to {dst} (Docker Desktop does not share {src})")
+
     def compile(self):
         self.ensure_image()
+        self.shareable_compiler()
         super().compile()
 
 
@@ -245,7 +295,9 @@ class Simulator(Backend):
     def __init__(self, *a, work_dir=None, repo=None, jit_pool_mb=4096, **kw):
         super().__init__(*a, **kw)
         if not work_dir:
-            raise CompileError("the simulator backend needs the WinPad build directory (tests/wine-loader)")
+            raise CompileError("the simulator backend needs the WinPad build directory (tests/wine-loader's work "
+                               "directory, --sim-work-dir); without a WinPad build use the docker backend "
+                               "(Docker Desktop)")
         self.work_dir = work_dir
         self.script = os.path.join(repo or paths.ROOT, "tests", "fex-wow64", "process-all-batches.sh")
         if not os.path.isfile(os.path.join(os.path.dirname(self.script), "..", "wine-loader", "run-host.sh")):

@@ -12,6 +12,15 @@ from . import codemaps, compile as fexcompile, record as recordmod, install as i
 SETTINGS = "winpad-translator.json"
 
 
+def split_game_path(path, exe=""):
+    """A game given as its program: GAME_FOLDER/GAME.EXE -> (GAME_FOLDER, "GAME.EXE"), since the
+    folder the .exe is in is the game. A folder comes back as it is, with EXE."""
+    if path and os.path.isfile(path) and path.lower().endswith(".exe"):
+        folder = os.path.dirname(os.path.abspath(path))
+        return folder, os.path.basename(path)
+    return path, exe
+
+
 @dataclasses.dataclass
 class Project:
     game_dir: str = ""
@@ -127,6 +136,38 @@ def find_in_toolkit(name):
     return ""
 
 
+# Where a Mac usually has the WinPadWine-xcode project (CI artifact unpacked, or game-aot.sh's).
+XCODE_PROJECT_PLACES = ("~/Downloads/WinPadWine-xcode", "~/Desktop/WinPadWine-xcode",
+                        "~/Developer/wine-app/WinPadWine-xcode", "~/WinPadWine-xcode")
+
+
+def is_xcode_project(folder):
+    return bool(folder) and os.path.isdir(os.path.join(folder, "WinPadWine.xcodeproj"))
+
+
+def find_xcode_project():
+    """The WinPadWine-xcode project in one of the usual places, else ""."""
+    for place in XCODE_PROJECT_PLACES:
+        folder = os.path.expanduser(place)
+        if is_xcode_project(folder):
+            return folder
+    return ""
+
+
+def xcode_project_in(folder):
+    """FOLDER if it is the project, or the one project right inside it (a Downloads folder picked)."""
+    if is_xcode_project(folder):
+        return folder
+    try:
+        inside = [os.path.join(folder, n) for n in sorted(os.listdir(folder))]
+    except OSError:
+        inside = []
+    found = [d for d in inside if is_xcode_project(d)]
+    if len(found) == 1:
+        return found[0]
+    raise TranslateError(f"{folder} is not the WinPadWine-xcode project (no WinPadWine.xcodeproj in it)")
+
+
 def default_work_dir(game_dir):
     return os.path.join(os.path.expanduser("~"), "WinPadTranslator", codemaps.slug(os.path.basename(os.path.normpath(game_dir))))
 
@@ -172,8 +213,18 @@ def run(p, log=print):
         raise TranslateError(f"no game folder: {p.game_dir}")
     p.work_dir = p.work_dir or default_work_dir(p.game_dir)
     p.backend = p.backend or fexcompile.default_backend()
-    p.compiler = p.compiler or find_in_toolkit("FEXOfflineCompiler.exe")
-    p.dispatcher = p.dispatcher or find_in_toolkit("dispatcher.bin")
+    if p.backend == "simulator" and not p.sim_work_dir and getattr(sys, "frozen", False):
+        # Saved by an older app: the packaged one has no WinPad build for the simulator.
+        log("=== the simulator backend needs a WinPad build; compiling with docker")
+        p.backend = "docker"
+    if p.xcode_project:
+        p.xcode_project = xcode_project_in(p.xcode_project)
+    # A saved path that is gone (macOS runs a quarantined app from a new random AppTranslocation
+    # folder each launch) falls back to the bundled toolkit.
+    if not (p.compiler and os.path.isfile(p.compiler)):
+        p.compiler = find_in_toolkit("FEXOfflineCompiler.exe") or p.compiler
+    if not (p.dispatcher and os.path.isfile(p.dispatcher)):
+        p.dispatcher = find_in_toolkit("dispatcher.bin") or p.dispatcher
     cache_dir = os.path.join(p.work_dir, "fexcache")
     new = os.path.join(cache_dir, "codemap", "new")
     os.makedirs(new, exist_ok=True)
@@ -293,6 +344,11 @@ def run(p, log=print):
             dest = os.path.join(p.xcode_project, "Frameworks", sdk)
             os.makedirs(dest, exist_ok=True)
             shutil.copyfile(out, os.path.join(dest, p.image_name()))
+            # Xcode runs the project's embed script only when fexaot.dylib changed (its input
+            # file): touch it, so a plain Run picks the new image up without Clean Build Folder.
+            base = os.path.join(dest, "fexaot.dylib")
+            if os.path.isfile(base) and base != os.path.join(dest, p.image_name()):
+                os.utime(base)
             log(f"  -> {dest}")
     if p.xcode_project and p.app_name and os.path.isfile(os.path.join(p.xcode_project, "Info.plist")):
         ipamod.rename_app(os.path.join(p.xcode_project, "Info.plist"), p.app_name)

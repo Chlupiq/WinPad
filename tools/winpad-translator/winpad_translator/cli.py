@@ -13,7 +13,8 @@ def parser():
                     "AOT image fexaot-<game>.dylib the WinPad Wine iPad app runs.")
     ap.add_argument("--version", action="version", version=__version__)
     ap.add_argument("--settings", help=f"read the settings from this file ({project.SETTINGS} in a work folder)")
-    ap.add_argument("--game", dest="game_dir", help="the game's folder, as it is on the iPad")
+    ap.add_argument("--game", dest="game_dir",
+                    help="the game's folder, as it is on the iPad, or its .exe (the folder it is in is the game)")
     ap.add_argument("--work", dest="work_dir", help="where maps, caches and images are kept (default ~/WinPadTranslator/<game>)")
     ap.add_argument("--ipad-maps", action="append", default=[], metavar="FOLDER",
                     help="Documents/fexcache/<game> (or all of fexcache) copied off the iPad, or the zip the app's "
@@ -99,7 +100,7 @@ def parser():
                      help=f"work on the library in FILE (default {library.default_path()}); --ipa, --out-ipa, "
                      "--xcode-project, --app-name and the compiler settings are kept in it")
     lib.add_argument("--add-game", action="append", default=[], metavar="FOLDER",
-                     help="add a game folder (--exe, --ipad-folder apply to it)")
+                     help="add a game folder or its .exe (--exe, --ipad-folder apply to it)")
     lib.add_argument("--remove-game", action="append", default=[], metavar="NAME", help="take a game off the list")
     lib.add_argument("--list-games", action="store_true", help="list the games")
     lib.add_argument("--build", action="store_true",
@@ -221,6 +222,9 @@ def main(argv=None):
             print(f"error: {e}", file=sys.stderr)
             return 1
         return 0
+    if args.game_dir:
+        args.game_dir, exe = project.split_game_path(args.game_dir)
+        args.exe = args.exe or exe or None
     p = project.Project.load(args.settings) if args.settings else project.Project()
     for key, value in vars(args).items():
         if key in NOT_SETTINGS or value in (None, []):

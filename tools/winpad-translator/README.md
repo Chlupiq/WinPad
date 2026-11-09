@@ -66,7 +66,15 @@ Plus:
 Output: `fexaot-<game>.dylib` (`<game>` is the folder name in lower case,
 other characters as `-`, as the app's game library looks for it), optionally
 a copy of the IPA with the image in `Frameworks/` for AltStore, SideStore or
-Sideloadly, or the image copied into a `WinPadWine-xcode` project.
+Sideloadly, or the image copied into a `WinPadWine-xcode` project (on a Mac the window's
+"Xcode project" row; it finds the project in `~/Downloads`, `~/Desktop`,
+`~/Developer/wine-app` or `~` by itself, and touches the project's
+`fexaot.dylib` so a plain Run in Xcode embeds the new image).
+
+The packaged Mac app compiles with `docker` (Docker Desktop): it finds Docker's
+commands outside Finder's PATH, and copies its toolkit (symlinks in the app,
+under `/Applications`, which Docker Desktop does not share) into the work
+folder for the container.
 
 ## Steps
 
@@ -107,7 +115,7 @@ Backends (`--backend`):
 | `simulator` | Mac with Xcode: Wine in an iPad simulator, as `game-aot.sh` | what NFSU2's images were made with; needs a WinPad checkout and its `tests/wine-loader` build (`--sim-work-dir`, `--winpad-repo`) |
 | `native` | Windows on ARM (Snapdragon) | CI job `translator-compile` on `windows-11-arm`: caches byte for byte the simulator's |
 | `wine` | arm64 Linux with Wine 10 or newer (Debian 13, Fedora...; also a Raspberry Pi 5, an Ampere box) | Ubuntu 24.04's Wine 9 hangs on CPUs with pointer authentication (Neoverse N2, Graviton 4...), as on CI's `ubuntu-24.04-arm`: use `docker` there |
-| `docker` on arm64 Linux | the same Debian container, run natively (also Docker on an Apple Silicon Mac) | CI on `ubuntu-24.04-arm`: caches byte for byte the simulator's |
+| `docker` on arm64 Linux | the same Debian container, run natively (also Docker Desktop on an Apple Silicon Mac, the packaged Mac app's default: it has no WinPad checkout for `simulator`) | CI on `ubuntu-24.04-arm`: caches byte for byte the simulator's |
 | `docker` | any x86-64 PC or Mac with Docker (Desktop): Debian's Wine 10 in an arm64 container, emulated by QEMU as a Neoverse N1 (with QEMU's default CPU `wineboot` never returns) | CI on `ubuntu-24.04`: caches byte for byte the simulator's; slower (emulated), but needs nothing else |
 
 An x86-64 Windows PC therefore compiles through Docker Desktop (the default
@@ -131,6 +139,11 @@ winpad-translator --game "D:\Games\My Game" --ipad-maps "D:\from-ipad\new" \
 (CFBundleDisplayName) in the IPA written, or in the Info.plist of
 `--xcode-project`. The bundle identifier stays, so the renamed app replaces
 WinPad Wine on the iPad and keeps its Documents.
+
+`--game` also takes the game's .exe (`--game "D:\Games\My Game\GAME.EXE"`): the folder
+it is in is the game, and the .exe its program (as `--exe`). In the window, **Game program
+(.exe)** picks it and fills the game folder; in the game library, **+** adds a game by its
+.exe and **dir** by its folder.
 
 Then copy the game folder into WinPad Wine's Documents on the iPad and install
 the new IPA. The settings of a game are kept in its work folder

@@ -1,0 +1,64 @@
+# Publishes the testable apps of one green "checks" run as a GitHub pre-release.
+# Runs when this file is pushed (on this branch only); nothing is built here.
+name: test-prerelease
+on:
+  push:
+    branches: [claude/project-thread-00kwi5]
+    paths: [.github/workflows/test-prerelease.yml]
+permissions:
+  contents: write
+  actions: read
+env:
+  RUN_ID: "41910922305"
+  SHA: be8ea8cb7c9cc2adf0bd978b2de703c73f811e08
+  TAG: winpad-test-2026-11-05
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download the run's artifacts
+        run: |
+          set -eux
+          mkdir -p dl out && cd dl
+          for n in WinPadWine-xcode WinPadWine-ipa WinPadTranslator-macos WinPadTranslator-windows WinPadTranslator-toolkit; do
+            gh run download "$RUN_ID" -n "$n" -D "$n"
+          done
+          find . -maxdepth 2 | head -50
+      - name: Pack the release files
+        run: |
+          set -eux
+          cd dl
+          (cd WinPadWine-xcode && zip -qry ../../out/WinPadWine-xcode.zip .)
+          cp WinPadWine-ipa/WinPadWine.ipa ../out/WinPadWine.ipa
+          cp WinPadTranslator-macos/WinPadTranslator-macos.zip ../out/WinPadTranslator-macos.zip
+          cp WinPadTranslator-windows/WinPadTranslator.exe ../out/WinPadTranslator.exe
+          (cd WinPadTranslator-toolkit && zip -qry ../../out/WinPadTranslator-toolkit.zip .)
+          ls -la ../out
+      - name: Create the pre-release
+        run: |
+          set -eux
+          cat > notes.md <<NOTES
+          Testovací sestava (pre-release, nic není mergnuté). Vše z jednoho zeleného CI běhu
+          [#325](https://github.com/Chlupiq/WinPad/actions/runs/$RUN_ID) z PR #106 (commit ${SHA:0:7}),
+          tedy celý řetěz #97 → #98 → #105 (#101–#104) → #106.
+
+          **iPad / iOS**
+          - \`WinPadWine-xcode.zip\` – Xcode projekt WinPad Wine (knihovna her, export map, balíčky .winpad). Rozbalit, otevřít WinPadWine.xcodeproj, v Signing zvolit svůj tým, schéma WinPadWine, cíl iPad, Run.
+          - \`WinPadWine.ipa\` – nepodepsaná IPA téže aplikace; vstup pro převodník (--ipa), na iPad jen po podpisu.
+
+          **macOS**
+          - \`WinPadTranslator-macos.zip\` – WinPad Translator.app (nepodepsaná: pravé tlačítko → Otevřít, nebo \`xattr -dr com.apple.quarantine "WinPad Translator.app"\`).
+
+          **Windows**
+          - \`WinPadTranslator.exe\` – WinPad Translator (SmartScreen: Více informací → Přesto spustit). Překlad na x86-64 PC přes Docker Desktop, nahrávání map přes DynamoRIO.
+
+          **Ostatní**
+          - \`WinPadTranslator-toolkit.zip\` – FEXOfflineCompiler.exe + dispatcher.bin (v aplikacích už je; jen pro běh převodníku z repa).
+
+          Chybí: PR #99 (Game Mode).
+          NOTES
+          gh release create "$TAG" out/* --prerelease --target "$SHA" \
+            --title "WinPad – testovací sestava 2026-11-05 (PR #106)" --notes-file notes.md

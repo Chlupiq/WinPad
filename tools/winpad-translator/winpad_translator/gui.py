@@ -10,6 +10,64 @@ from . import __version__, compile as fexcompile, library, profiles, project, re
 # Windows: the game natively under DynamoRIO; a Mac: in the iPad simulator (Xcode project).
 RECORD_LABEL = "Play and record"
 EXPORT_TYPES = [("WinPad code maps", "*.zip"), ("all", "*")]
+EXE_TYPES = [("Windows program", "*.exe *.EXE *.Exe"), ("all", "*")]
+
+
+def same_folder(a, b):
+    return bool(a) and bool(b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def scrolled_tab(tabs, text):
+    """A notebook tab whose content scrolls (scrollbar, mouse wheel, trackpad), so the buttons
+    at its bottom stay reachable on a small screen. Returns the frame to fill."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    outer = ttk.Frame(tabs)
+    tabs.add(outer, text=text)
+    canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+    bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=bar.set)
+    bar.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    frame = ttk.Frame(canvas, padding=12)
+    item = canvas.create_window((0, 0), window=frame, anchor="nw")
+
+    def fit(*_):
+        # The content is as wide as the window, and at least as tall: the log takes what is left.
+        need = frame.winfo_reqheight()
+        canvas.itemconfigure(item, width=canvas.winfo_width(), height=max(need, canvas.winfo_height()))
+        canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), max(need, canvas.winfo_height())))
+
+    frame.bind("<Configure>", fit)
+    canvas.bind("<Configure>", fit)
+    frame.bind("<Map>", fit)
+    outer.after_idle(fit)
+
+    def inside(widget):
+        while widget is not None:
+            if widget is outer:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def wheel(event):
+        widget = event.widget if not isinstance(event.widget, str) else None
+        # The log and the lists scroll themselves; elsewhere the wheel scrolls the tab.
+        if widget is None or not inside(widget) or widget.winfo_class() in ("Text", "Listbox", "TCombobox"):
+            return
+        if getattr(event, "num", None) in (4, 5):
+            step = -1 if event.num == 4 else 1
+        elif abs(event.delta) >= 120:  # Windows: 120 a notch
+            step = -int(event.delta / 120)
+        else:  # macOS: small deltas from the trackpad and the wheel
+            step = -event.delta
+        if step and canvas.yview() != (0.0, 1.0):
+            canvas.yview_scroll(step, "units")
+
+    for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        outer.bind_all(seq, wheel, add="+")
+    return frame
 
 
 def main():
@@ -19,14 +77,14 @@ def main():
 
     root = tk.Tk()
     root.title(f"WinPad Translator {__version__}")
-    root.minsize(760, 640)
+    root.minsize(760, 420)
+    root.geometry(f"900x{min(900, root.winfo_screenheight() - 80)}")
     p = project.Project()
     lines = queue.Queue()
 
     tabs = ttk.Notebook(root)
     tabs.pack(fill="both", expand=True)
-    frame = ttk.Frame(tabs, padding=12)
-    tabs.add(frame, text="One game")
+    frame = scrolled_tab(tabs, "One game")
     library_tab(tabs)
     frame.columnconfigure(1, weight=1)
     row = 0
@@ -92,7 +150,42 @@ def main():
         ttk.Label(frame, text=hint, foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
         row += 1
 
+    # The game picked as its .exe: the folder the .exe is in is the game (game_dir), and the
+    # .exe its program (exe, relative to the folder).
+    ttk.Label(frame, text="Game program (.exe)").grid(row=row, column=0, sticky="w", pady=2)
+    program = tk.StringVar(value=os.path.join(p.game_dir, p.exe) if p.game_dir and p.exe else "")
+    ttk.Entry(frame, textvariable=program).grid(row=row, column=1, sticky="ew", padx=6)
+    entries["exe"] = tk.StringVar(value=p.exe)
+
+    def pick_program():
+        v = filedialog.askopenfilename(title="The game's .exe (its folder is the game)", filetypes=EXE_TYPES)
+        if v:
+            program.set(os.path.normpath(v))
+
+    ttk.Button(frame, text="…", width=3, command=pick_program).grid(row=row, column=2)
+    row += 1
+    ttk.Label(frame, text="pick the game's .exe: its folder is the game, so the folder below fills itself",
+              foreground="gray").grid(row=row, column=1, sticky="w", padx=6)
+    row += 1
     path_row("Game folder", "game_dir", "dir", "the game as it is in WinPad Wine's Documents on the iPad")
+
+    def program_picked(*_):
+        game_dir, exe = project.split_game_path(program.get().strip())
+        if exe:
+            # The folder first: it loads that game's saved settings, then the .exe picked wins.
+            if not same_folder(entries["game_dir"].get(), game_dir):
+                entries["game_dir"].set(game_dir)
+            entries["exe"].set(exe)
+
+    program.trace_add("write", program_picked)
+
+    def folder_picked(*_):
+        # Another folder picked by hand: the .exe of the last one is not its program.
+        if program.get() and not same_folder(os.path.dirname(program.get()), entries["game_dir"].get()):
+            program.set("")
+            entries["exe"].set("")
+
+    entries["game_dir"].trace_add("write", folder_picked)
     ttk.Label(frame, text="Game profile").grid(row=row, column=0, sticky="w", pady=2)
     try:
         known = list(profiles.load_all())
@@ -129,6 +222,11 @@ def main():
     row += 1
     path_row("WinPad Wine IPA", "ipa", [("IPA", "*.ipa")], "the app the iPad runs (its Wine DLLs must match)")
     path_row("Write IPA with image", "output_ipa", "save", "optional: sign and install it with AltStore/SideStore/Sideloadly")
+    if sys.platform == "darwin":
+        path_row("Xcode project", "xcode_project", "dir",
+                 "the WinPadWine-xcode folder: the image goes into it, then Run in Xcode")
+        if not entries["xcode_project"].get():
+            entries["xcode_project"].set(project.find_xcode_project())
     path_row("Image folder", "output_dir", "dir")
     path_row("Write .winpad package", "package", "package",
              "optional: the game in one file; open it on the iPad from AirDrop or Files")
@@ -167,12 +265,20 @@ def main():
     row += 1
     adv = {}
     for i, (label, key) in enumerate([("FEXOfflineCompiler.exe", "compiler"), ("dispatcher.bin", "dispatcher"),
-                                       ("Work folder", "work_dir"), ("Simulator build dir", "sim_work_dir"),
-                                       ("Xcode project", "xcode_project")]):
+                                       ("Work folder", "work_dir"), ("Simulator build dir", "sim_work_dir")]):
         ttk.Label(advanced, text=label).grid(row=i, column=0, sticky="w")
         var = tk.StringVar(value=getattr(p, key))
         ttk.Entry(advanced, textvariable=var).grid(row=i, column=1, sticky="ew", padx=6)
         adv[key] = var
+
+        def browse_adv(var=var, key=key, label=label):
+            if key in ("compiler", "dispatcher"):
+                v = filedialog.askopenfilename(title=label)
+            else:
+                v = filedialog.askdirectory(title=label, mustexist=key != "work_dir")
+            if v:
+                var.set(v)
+        ttk.Button(advanced, text="…", width=3, command=browse_adv).grid(row=i, column=2)
     half = tk.BooleanVar(value=True)
     rebuild = tk.BooleanVar(value=False)
     ttk.Checkbutton(advanced, text="Half barriers for new blocks (iPad faults on unaligned atomics)",
@@ -255,6 +361,8 @@ def main():
         loaded = project.Project.load(path)
         for key, var in list(entries.items()) + list(adv.items()):
             value = getattr(loaded, key)
+            if key == "xcode_project" and not value:
+                continue
             if isinstance(var, tk.Listbox):
                 var.delete(0, "end")
                 for v in value:
@@ -263,6 +371,8 @@ def main():
                 var.set(value)
         backend.set(loaded.backend or backend.get())
         entries["profile"].set(loaded.profile or "auto")
+        if loaded.exe and loaded.game_dir and not same_folder(os.path.dirname(program.get()), loaded.game_dir):
+            program.set(os.path.join(loaded.game_dir, loaded.exe))
         for key, var in install_vars.items():
             if key != "p12_password":
                 var.set(getattr(loaded, key))
@@ -339,8 +449,7 @@ def library_tab(tabs):
     path = library.default_path()
     lib = library.Library.load(path)
     lines = queue.Queue()
-    frame = ttk.Frame(tabs, padding=12)
-    tabs.add(frame, text="Game library")
+    frame = scrolled_tab(tabs, "Game library")
     frame.columnconfigure(1, weight=1)
 
     ttk.Label(frame, text="Games").grid(row=0, column=0, sticky="nw", pady=2)
@@ -353,8 +462,11 @@ def library_tab(tabs):
             state = "image ready" if os.path.isfile(library.image_of(p)) else "no image yet"
             games.insert("end", f"{p.folder_name()}  ({state})  {p.game_dir}")
 
-    def add_game():
-        folder = filedialog.askdirectory(title="The game folder, as it is in the app's Documents on the iPad")
+    def add_game(as_exe=True):
+        # The game's .exe (its folder is the game), or the folder itself.
+        folder = (filedialog.askopenfilename(title="The game's .exe (its folder is the game)", filetypes=EXE_TYPES)
+                  if as_exe else
+                  filedialog.askdirectory(title="The game folder, as it is in the app's Documents on the iPad"))
         if folder:
             try:
                 lib.add(folder)
@@ -372,8 +484,10 @@ def library_tab(tabs):
     buttons = ttk.Frame(frame)
     buttons.grid(row=0, column=2, sticky="n")
     ttk.Button(buttons, text="+", width=3, command=add_game).pack()
+    ttk.Button(buttons, text="dir", width=3, command=lambda: add_game(as_exe=False)).pack()
     ttk.Button(buttons, text="−", width=3, command=remove_game).pack()
-    ttk.Label(frame, text="each a game folder; its image is fexaot-<folder>.dylib, which the app's library finds",
+    ttk.Label(frame, text="+ picks a game's .exe (its folder is the game), dir the folder; its image is "
+              "fexaot-<folder>.dylib, which the app's library finds",
               foreground="gray").grid(row=1, column=1, sticky="w", padx=6)
 
     ttk.Label(frame, text="iPad code maps").grid(row=2, column=0, sticky="w", pady=2)
