@@ -1,6 +1,6 @@
 {
   "id": "mafia",
-  "version": 2,
+  "version": 3,
   "title": "Mafia",
   "match": [
     {
@@ -24,14 +24,14 @@
     "registry": {
       "HKCU\\Software\\Illusion Softworks\\Mafia": {
         "LS3D_setup": {
-          "hex": "1400000500000004000020000000000000000000000001000000010001000101000100000000010000803f0000803f02000000020000000300000002000000"
+          "hex": "1400000400000003000020000000000000000000000001000000010001000101000100000000010000803f0000803f02000000020000000300000002000000"
         }
       }
     }
   },
   "notes": [
     "Direct3D 8 jde přes d3d8to9 z aplikace; d3d8.dll v herní složce (třeba z Mafia Widescreen Fix) má přednost.",
-    "Nastavení grafiky (LS3D_setup) dává profil předem: bez něj hra spouští Setup.exe, a druhý 32bitový program na iPadu nenaběhne, takže by hra čekala navždy. Hodnota je z instalátoru Lutris (GOG); antialiasing nech vypnutý (pády při startu).",
+    "Nastavení grafiky (LS3D_setup) dává profil předem: bez něj hra spouští Setup.exe, a druhý 32bitový program na iPadu nenaběhne. Rozlišení 1024×768, 32 bitů (obrazovka aplikace; 1280×1024 hra odmítne chybou #4214 Unsupported). Hodnota z instalátoru Lutris (GOG); antialiasing nech vypnutý.",
     "Původní CD verze má SafeDisc 2, který ve Wine nefunguje: použij verzi ze Steamu nebo GOG.",
     "Hra počítá s nejvýš 63 FPS; vyšší snímková frekvence rozbíjí řízení aut."
   ],
