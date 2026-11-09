@@ -67,7 +67,10 @@ targets:
       - Settings.bundle
     dependencies:
       - target: WinPadJITHelper
+      # Built always, embedded by the script below only with WINPAD_VPN = YES: an embedded
+      # extension Xcode would validate after the script had removed it.
       - target: WinPadVPN
+        embed: false
     postBuildScripts:
       # Wine's files for the platform being built, laid out next to the
       # executable as in Madeira's app, and the AOT images in Frameworks/
@@ -96,7 +99,12 @@ targets:
           mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
           cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
           # The app's own VPN only when it is signed for it (WinPad.xcconfig).
-          if [ "${WINPAD_VPN:-NO}" != YES ]; then rm -rf "$app/PlugIns/WinPadVPN.appex"; fi
+          # (signed by its own target with its entitlement; the app's signature seals it).
+          rm -rf "$app/PlugIns/WinPadVPN.appex"
+          if [ "${WINPAD_VPN:-NO}" = YES ]; then
+            mkdir -p "$app/PlugIns"
+            cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$app/PlugIns/"
+          fi
           # StikJIT for the built-in JIT helper (PlugIns/WinPadJITHelper.appex), on a device only.
           stikjit="$PROJECT_DIR/StikJIT/$PLATFORM_NAME/StikJIT.framework"
           rm -rf "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/StikJIT.framework"
