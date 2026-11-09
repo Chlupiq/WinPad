@@ -269,7 +269,10 @@ class Docker(Backend):
         src = os.path.dirname(os.path.abspath(self.compiler))
         # Wine in the container also gets the compiler's path, which must not have spaces in it
         # ("WinPad Translator.app"): the CI runs, which work, never had any.
-        if " " not in src and any(src == d or src.startswith(d + os.sep) for d in DOCKER_SHARED):
+        # PyInstaller's Mac app keeps the toolkit as symlinks into Contents/Resources, which
+        # the container can't follow out of the mount: copytree copies the files they point to.
+        linked = os.path.islink(self.compiler)
+        if not linked and " " not in src and any(src == d or src.startswith(d + os.sep) for d in DOCKER_SHARED):
             return
         dst = os.path.join(os.path.dirname(self.cache_dir), "toolkit")
         shutil.rmtree(dst, ignore_errors=True)
