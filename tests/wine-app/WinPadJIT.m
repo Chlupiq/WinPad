@@ -210,15 +210,13 @@ static NSString* HelperIdentifier(void) {
 }
 
 NSString* WinPadJITBuiltInUnavailableReason(void) {
-#if TARGET_OS_SIMULATOR
-  return @"Vestavěný JIT funguje jen na skutečném iPadu nebo iPhonu.";
-#else
+  // A plain if (not #if), so the device-only helpers stay used in a simulator build (-Werror).
+  if (TARGET_OS_SIMULATOR) return @"Vestavěný JIT funguje jen na skutečném iPadu nebo iPhonu.";
   if (getenv("LC_HOME_PATH")) return @"V LiveContainer vestavěný JIT nejde: použij StikDebug.";
   if (!HelperIdentifier()) return @"V téhle instalaci chybí pomocník JITu (WinPadJITHelper.appex).";
   if (HasGetTaskAllow() == 0)
     return @"Aplikace je podepsaná bez get-task-allow: nainstaluj ji z Xcode, SideStore nebo AltStore.";
   return nil;
-#endif
 }
 
 BOOL WinPadJITCanTurnOn(void) {
@@ -292,17 +290,13 @@ static NSString* VPNIdentifier(void) {
 }
 
 BOOL WinPadVPNBuiltIn(void) {
-#if TARGET_OS_SIMULATOR
-  return NO;
-#else
-  if (!VPNIdentifier()) return NO;
+  if (TARGET_OS_SIMULATOR || !VPNIdentifier()) return NO;
   int known = 0;
   CFTypeRef value = CopyEntitlement(CFSTR("com.apple.developer.networking.networkextension"), &known);
   const BOOL tunnel = value && CFGetTypeID(value) == CFArrayGetTypeID() &&
                       [(__bridge NSArray*)value containsObject:@"packet-tunnel-provider"];
   if (value) CFRelease(value);
   return tunnel;
-#endif
 }
 
 // Starts the app's own VPN (its configuration made on first use: iOS asks the user once) and
