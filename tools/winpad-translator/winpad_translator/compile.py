@@ -42,9 +42,34 @@ class CompileError(Exception):
     pass
 
 
+# A Mac app started from Finder gets PATH=/usr/bin:/bin:/usr/sbin:/sbin, without Docker Desktop's
+# commands (docker, and docker-credential-desktop, which `docker build` runs).
+DOCKER_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "/Applications/Docker.app/Contents/Resources/bin",
+               os.path.expanduser("~/.docker/bin"))
+
+
+def find_docker():
+    found = shutil.which("docker")
+    if not found and sys.platform == "darwin":
+        for d in DOCKER_DIRS:
+            if os.path.isfile(os.path.join(d, "docker")):
+                found = os.path.join(d, "docker")
+                break
+    if not found:
+        raise CompileError("docker not found: install Docker Desktop (docker.com) and start it")
+    path = os.environ.get("PATH", "").split(os.pathsep)
+    extra = [d for d in (os.path.dirname(found),) + (DOCKER_DIRS if sys.platform == "darwin" else ())
+             if os.path.isdir(d) and d not in path]
+    if extra:
+        os.environ["PATH"] = os.pathsep.join(path + extra)
+    return found
+
+
 def default_backend():
     if sys.platform == "darwin":
-        return "simulator"
+        # The packaged app has no WinPad checkout for the simulator's scripts; Docker Desktop
+        # runs the arm64 container natively on Apple Silicon.
+        return "docker" if getattr(sys, "frozen", False) else "simulator"
     if os.name == "nt":
         machine = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")
         return "native" if machine.upper() == "ARM64" else "docker"
@@ -183,9 +208,9 @@ class Docker(Backend):
     mounted at the same paths under /host, so names stay valid in and out."""
     name = "docker"
 
-    def __init__(self, *a, mounts=(), docker="docker", **kw):
+    def __init__(self, *a, mounts=(), docker=None, **kw):
         super().__init__(*a, **kw)
-        self.docker = docker
+        self.docker = docker or find_docker()
         self.mounts = [os.path.abspath(m) for m in mounts]
         # Killing `docker run` leaves its container running, so it has a name to stop it by.
         self.container = f"winpad-translator-{os.getpid()}"
@@ -245,7 +270,9 @@ class Simulator(Backend):
     def __init__(self, *a, work_dir=None, repo=None, jit_pool_mb=4096, **kw):
         super().__init__(*a, **kw)
         if not work_dir:
-            raise CompileError("the simulator backend needs the WinPad build directory (tests/wine-loader)")
+            raise CompileError("the simulator backend needs the WinPad build directory (tests/wine-loader's work "
+                               "directory, --sim-work-dir); without a WinPad build use the docker backend "
+                               "(Docker Desktop)")
         self.work_dir = work_dir
         self.script = os.path.join(repo or paths.ROOT, "tests", "fex-wow64", "process-all-batches.sh")
         if not os.path.isfile(os.path.join(os.path.dirname(self.script), "..", "wine-loader", "run-host.sh")):

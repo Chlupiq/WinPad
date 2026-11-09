@@ -174,6 +174,24 @@ class RehomeTest(unittest.TestCase):
         self.assertEqual(codemaps.ipad_folders(names_in(self.map).values()), ["My Game"])
 
 
+class MacBackendTest(unittest.TestCase):
+    def test_packaged_mac_app_uses_docker(self):
+        with mock.patch.object(fexcompile.sys, "platform", "darwin"):
+            with mock.patch.object(fexcompile.sys, "frozen", True, create=True):
+                self.assertEqual(fexcompile.default_backend(), "docker")
+            self.assertEqual(fexcompile.default_backend(), "simulator")
+
+    def test_docker_found_outside_finders_path(self):
+        with tempfile.TemporaryDirectory() as t:
+            open(os.path.join(t, "docker"), "w").close()
+            with mock.patch.object(fexcompile.sys, "platform", "darwin"), \
+                    mock.patch.object(fexcompile, "DOCKER_DIRS", ("/nonexistent", t)), \
+                    mock.patch.object(fexcompile.shutil, "which", return_value=None), \
+                    mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}):
+                self.assertEqual(fexcompile.find_docker(), os.path.join(t, "docker"))
+                self.assertIn(t, os.environ["PATH"].split(os.pathsep))
+
+
 class IpaTest(unittest.TestCase):
     def test_dlls_out_image_in(self):
         with tempfile.TemporaryDirectory() as t:
