@@ -266,6 +266,15 @@ def main():
         var = tk.StringVar(value=getattr(p, key))
         ttk.Entry(advanced, textvariable=var).grid(row=i, column=1, sticky="ew", padx=6)
         adv[key] = var
+
+        def browse_adv(var=var, key=key, label=label):
+            if key in ("compiler", "dispatcher"):
+                v = filedialog.askopenfilename(title=label)
+            else:
+                v = filedialog.askdirectory(title=label, mustexist=key != "work_dir")
+            if v:
+                var.set(v)
+        ttk.Button(advanced, text="…", width=3, command=browse_adv).grid(row=i, column=2)
     half = tk.BooleanVar(value=True)
     rebuild = tk.BooleanVar(value=False)
     ttk.Checkbutton(advanced, text="Half barriers for new blocks (iPad faults on unaligned atomics)",
