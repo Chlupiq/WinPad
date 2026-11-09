@@ -250,7 +250,8 @@ void WinPadJITBuiltInSend(NSString* operation, void (^done)(BOOL ok, NSString* m
     @"operation" : operation,
     @"pid" : @(getpid()),
     @"pairing" : [pairing base64EncodedStringWithOptions:0],
-    @"txm" : @(winpad_jit_has_txm() != 0),
+    // A BOOL, so that JSON has true/false: the helper's Swift Bool does not decode a 1.
+    @"txm" : [NSNumber numberWithBool:winpad_jit_has_txm() != 0],
   };
   NSData* json = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
   if (!running) running = [NSMutableSet new];

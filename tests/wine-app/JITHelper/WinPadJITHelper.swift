@@ -96,10 +96,14 @@ final class WinPadJITHelperHandler: NSObject, NSExtensionRequestHandling {
     func beginRequest(with context: NSExtensionContext) {
         let info = (context.inputItems.first as? NSExtensionItem)?.userInfo
         let data = info?[WinPadJITRequest.itemKey] as? Data
-        let request = data.flatMap { try? JSONDecoder().decode(WinPadJITRequest.self, from: $0) }
+        var request: WinPadJITRequest?
+        var problem = data == nil ? "Pomocník JITu nedostal žádnou žádost." : ""
+        if let data {
+            do { request = try JSONDecoder().decode(WinPadJITRequest.self, from: data) }
+            catch { problem = "Pomocník JITu žádosti nerozuměl: \(error)" }
+        }
         Work.queue.async {
-            let response = request.map(Work.handle)
-                ?? WinPadJITResponse(success: false, message: "Pomocník JITu nedostal žádnou žádost.")
+            let response = request.map(Work.handle) ?? WinPadJITResponse(success: false, message: problem)
             let item = NSExtensionItem()
             item.userInfo = [WinPadJITResponse.itemKey: (try? JSONEncoder().encode(response)) ?? Data()]
             context.completeRequest(returningItems: [item], completionHandler: nil)
