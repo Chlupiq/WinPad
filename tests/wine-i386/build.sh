@@ -168,9 +168,34 @@ while :; do
     targets="$targets $more"
     extra="$extra $(for t in $more; do n=${t##*/}; echo "${n%.*}"; done)"
 done
+# An extra module that imports what is not here (Direct3D 10-12, the kernel's
+# ntoskrnl.exe, 16-bit krnl386.exe16, winegstreamer...) could never load: out
+# with it, and with what imports it in turn. Direct3D 8/9 come later (build-d3d9.sh).
+while :; do
+    dropped=
+    for m in $extra; do
+        for f in "$out/$m" "$out/$m".*; do
+            [ -f "$f" ] || continue
+            for i in $(llvm-objdump -p "$f" 2>/dev/null | sed -n 's/^ *DLL Name: *//p' | tr 'A-Z' 'a-z'); do
+                case $i in api-ms-win-* | ext-ms-win-* | d3d8.dll | d3d9.dll) continue ;; esac
+                [ -e "$out/$i" ] && continue
+                echo "i386: leaving out ${f##*/}, it imports $i"
+                rm -f "$f"
+                dropped="$dropped $m"
+                break
+            done
+        done
+    done
+    [ -n "$dropped" ] || break
+    kept=
+    for m in $extra; do
+        case " $dropped " in *" $m "*) ;; *) kept="$kept $m" ;; esac
+    done
+    extra=$kept
+done
 # Debug information only of what the default set did not have before (see above).
 for m in $extra; do
-    for f in "$out/$m".*; do
+    for f in "$out/$m" "$out/$m".*; do
         [ -f "$f" ] && llvm-strip --strip-debug "$f"
     done
 done
