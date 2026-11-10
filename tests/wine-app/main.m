@@ -1110,6 +1110,12 @@ static CFTimeInterval fps_shown;
   // space on an iPad. The 32-bit program's 4 GB guest window fits, but not with the 8 GB
   // Madeira wants left over by default.
   setenv("MADEIRA_WOW_MIN_FREE_GB", "2", 1);
+  // A 32-bit program's read-write-execute memory stays plain read-write memory on the host:
+  // FEX translates its x86 code, so the host never runs those pages. Shared with the JIT
+  // pool instead, a page is physically read-only and only its alias takes writes, which a
+  // file read into it (NFS Carbon's race data) does not use. A game's winpad.json can still
+  // set it to 0.
+  setenv("MADEIRA_WOW_RWX_PLAIN", "1", 1);
   setenv("WINEHOST_RETURN", "1", 1);
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
