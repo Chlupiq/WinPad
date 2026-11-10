@@ -844,6 +844,21 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     if (args.count) [said addObject:[@"arguments: " stringByAppendingString:[args componentsJoinedByString:@" "]]];
   }
   [said addObjectsFromArray:AddRegistryDefaults(prefix, s[@"registry"], [game.arch isEqualToString:@"32bit"])];
+  // Empty folders the game writes into (Mafia's Maps): copying a game often leaves them out,
+  // and then its saves fail with "path not found".
+  if ([s[@"folders"] isKindOfClass:NSArray.class] && game.folder.length) {
+    NSString* root = DocumentsPath(game.folder);
+    for (id name in s[@"folders"]) {
+      if (![name isKindOfClass:NSString.class] || ![name length] || [name hasPrefix:@"/"] ||
+          [[name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].pathComponents containsObject:@".."])
+        continue;
+      NSString* path = [root stringByAppendingPathComponent:[name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"]];
+      BOOL dir = NO;
+      if ([NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&dir]) continue;
+      if ([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil])
+        [said addObject:[NSString stringWithFormat:@"made the game's folder %@", name]];
+    }
+  }
   return said;
 }
 
