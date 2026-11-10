@@ -53,6 +53,7 @@ $cc -I"$src" -DWINE_IOS=1 -Wno-implicit-function-declaration \
 for f in "$wine"/server/*.c; do
     name=$(basename "$f" .c)
     case $name in
+        registry-winpad) continue ;;  # a copy a failed run left
         request | main | mach | unicode | fd | window | mapping | queue) f="$src/${name}_ios.c" ;;
         registry)
             # The registry is saved 2 s after a change instead of 30 s: iOS ends an app
