@@ -51,6 +51,7 @@
 
 #import "Library.h"
 #import "WinPadJIT.h"
+#import "WinPadRedist.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
@@ -586,6 +587,9 @@ static NSString* WindowsDir(NSString* path) {
 // (madeira_link_syswow64 in Madeira's WineProcessBridge.m). The links point
 // into the bundle, whose path changes with every install, so they are made
 // anew on every launch.
+// The DirectX DLLs from Microsoft MakePrefix linked in place of Wine's (d3dx9_30...).
+static NSArray<NSString*>* directx_native;
+
 static NSString* MakePrefix(NSString* bundle) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* prefix = DocumentsPath(@"prefix");
@@ -606,6 +610,10 @@ static NSString* MakePrefix(NSString* bundle) {
                              error:nil];
     }
   }
+  // Microsoft's DirectX DLLs, when the app downloaded them (WinPadRedist.m): the ones Wine
+  // lacks, and with the setting also those it has, loaded native first (ApplyGameSettings).
+  directx_native = WinPadDirectXLink([prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"],
+                                     [bundle stringByAppendingPathComponent:@"i386-windows"]);
   // The registry Wine's wineboot would have made: the builtin COM classes
   // the games need, such as DirectSound's audio device enumerator
   // (tests/wine-loader/prefix/system.reg, the same as run-host.sh's prefix).
@@ -773,6 +781,10 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
   NSDictionary* s = game.settings ?: @{};
   if (game.profile) [said addObject:[NSString stringWithFormat:@"game profile %@", game.profile]];
   NSMutableDictionary* dlls = [@{@"dinput8" : @"n,b"} mutableCopy];
+  for (NSString* dll in directx_native) dlls[dll] = @"n,b";
+  if (directx_native.count)
+    [said addObject:[NSString stringWithFormat:@"DirectX from Microsoft in place of Wine's: %@",
+                                               [directx_native componentsJoinedByString:@" "]]];
   NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
   NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
   if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {
