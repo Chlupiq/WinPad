@@ -54,6 +54,18 @@ for f in "$wine"/server/*.c; do
     name=$(basename "$f" .c)
     case $name in
         request | main | mach | unicode | fd | window | mapping | queue) f="$src/${name}_ios.c" ;;
+        registry)
+            # The registry is saved 2 s after a change instead of 30 s: iOS ends an app
+            # without warning (swiped away, or in the background), and the in-process
+            # server never gets to save it then, so a game lost the settings it had just
+            # written. Only changed branches are written (KEY_DIRTY).
+            sed 's/save_period = 30 \* -TICKS_PER_SEC;/save_period = 2 * -TICKS_PER_SEC;/' "$f" >"$out/registry.c"
+            grep -q 'save_period = 2 \* -TICKS_PER_SEC;' "$out/registry.c" || {
+                echo "registry.c: no save_period to change" >&2
+                exit 1
+            }
+            f="$out/registry.c"
+            ;;
     esac
     compile "$f" "$name"
 done

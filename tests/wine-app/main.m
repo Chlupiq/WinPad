@@ -56,6 +56,7 @@
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 int winehost_main(int argc, char* argv[]);
@@ -635,6 +636,25 @@ static NSString* MakePrefix(NSString* bundle) {
   return prefix;
 }
 
+// Gives the owner write access to the game's folder and everything in it where it lacks
+// it, so the game can save its settings and progress there. Files copied off a disc or an
+// installer often come read-only (r--r--r--), which Wine reports to the game as a read-only
+// file, so its saves fail. Returns how many it changed.
+static NSUInteger MakeWritable(NSString* folder) {
+  NSUInteger changed = 0;
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSMutableArray<NSString*>* paths = [NSMutableArray arrayWithObject:folder];
+  for (NSString* rel in [fm enumeratorAtPath:folder]) [paths addObject:[folder stringByAppendingPathComponent:rel]];
+  for (NSString* path in paths) {
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) || S_ISLNK(st.st_mode)) continue;
+    const mode_t want = st.st_mode | S_IWUSR | (S_ISDIR(st.st_mode) ? S_IXUSR | S_IRUSR : S_IRUSR);
+    if (want == st.st_mode) continue;
+    if (!chmod(path.fileSystemRepresentation, want & 07777)) changed++;
+  }
+  return changed;
+}
+
 // A game's settings from its winpad.json (WinPadGameSettings in Library.m: a game profile
 // of WinPad Translator, with the user's own keys over it).
 
@@ -1082,6 +1102,10 @@ static CFTimeInterval fps_shown;
   if (game) {
     NSString* exe = self.game ? self.game.exe : [NSUserDefaults.standardUserDefaults stringForKey:@"game"];
     program = DocumentsPath(exe.length ? exe : @"NFSU2/SPEED2.EXE");
+    // The game saves into its own folder (savegame\...): make it writable.
+    NSString* game_folder = self.game ? DocumentsPath(self.game.folder) : program.stringByDeletingLastPathComponent;
+    const NSUInteger writable = MakeWritable(game_folder);
+    if (writable) printf("WinPad Wine: made %lu read-only files and folders of the game writable\n", (unsigned long)writable);
     // The Ultimate ASI Loader many games carry is a dinput8.dll of their own; the game's
     // winpad.json (its profile) may add more.
     for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))
