@@ -18,7 +18,7 @@ extern "C" {
 #define WINPAD_DIRECTX_URL                                                                       \
   "https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/"         \
   "directx_Jun2010_redist.exe"
-#define WINPAD_DIRECTX_SHA256 "8746ee1a84a083a90e37899d71d50d5c7c015e69688a466aa80447f011780c0d"
+#define WINPAD_DIRECTX_SHA256 "053f76dcbb28802e23341b6a787e3b0791c0fa5c8d4d011b1044172dbf89c73b"
 
 // The SHA-256 of the file PATH as 64 lowercase hex digits into HEX (65 bytes). 0 when
 // done, else -1 with why in ERR.
