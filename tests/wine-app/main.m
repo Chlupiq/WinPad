@@ -1121,6 +1121,9 @@ static CFTimeInterval fps_shown;
     NSString* game_folder = self.game ? DocumentsPath(self.game.folder) : program.stringByDeletingLastPathComponent;
     const NSUInteger writable = MakeWritable(game_folder);
     if (writable) printf("WinPad Wine: made %lu read-only files and folders of the game writable\n", (unsigned long)writable);
+    // Folders the copy of the game lacks (empty ones) are made when the game creates a file in
+    // them (patches/madeira/0009-game-dir-missing-folders).
+    setenv("WINE_IOS_GAME_DIR", game_folder.fileSystemRepresentation, 1);
     // The Ultimate ASI Loader many games carry is a dinput8.dll of their own; the game's
     // winpad.json (its profile) may add more.
     for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))

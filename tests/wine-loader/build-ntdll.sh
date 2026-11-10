@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the unix side of Wine's ntdll the way Madeira's build/ntdll-unix/build.sh
 # does (Madeira's *_ios.c files in place of Wine's), with
-# the patches in patches/madeira (0001: adopt PE images from dylibs; 0005 is
+# the patches in patches/madeira (0001: adopt PE images from dylibs; 0005 and 0009 are
 # for Madeira's wine submodule, the others for build/), into
 # libntdll_unix.a for SDK.
 # Leaves out the unix libraries of other DLLs (GnuTLS, FFmpeg, FreeType):
