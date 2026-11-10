@@ -11,11 +11,12 @@
 #
 # Usage: build.sh WORK_DIR [MODULE...]
 # (default: ntdll kernelbase kernel32, what a program with a window needs and
-# the import closure of tests/wine-i386/imports.c, then the DLLs games of the
-# 2000s commonly import or load (game_dlls_extra: D3DX9, XInput, XAudio2/XACT,
-# the Visual C++ runtimes, DirectMusic, DirectPlay, networking, crypto...), so
-# a game finds them without a build of its own. Whatever any built module
-# imports is built too, until nothing is missing.)
+# the import closure of tests/wine-i386/imports.c, then every other i386 DLL
+# Wine has that can work here (WINE_I386_EXTRA=all; =common: only what games of
+# the 2000s usually need, D3DX9, XInput, XAudio2/XACT, the Visual C++ runtimes,
+# DirectMusic, DirectPlay...; =0: none), so a game finds them without a build
+# of its own. Whatever any built module imports is built too, until nothing is
+# missing.)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
 # Output: WORK_DIR/i386-windows/*.dll, hello.exe, nodep.exe, hook.exe, rtcode.exe, unaligned.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
@@ -40,36 +41,6 @@ shift
     msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi \
     cryptbase cryptsp dpnhpast
 wine="$work/madeira/wine"
-# Only with the default set. Names Wine does not have are left out. Their
-# debug information is stripped (the app would carry it for every game); the
-# default set stays as it is, so the AOT images made for those files still match.
-extra=
-if [ "${WINE_I386_EXTRA-1}" != 0 ] && [ "$*" = "$(echo ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32 \
-    dinput8 dinput dsound ddraw winmm ws2_32 tapi32 netapi32 shfolder shell32 \
-    comctl32 ole32 combase coml2 oleaut32 rpcrt4 hid setupapi cfgmgr32 wined3d opengl32 \
-    msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi \
-    cryptbase cryptsp dpnhpast)" ]; then
-    for m in d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 \
-        d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 \
-        d3dx9_43 d3dcompiler_43 d3dcompiler_47 d3dxof \
-        xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinput9_1_0 \
-        xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 \
-        x3daudio1_0 x3daudio1_1 x3daudio1_2 x3daudio1_3 x3daudio1_4 x3daudio1_5 x3daudio1_6 x3daudio1_7 \
-        xapofx1_1 xapofx1_2 xapofx1_3 xapofx1_4 xapofx1_5 \
-        xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 \
-        xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7 \
-        msvcp60 msvcp70 msvcp71 msvcp80 msvcp90 msvcp100 msvcp110 msvcp120 msvcp140 msvcp140_1 \
-        msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcr110 msvcr120 vcruntime140 concrt140 msvcrt20 msvcrt40 \
-        dmime dmusic dmloader dmsynth dswave dmband dmcompos dmstyle dmscript dsdmo msdmo \
-        dplayx dpnet dpwsockx dpvoice amstream devenum quartz mf mfplat mfreadwrite msvfw32 avifil32 \
-        mciavi32 mciseq mciwave midimap l3codeca.acm imaadp32.acm msadp32.acm msgsm32.acm \
-        wsock32 winhttp wininet urlmon mswsock crypt32 bcrypt secur32 wintrust imagehlp dbghelp psapi \
-        uxtheme comdlg32 winspool.drv gdiplus windowscodecs msimg32 oledlg olepro32 oleacc \
-        riched20 riched32 msxml3 msxml6 mpr userenv dwmapi powrprof wtsapi32 glu32 dxdiagn ddrawex; do
-        [ -d "$wine/dlls/$m" ] && extra="$extra $m"
-    done
-    set -- "$@" $extra
-fi
 b="$wine/build-i386"
 out="$work/i386-windows"
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
@@ -88,6 +59,53 @@ if [ ! -f "$b/config.status" ]; then
     }
 fi
 
+# Only with the default set. Names Wine does not have are left out. Their
+# debug information is stripped (the app would carry it for every game); the
+# default set stays as it is, so the AOT images made for those files still match.
+extra=
+if [ "${WINE_I386_EXTRA:-all}" != 0 ] && [ "$*" = "$(echo ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32 \
+    dinput8 dinput dsound ddraw winmm ws2_32 tapi32 netapi32 shfolder shell32 \
+    comctl32 ole32 combase coml2 oleaut32 rpcrt4 hid setupapi cfgmgr32 wined3d opengl32 \
+    msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi \
+    cryptbase cryptsp dpnhpast)" ]; then
+    # WINE_I386_EXTRA=all (the default): every i386 DLL Wine builds, but not what cannot work
+    # here: Direct3D 8/9 (DXMT's, build-d3d9.sh), Direct3D 10-12, DXGI, Vulkan and OpenCL
+    # (Wine draws those through OpenGL/Vulkan), Wine's own audio, display and device drivers
+    # (the app's unix side has its own) and 16-bit modules. WINE_I386_EXTRA=common: the list below.
+    if [ "${WINE_I386_EXTRA:-all}" = all ]; then
+        for t in $(grep -oE "^dlls/[^/ :]+/i386-windows/[^/ :]+\.(dll|drv|acm|ax|ocx|cpl)" "$b/Makefile" | sort -u); do
+            m=${t#dlls/}
+            m=${m%%/*}
+            case $m in
+            d3d8 | d3d9 | d3d10* | d3d11 | d3d12* | dxgi | vulkan-1 | winevulkan | opencl | wine*.drv | \
+                *.sys | *16 | *.vxd | *test*) continue ;;
+            esac
+            case " $* $extra " in *" $m "*) continue ;; esac
+            extra="$extra $m"
+        done
+    else
+        for m in d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 \
+            d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 \
+            d3dx9_43 d3dcompiler_43 d3dcompiler_47 d3dxof \
+            xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinput9_1_0 \
+            xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 \
+            x3daudio1_0 x3daudio1_1 x3daudio1_2 x3daudio1_3 x3daudio1_4 x3daudio1_5 x3daudio1_6 x3daudio1_7 \
+            xapofx1_1 xapofx1_2 xapofx1_3 xapofx1_4 xapofx1_5 \
+            xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 \
+            xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7 \
+            msvcp60 msvcp70 msvcp71 msvcp80 msvcp90 msvcp100 msvcp110 msvcp120 msvcp140 msvcp140_1 \
+            msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcr110 msvcr120 vcruntime140 concrt140 msvcrt20 msvcrt40 \
+            dmime dmusic dmloader dmsynth dswave dmband dmcompos dmstyle dmscript dsdmo msdmo \
+            dplayx dpnet dpwsockx dpvoice amstream devenum quartz mf mfplat mfreadwrite msvfw32 avifil32 \
+            mciavi32 mciseq mciwave midimap l3codeca.acm imaadp32.acm msadp32.acm msgsm32.acm \
+            wsock32 winhttp wininet urlmon mswsock crypt32 bcrypt secur32 wintrust imagehlp dbghelp psapi \
+            uxtheme comdlg32 winspool.drv gdiplus windowscodecs msimg32 oledlg olepro32 oleacc \
+            riched20 riched32 msxml3 msxml6 mpr userenv dwmapi powrprof wtsapi32 glu32 dxdiagn ddrawex; do
+            [ -d "$wine/dlls/$m" ] && extra="$extra $m"
+        done
+    fi
+    set -- "$@" $extra
+fi
 # WinPad's change to the i386 ntdll, see the patch header. The tree may come
 # from a cache with the patch already applied.
 p="$here/../../patches/wine/0003-i386-ntdll-wow64-bop.patch"
