@@ -11,7 +11,11 @@
 #
 # Usage: build.sh WORK_DIR [MODULE...]
 # (default: ntdll kernelbase kernel32, what a program with a window needs and
-# the import closure of tests/wine-i386/imports.c)
+# the import closure of tests/wine-i386/imports.c, then the DLLs games of the
+# 2000s commonly import or load (game_dlls_extra: D3DX9, XInput, XAudio2/XACT,
+# the Visual C++ runtimes, DirectMusic, DirectPlay, networking, crypto...), so
+# a game finds them without a build of its own. Whatever any built module
+# imports is built too, until nothing is missing.)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
 # Output: WORK_DIR/i386-windows/*.dll, hello.exe, nodep.exe, hook.exe, rtcode.exe, unaligned.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
@@ -36,6 +40,36 @@ shift
     msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi \
     cryptbase cryptsp dpnhpast
 wine="$work/madeira/wine"
+# Only with the default set. Names Wine does not have are left out. Their
+# debug information is stripped (the app would carry it for every game); the
+# default set stays as it is, so the AOT images made for those files still match.
+extra=
+if [ "${WINE_I386_EXTRA-1}" != 0 ] && [ "$*" = "$(echo ntdll kernelbase kernel32 win32u gdi32 user32 advapi32 sechost msvcrt ucrtbase imm32 \
+    dinput8 dinput dsound ddraw winmm ws2_32 tapi32 netapi32 shfolder shell32 \
+    comctl32 ole32 combase coml2 oleaut32 rpcrt4 hid setupapi cfgmgr32 wined3d opengl32 \
+    msacm32 iphlpapi dnsapi nsi netutils shlwapi shcore version mmdevapi \
+    cryptbase cryptsp dpnhpast)" ]; then
+    for m in d3dx9_24 d3dx9_25 d3dx9_26 d3dx9_27 d3dx9_28 d3dx9_29 d3dx9_30 d3dx9_31 d3dx9_32 \
+        d3dx9_33 d3dx9_34 d3dx9_35 d3dx9_36 d3dx9_37 d3dx9_38 d3dx9_39 d3dx9_40 d3dx9_41 d3dx9_42 \
+        d3dx9_43 d3dcompiler_43 d3dcompiler_47 d3dxof \
+        xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinput9_1_0 \
+        xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 \
+        x3daudio1_0 x3daudio1_1 x3daudio1_2 x3daudio1_3 x3daudio1_4 x3daudio1_5 x3daudio1_6 x3daudio1_7 \
+        xapofx1_1 xapofx1_2 xapofx1_3 xapofx1_4 xapofx1_5 \
+        xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 \
+        xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7 \
+        msvcp60 msvcp70 msvcp71 msvcp80 msvcp90 msvcp100 msvcp110 msvcp120 msvcp140 msvcp140_1 \
+        msvcr70 msvcr71 msvcr80 msvcr90 msvcr100 msvcr110 msvcr120 vcruntime140 concrt140 msvcrt20 msvcrt40 \
+        dmime dmusic dmloader dmsynth dswave dmband dmcompos dmstyle dmscript dsdmo msdmo \
+        dplayx dpnet dpwsockx dpvoice amstream devenum quartz mf mfplat mfreadwrite msvfw32 avifil32 \
+        mciavi32 mciseq mciwave midimap l3codeca.acm imaadp32.acm msadp32.acm msgsm32.acm \
+        wsock32 winhttp wininet urlmon mswsock crypt32 bcrypt secur32 wintrust imagehlp dbghelp psapi \
+        uxtheme comdlg32 winspool.drv gdiplus windowscodecs msimg32 oledlg olepro32 oleacc \
+        riched20 riched32 msxml3 msxml6 mpr userenv dwmapi powrprof wtsapi32 glu32 dxdiagn ddrawex; do
+        [ -d "$wine/dlls/$m" ] && extra="$extra $m"
+    done
+    set -- "$@" $extra
+fi
 b="$wine/build-i386"
 out="$work/i386-windows"
 jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
@@ -59,24 +93,70 @@ fi
 p="$here/../../patches/wine/0003-i386-ntdll-wow64-bop.patch"
 git -C "$wine" apply -R --check "$p" 2>/dev/null || git -C "$wine" apply "$p"
 
+# The i386 PE target of module M (dlls/M/i386-windows/M.dll, .drv, .acm...), or nothing.
+target_of() {
+    grep -oE "^dlls/$1/i386-windows/[^/ :]+\.(dll|drv|acm|ax|ocx|cpl)" "$b/Makefile" | sort -u | head -1
+}
 targets=
 for m in "$@"; do
-    t=$(grep -oE "^dlls/$m/i386-windows/[^/ :]+\.dll" "$b/Makefile" | sort -u | head -1)
+    t=$(target_of "$m")
     [ -n "$t" ] || { echo "no i386 target for $m in $b/Makefile" >&2; exit 2; }
     targets="$targets $t"
 done
 echo "i386 modules:$targets"
+: >"$work/make-i386.log"
+make_targets() {
+    # shellcheck disable=SC2086 # a list of make targets
+    if ! make -C "$b" -j"$jobs" "$@" >>"$work/make-i386.log" 2>&1; then
+        grep -E 'error|Error' "$work/make-i386.log" | head -40 >&2
+        exit 1
+    fi
+}
 # shellcheck disable=SC2086 # a list of make targets
-if ! make -C "$b" -j"$jobs" $targets >"$work/make-i386.log" 2>&1; then
-    grep -E 'error|Error' "$work/make-i386.log" | head -40 >&2
-    exit 1
-fi
+make_targets $targets
 
 rm -rf "$out"
 mkdir -p "$out"
 for t in $targets; do
     cp "$b/$t" "$out/"
 done
+# Whatever the modules import, until nothing is missing: the loader stops at the
+# first missing DLL (c0000135). Direct3D 8/9 come from DXMT (build-d3d9.sh), and
+# Wine's own Direct3D 10-12 and DXGI draw through OpenGL, which iOS has not;
+# api-ms-win-* and ext-ms-win-* are API sets ntdll resolves.
+while :; do
+    more=
+    for f in "$out"/*; do
+        llvm-objdump -p "$f" 2>/dev/null | sed -n 's/^ *DLL Name: *//p'
+    done | tr 'A-Z' 'a-z' | sort -u >"$work/i386-imports.txt"
+    while read -r dll; do
+        [ -e "$out/$dll" ] && continue
+        m=${dll%.dll}
+        case $m in
+        api-ms-win-* | ext-ms-win-* | d3d8 | d3d9 | d3d10* | d3d11 | d3d12 | dxgi) continue ;;
+        esac
+        t=$(target_of "$m")
+        [ -n "$t" ] || { echo "i386: nothing builds $dll (imported by a built module)"; continue; }
+        case " $targets $more " in *" $t "*) continue ;; esac
+        more="$more $t"
+    done <"$work/i386-imports.txt"
+    [ -n "$more" ] || break
+    echo "i386 modules they import:$more"
+    # shellcheck disable=SC2086 # a list of make targets
+    make_targets $more
+    for t in $more; do
+        cp "$b/$t" "$out/"
+    done
+    targets="$targets $more"
+    extra="$extra $(for t in $more; do n=${t##*/}; echo "${n%.*}"; done)"
+done
+# Debug information only of what the default set did not have before (see above).
+for m in $extra; do
+    for f in "$out/$m".*; do
+        [ -f "$f" ] && llvm-strip --strip-debug "$f"
+    done
+done
+[ -z "$extra" ] || echo "i386: $(echo $extra | wc -w | tr -d ' ') modules for games beyond the base set, $(du -sh "$out" | cut -f1) in all"
 
 # The test program: i686 PE, entry point of its own, kernel32 import library
 # from this tree.
