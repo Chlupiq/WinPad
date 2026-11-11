@@ -822,6 +822,44 @@ static BOOL BackgroundWaves(void) {
 }
 @end
 
+// The game's picture (Library.h). The settings keep "pictureScaling", "pictureAvoidsCutout" and
+// "gameScreen"; a game's winpad.json "scaling" and "screen" win over them.
+static NSArray<NSString*>* PictureScalings(void) { return @[ @"fit", @"stretch", @"fill" ]; }
+
+NSString* WinPadPictureScaling(NSDictionary* settings) {
+  id own = settings[@"scaling"];
+  if ([own isKindOfClass:NSString.class] && [PictureScalings() containsObject:[own lowercaseString]]) return [own lowercaseString];
+  NSString* set = [NSUserDefaults.standardUserDefaults stringForKey:@"pictureScaling"];
+  return [PictureScalings() containsObject:set] ? set : @"fit";
+}
+
+BOOL WinPadPictureAvoidsCutout(void) {
+  return [NSUserDefaults.standardUserDefaults boolForKey:@"pictureAvoidsCutout"];
+}
+
+CGSize WinPadGameScreen(NSDictionary* settings, CGSize display) {
+  id own = settings[@"screen"];
+  NSString* want = [own isKindOfClass:NSString.class] ? [own lowercaseString]
+                                                     : [NSUserDefaults.standardUserDefaults stringForKey:@"gameScreen"];
+  if (!want.length || [want isEqualToString:@"4:3"]) return CGSizeZero;
+  if ([want isEqualToString:@"wide"]) {
+    const CGFloat across = MAX(display.width, display.height), down = MIN(display.width, display.height);
+    if (down <= 0) return CGSizeZero;
+    // 768 lines as now, as wide as the display's shape makes them (even, at most 2048).
+    const long w = MIN(2048, lround(768 * across / down / 2) * 2);
+    return w > 1024 ? CGSizeMake(w, 768) : CGSizeZero;
+  }
+  NSArray<NSString*>* parts = [want componentsSeparatedByString:@"x"];
+  if (parts.count != 2) return CGSizeZero;
+  const NSInteger w = parts[0].integerValue, h = parts[1].integerValue;
+  return w >= 320 && h >= 200 && w <= 4096 && h <= 4096 ? CGSizeMake(w, h) : CGSizeZero;
+}
+
+// The picture's choices as the settings show them.
+static NSString* PictureScalingName(NSString* scaling) {
+  return @{@"fit" : @"Zachovat tvar", @"stretch" : @"Roztáhnout", @"fill" : @"Přiblížit"}[scaling];
+}
+
 // The settings: touch controls, the controller's keys, the last log, the test programs.
 @interface WinPadLogViewController : UIViewController
 @end
@@ -847,15 +885,16 @@ static BOOL BackgroundWaves(void) {
 }
 @end
 
-// The settings' section 0 is the look; the others follow it, numbered from 0 after it in the code.
-enum { AppearanceSection = 0 };
+// The settings' section 0 is the look, 1 the game's picture; the others follow them, numbered from 0
+// after them in the code.
+enum { AppearanceSection = 0, PictureSection = 1, OtherSections = 2 };
 
 @interface WinPadSettingsViewController : UITableViewController
 @property(nonatomic, copy) void (^run)(NSString* program);
 @property(nonatomic, copy) NSString* directXState;  // the download's progress or its error, or nil
 @end
 
-// The settings' section of Microsoft's DirectX DLLs, counted after the look like the others.
+// The settings' section of Microsoft's DirectX DLLs, counted after the look and the picture like the others.
 enum { DirectXSection = 4 };
 
 // What the DirectX row says: downloaded or not.
@@ -894,17 +933,18 @@ static NSString* DirectXSummary(void) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
-  return 7;
+  return 8;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
   if (section == AppearanceSection) return 4;
-  section -= 1;
+  if (section == PictureSection) return 3;
+  section -= OtherSections;
   return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : section == 3 ? 3 : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"DirectX od Microsoftu", @"O aplikaci" ][section];
+  return @[ @"Vzhled", @"Obraz hry", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"DirectX od Microsoftu", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -912,7 +952,13 @@ static NSString* DirectXSummary(void) {
     return @"Pozadí knihovny a nastavení, na iPadu i iPhonu. Obaly her bez obalu aplikace sama najde na internetu "
            @"podle názvu (Steam, Wikipedie) a uloží jen ten, jehož název sedí; jiný vybereš tlačítkem Obal pod hrou. "
            @"S klíčem SteamGridDB (zdarma: steamgriddb.com › Preferences › API) najde víc a hezčích obalů.";
-  section -= 1;
+  if (section == PictureSection)
+    return @"Zachovat tvar: celý obraz hry v jeho poměru stran, po stranách černé pruhy. Roztáhnout: celý displej, "
+           @"obraz 4:3 se roztáhne do šířky. Přiblížit: celý displej v poměru hry, nahoře a dole se kus obrazu uřízne. "
+           @"Širokoúhlý monitor: hra dostane monitor v poměru stran displeje (na iPhonu 16 Pro 1670×768) a hra, která "
+           @"umí širokoúhlá rozlišení, vykreslí víc scény bez roztažení (vyber ho pak v nastavení hry). "
+           @"Hra to může mít jinak ve svém winpad.json (\"scaling\", \"screen\").";
+  section -= OtherSections;
   if (section == 0) return @"Ovladač na obrazovce se ukáže jen tehdy, když není připojený herní ovladač.";
   if (section == 1)
     return @"Klávesa, kterou hra dostane za každé tlačítko ovladače. Nahoru až doprava jsou křížový ovladač "
@@ -963,7 +1009,24 @@ static NSString* DirectXSummary(void) {
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     return cell;
   }
-  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - 1];
+  if (path.section == PictureSection && path.row == 0) {
+    cell.textLabel.text = @"Obraz";
+    cell.detailTextLabel.text = PictureScalingName(WinPadPictureScaling(nil));
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+  }
+  if (path.section == PictureSection) {
+    cell.textLabel.text = path.row == 1 ? @"Širokoúhlý monitor" : @"Mimo výřez displeje";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = path.row == 1 ? [[NSUserDefaults.standardUserDefaults stringForKey:@"gameScreen"] isEqualToString:@"wide"]
+                              : WinPadPictureAvoidsCutout();
+    toggle.tag = path.row;
+    [toggle addTarget:self action:@selector(pictureChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - OtherSections];
   if (path.section == 0 && path.row == 0) {
     cell.textLabel.text = @"Dotykové ovládání";
     UISwitch* toggle = [UISwitch new];
@@ -1076,6 +1139,35 @@ static NSString* DirectXSummary(void) {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"touchControls"];
 }
 
+- (void)pictureChanged:(UISwitch*)toggle {
+  if (toggle.tag == 1) {
+    if (toggle.on) [NSUserDefaults.standardUserDefaults setObject:@"wide" forKey:@"gameScreen"];
+    else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"gameScreen"];
+  } else {
+    [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"pictureAvoidsCutout"];
+  }
+}
+
+// The picture's choices in a sheet.
+- (void)pickPictureScaling {
+  UIAlertController* sheet = [UIAlertController alertControllerWithTitle:@"Obraz hry"
+                                                                 message:nil
+                                                          preferredStyle:UIAlertControllerStyleActionSheet];
+  __weak UITableView* table = self.tableView;
+  for (NSString* scaling in PictureScalings())
+    [sheet addAction:[UIAlertAction actionWithTitle:PictureScalingName(scaling)
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction* action) {
+                                              [NSUserDefaults.standardUserDefaults setObject:scaling forKey:@"pictureScaling"];
+                                              [table reloadData];
+                                            }]];
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  UITableViewCell* cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:PictureSection]];
+  sheet.popoverPresentationController.sourceView = cell ?: self.view;
+  sheet.popoverPresentationController.sourceRect = cell ? cell.bounds : self.view.bounds;
+  [self presentViewController:sheet animated:YES completion:nil];
+}
+
 - (void)fpsChanged:(UISwitch*)toggle {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"fpsOverlay"];
 }
@@ -1089,7 +1181,7 @@ static NSString* DirectXSummary(void) {
   __weak WinPadSettingsViewController* weak = self;
   void (^show)(NSString*) = ^(NSString* state) {
     weak.directXState = state;
-    [weak.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:DirectXSection + 1] ]
+    [weak.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:DirectXSection + OtherSections] ]
                           withRowAnimation:UITableViewRowAnimationNone];
   };
   show(@"Stahuji…");
@@ -1119,7 +1211,11 @@ static NSString* DirectXSummary(void) {
     if (path.row == 3) [self askSteamGridDBKey];
     return;
   }
-  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - 1];
+  if (path.section == PictureSection) {
+    if (path.row == 0) [self pickPictureScaling];
+    return;
+  }
+  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - OtherSections];
   if (path.section == 1 && path.row < PadCount) {
     WinPadKeyPickerViewController* picker = [WinPadKeyPickerViewController new];
     picker.input = (int)path.row;
@@ -1128,7 +1224,7 @@ static NSString* DirectXSummary(void) {
   }
   if (path.section == 1) {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"padKeys"];
-    [tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
+    [tableView reloadSections:[NSIndexSet indexSetWithIndex:1 + OtherSections] withRowAnimation:UITableViewRowAnimationNone];
     return;
   }
   if (path.section == DirectXSection && path.row == 0) {

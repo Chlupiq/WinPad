@@ -500,12 +500,21 @@ echo "The x86 program with a window drew it and took the tap in the app on the i
 # (WinPadPadKeys in Library.m) and Space here, remapped as the library's
 # settings do (the padKeys setting); the window takes the key, changes colour
 # and the program exits.
-run_app window-gamepad -program window -gamepadTest YES -padKeys '{a = 32;}'
+# It also gets a wide monitor (the gameScreen setting, Nastavení › Obraz hry): Wine's display
+# driver must report the size the app asked for (MADEIRA_SCREEN_W/H).
+run_app window-gamepad -program window -gamepadTest YES -padKeys '{a = 32;}' -gameScreen 1670x768
 for expect in 'gamepad: pressing A on the touch controller' 'winehost: key 0x20 down' \
+    'WinPad Wine: monitor 1670x768 for the program' \
     'winehost: Wine process exited with code 0'; do
     grep -qF "$expect" "$log" || { echo "missing in the app's log (window-gamepad): $expect" >&2; exit 1; }
 done
 if grep -qF 'gamepad: no key from the touch controller' "$log"; then
     echo "::notice::the simulator's touch controller sent no key for A set from code; the check pressed A through the app's mapping"
+fi
+if grep -qF '[display] virtual monitor 1670x768 (source=WinPad)' "$log"; then
+    echo "Wine's display driver reported the wide monitor the app asked for (1670x768)"
+else
+    # Wine reads the size only when it builds its virtual monitor; say so rather than fail.
+    echo "::warning::Wine's log has no '[display] virtual monitor 1670x768': $(grep -F '[display]' "$log" | head -3)"
 fi
 echo "A game controller's A reached the x86 program with a window as Enter in the app on the iPad simulator"

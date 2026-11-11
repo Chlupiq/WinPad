@@ -47,6 +47,20 @@ NSArray<NSURL*>* WinPadWaitingPackages(void);
 // key by key (registry values by name).
 NSDictionary* WinPadGameSettings(NSDictionary* info);
 
+// How a game's picture fills the screen once it draws through Metal (main.m): "fit" (all of
+// it in its own shape, black bars at the sides), "stretch" (the whole screen, the picture
+// stretched to it) or "fill" (the whole screen in the picture's shape, its edges cut off). The
+// game's winpad.json "scaling" wins over the setting (Nastavení › Obraz hry).
+NSString* WinPadPictureScaling(NSDictionary* settings);
+// Whether the picture stays out of an iPhone's camera cutout and rounded corners (left and
+// right safe area in landscape).
+BOOL WinPadPictureAvoidsCutout(void);
+// The monitor the game is told it has (MADEIRA_SCREEN_W/H), or CGSizeZero for Wine's 1024x768.
+// "Širokoúhlý monitor" (the "gameScreen" setting "wide") or the game's winpad.json "screen":
+// "wide" makes it 768 lines tall in the shape of DISPLAY (an iPhone 16 Pro: 1670x768), so a game
+// that lists the monitor's modes can pick a wide one; "WxH" names a size, "4:3" keeps 1024x768.
+CGSize WinPadGameScreen(NSDictionary* settings, CGSize display);
+
 // The inputs of a game controller that become keys (main.m's Gamepads), in the order the
 // settings list them.
 enum { PadUp, PadDown, PadLeft, PadRight, PadA, PadB, PadX, PadY, PadL1, PadR1, PadL2, PadR2, PadMenu, PadOptions,

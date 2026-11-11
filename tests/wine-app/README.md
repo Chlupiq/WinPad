@@ -26,7 +26,8 @@ spustí). Ve složce hry může být:
   WinPad Translator do něj zapíše profil známé hry (`"profile"`: program,
   přepsání DLL, proměnné prostředí, argumenty, hodnoty registru, třeba
   rozlišení). Aplikace hru spustí s nimi; vlastní klíče v `winpad.json`
-  (`title`, `exe`, `args`, `dllOverrides`, `env`, `registry`) mají přednost.
+  (`title`, `exe`, `args`, `dllOverrides`, `env`, `registry`, `scaling`,
+  `screen`) mají přednost.
   Viz tools/winpad-translator/README.md, Game profiles.
 - `cover.png` nebo `cover.jpg`, obal hry. Když chybí, aplikace ho sama
   najde na internetu podle názvu hry (obchod Steam, Wikipedie; s klíčem
@@ -139,6 +140,22 @@ na klávesy (`WinPadPadKeys` v `Library.m`): levá páčka a křížový ovlada�
 (ruční brzda), Y `C` (kamera), LB/RB `Z`/`A` (řazení), Menu Esc, View Enter;
 pravá páčka nemá výchozí klávesu. Každé tlačítko přeřadíš v nastavení knihovny (Y) →
 Mapování tlačítek.
+
+Obraz hry (nastavení knihovny → Obraz hry). Jakmile hra kreslí přes Metal, její
+vrstva zabere celý displej a obraz ji vyplní podle volby: **Zachovat tvar**
+(celý obraz v poměru hry, po stranách černé pruhy; dřív napevno 4:3),
+**Roztáhnout** (celý displej, obraz 4:3 se roztáhne do šířky; na iPhonu asi o
+63 %) nebo **Přiblížit** (celý displej v poměru hry, nahoře a dole se obraz
+uřízne). Škáluje Core Animation (`contentsGravity` vrstvy, `ScalePicture` v
+`main.m`), hra kreslí dál ve svém rozlišení, takže to nic nestojí.
+**Širokoúhlý monitor** řekne hře, že má monitor v poměru stran displeje, 768
+řádků (iPhone 16 Pro: 1670×768; na iPadu 4:3 se nic nemění), přes
+`MADEIRA_SCREEN_W/H`, které čte Madeirin ovladač displeje i DXMT. Seznam režimů
+pak obsahuje standardní rozlišení do tolika pixelů (1280×720, 1366×768…), takže
+hra, která širokoúhlá rozlišení umí, je nabídne a vykreslí víc scény bez
+roztažení. **Mimo výřez displeje** nechá obraz mimo výřez kamery a kulaté rohy
+iPhonu. Hra to může mít ve `winpad.json` po svém: `"scaling": "fit" | "stretch"
+| "fill"`, `"screen": "wide" | "4:3" | "1280x720"`.
 
 Ukazatel FPS (nastavení knihovny → Diagnostika → Ukazatel FPS, nebo Nastavení →
 WinPad Wine → FPS overlay) ukáže v levém horním rohu hry snímky za poslední

@@ -156,6 +156,20 @@ static BOOL metal_fill;
 static CGRect game_rect;
 static BOOL game_has_layer;
 static CALayer* game_layer;
+// How the picture fills the screen (WinPadPictureScaling: fit, stretch or fill) and whether
+// it stays out of an iPhone's camera cutout; set before the game starts.
+static NSString* picture_scaling;
+static BOOL picture_avoids_cutout;
+
+// DXMT presents frames of the game window's size (1024x768) into the layer; Core Animation
+// scales them to the layer's frame as its contentsGravity says.
+static void ScalePicture(CALayer* layer) {
+  layer.contentsGravity = [picture_scaling isEqualToString:@"stretch"] ? kCAGravityResize
+                          : [picture_scaling isEqualToString:@"fill"]  ? kCAGravityResizeAspectFill
+                                                                       : kCAGravityResizeAspect;
+  layer.masksToBounds = YES;
+  layer.backgroundColor = UIColor.blackColor.CGColor;
+}
 
 __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALayer* layer) {
   // On the main thread (host/metal-display.m), so the layer is placed in the
@@ -170,6 +184,7 @@ __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALa
     else [metal_view.layer addSublayer:layer];
     if (metal_fill) {
       // From now on the game has the whole screen (viewDidLayoutSubviews).
+      ScalePicture(layer);
       game_has_layer = YES;
       game_layer = layer;
       frame_view.hidden = YES;
@@ -875,6 +890,7 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
 // WinPad Translator's "Play and record" on a Mac (-recordGame FOLDER, simulator only): the game runs
 // with FEX's JIT, not its image, and FEX writes every block it compiles to the game's code maps.
 @property(nonatomic) BOOL record;
+@property(nonatomic) CGSize display;  // the screen's size in points, for WinPadGameScreen
 @end
 
 // The FPS overlay: the display link looks at Metal's frame count every screen
@@ -924,6 +940,15 @@ static CFTimeInterval fps_shown;
   }
   metal_view = self.view;
   metal_fill = [self.program isEqualToString:@"game"];
+  picture_scaling = WinPadPictureScaling(self.game.settings);
+  picture_avoids_cutout = WinPadPictureAvoidsCutout();
+  // The monitor Wine reports to the program (runWine): the display's size is read here, on the
+  // main thread.
+  for (UIScene* scene in UIApplication.sharedApplication.connectedScenes)
+    if ([scene isKindOfClass:UIWindowScene.class]) {
+      self.display = ((UIWindowScene*)scene).screen.bounds.size;
+      break;
+    }
   if (metal_fill) HardwareKeyboard();
   gamepad_test = [self.program isEqualToString:@"window"] && [NSUserDefaults.standardUserDefaults boolForKey:@"gamepadTest"];
 
@@ -966,10 +991,13 @@ static CFTimeInterval fps_shown;
   [self.view bringSubviewToFront:touch_pad];
   if (self.fps) [self.view bringSubviewToFront:self.fps];
   if (self.status && game_has_layer) {
-    // Once the game draws through Metal its picture fills the screen at 4:3,
-    // the status line and the log hidden (the log stays in Documents/wine.log).
-    const CGFloat w = MIN(b.size.width, b.size.height * 4 / 3), h = w * 3 / 4;
-    game_rect = CGRectMake((b.size.width - w) / 2, (b.size.height - h) / 2, w, h);
+    // Once the game draws through Metal its layer takes the whole screen, the status line
+    // and the log hidden (the log stays in Documents/wine.log); the picture fills it as the
+    // settings say (ScalePicture): in its own shape, stretched, or cut to the screen's shape.
+    // With "Mimo výřez displeje" it leaves out an iPhone's camera cutout and rounded corners
+    // at the sides (the home indicator hides by itself, so not the bottom).
+    const UIEdgeInsets safe = self.view.safeAreaInsets;
+    game_rect = picture_avoids_cutout ? UIEdgeInsetsInsetRect(b, UIEdgeInsetsMake(0, safe.left, 0, safe.right)) : b;
     self.view.backgroundColor = UIColor.blackColor;
     self.status.hidden = YES;
     self.text.hidden = YES;
@@ -1001,7 +1029,10 @@ static CFTimeInterval fps_shown;
 - (void)placeFps {
   if (!self.fps) return;
   const CGSize size = [self.fps sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)];
-  self.fps.frame = CGRectMake(game_rect.origin.x + 6, game_rect.origin.y + 6, size.width + 12, size.height + 6);
+  // In the picture's corner, but never under an iPhone's cutout.
+  const UIEdgeInsets safe = self.view.safeAreaInsets;
+  self.fps.frame = CGRectMake(MAX(game_rect.origin.x, safe.left) + 6, MAX(game_rect.origin.y, safe.top) + 6,
+                              size.width + 12, size.height + 6);
   self.fps.textAlignment = NSTextAlignmentCenter;
 }
 
@@ -1117,6 +1148,20 @@ static CFTimeInterval fps_shown;
   // set it to 0.
   setenv("MADEIRA_WOW_RWX_PLAIN", "1", 1);
   setenv("WINEHOST_RETURN", "1", 1);
+  // The monitor Wine's display driver and DXMT report (Madeira's sysparams_ios.c ios_screen_size,
+  // DXMT's wsi_monitor_headless.cpp): 1024x768 unless "Širokoúhlý monitor" or the game's
+  // winpad.json asks for another. Its modes are the standard ones up to that many pixels, so a
+  // game that lists them can pick a wide one. Set before the game's winpad.json env, which may
+  // still change it.
+  const CGSize screen = WinPadGameScreen(self.game.settings, self.display);
+  if (screen.width > 0) {
+    setenv("MADEIRA_SCREEN_W", [NSString stringWithFormat:@"%.0f", screen.width].UTF8String, 1);
+    setenv("MADEIRA_SCREEN_H", [NSString stringWithFormat:@"%.0f", screen.height].UTF8String, 1);
+    setenv("MADEIRA_SCREEN_SRC", "WinPad", 1);
+    printf("WinPad Wine: monitor %.0fx%.0f for the program (display %.0fx%.0f points)\n", screen.width, screen.height,
+           self.display.width, self.display.height);
+  }
+  if (game) printf("WinPad Wine: picture %s%s\n", picture_scaling.UTF8String, picture_avoids_cutout ? ", out of the cutout" : "");
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
   NSMutableArray<NSString*>* game_args = [NSMutableArray new];
