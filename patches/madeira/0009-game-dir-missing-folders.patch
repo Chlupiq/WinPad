@@ -1,0 +1,134 @@
+From: WinPad
+Subject: [PATCH] ntdll: Make the folders missing in a game's folder when it creates a file there.
+
+A game copied onto the iPad often lacks the empty folders of its install:
+copies leave them out. Mafia keeps a mission's progress in Maps, empty in
+the install; its writes there failed with c000003a (path not found), so the
+position was never saved. Under WINE_IOS, when NtCreateFile is to create a
+file (not FILE_OPEN or FILE_OVERWRITE) and the name is under the game's
+folder (WINE_IOS_GAME_DIR, which the WinPad app sets) with only folders
+missing on the way, the folders are made and the name looked up again. A
+folder that is there in another case is used. \??\Z:\ names only, plain
+ASCII, at most 8 folders per name; each logged as "[game-dir] made missing
+folder <path>".
+
+Applies to willfaust/Madeira at 48f9764 (its wine submodule, 257f271), after
+0005.
+---
+diff --git a/wine/dlls/ntdll/unix/file.c b/wine/dlls/ntdll/unix/file.c
+index bfc7ce0..d0350c1 100644
+--- a/wine/dlls/ntdll/unix/file.c
++++ b/wine/dlls/ntdll/unix/file.c
+@@ -4704,6 +4704,93 @@ static void ios_video_read_note( HANDLE h, unsigned int status, UINT got, LARGE_
+ }
+ #endif
+ 
++#ifdef WINE_IOS
++/* WinPad: a game copied onto the iPad often lacks the empty folders of its install
++ * (Mafia keeps a mission's progress in Maps, empty until then): copies leave empty
++ * folders out. On Windows they are there, so the game's save fails with
++ * STATUS_OBJECT_PATH_NOT_FOUND. When a file is to be created under the game's folder
++ * (WINE_IOS_GAME_DIR, set by the app) and only folders are missing on the way, they are
++ * made here, as the install would have had them. A folder that is there in another case
++ * is used as it is. Only for \??\Z:\ names (the game's folder is on Z:), plain ASCII,
++ * at most 8 folders per name; each is logged as "[game-dir] made missing folder". */
++#include <strings.h>
++
++static BOOL ios_make_missing_game_dirs( const UNICODE_STRING *name )
++{
++    const char *game = getenv( "WINE_IOS_GAME_DIR" );
++    char path[4096];
++    size_t glen, len, i, n, start;
++    unsigned int made = 0;
++    struct stat st;
++
++    if (!game || game[0] != '/' || !name || !name->Buffer) return FALSE;
++    glen = strlen( game );
++    while (glen > 1 && game[glen - 1] == '/') glen--;
++    n = name->Length / sizeof(WCHAR);
++    if (n < 8 || name->Buffer[0] != '\\' || name->Buffer[1] != '?' || name->Buffer[2] != '?' ||
++        name->Buffer[3] != '\\' || (name->Buffer[4] | 0x20) != 'z' || name->Buffer[5] != ':' ||
++        name->Buffer[6] != '\\')
++        return FALSE;
++    /* \??\Z:\a\b\file -> /a/b/file */
++    len = 0;
++    for (i = 6; i < n; i++)
++    {
++        WCHAR c = name->Buffer[i];
++        if (c < 0x20 || c > 0x7e || len + 1 >= sizeof(path)) return FALSE;
++        path[len++] = c == '\\' ? '/' : (char)c;
++    }
++    path[len] = 0;
++    if (len <= glen + 1 || strncmp( path, game, glen ) || path[glen] != '/') return FALSE;
++    if (strstr( path + glen, "/../" ) || strstr( path + glen, "/./" )) return FALSE;
++    /* Only the folders: the last component is the file itself. */
++    while (len > glen && path[len - 1] != '/') len--;
++    if (len <= glen + 1) return FALSE;
++    path[--len] = 0;
++
++    start = glen + 1;
++    while (start < len + 1)
++    {
++        size_t end = start;
++        char saved;
++        while (end < len && path[end] != '/') end++;
++        if (end == start) { start = end + 1; continue; }
++        saved = path[end];
++        path[end] = 0;
++        if (stat( path, &st ))
++        {
++            /* Is it there in another case? */
++            DIR *dir;
++            struct dirent *de;
++            BOOL found = FALSE;
++            path[start - 1] = 0;
++            if ((dir = opendir( start - 1 ? path : "/" )))
++            {
++                while ((de = readdir( dir )))
++                    if (strlen( de->d_name ) == end - start && !strcasecmp( de->d_name, path + start ))
++                    {
++                        memcpy( path + start, de->d_name, end - start );
++                        found = TRUE;
++                        break;
++                    }
++                closedir( dir );
++            }
++            path[start - 1] = '/';
++            if (!found)
++            {
++                if (made >= 8 || mkdir( path, 0777 )) return made > 0;
++                made++;
++                dprintf( 2, "[game-dir] made missing folder %s\n", path );
++            }
++            else if (stat( path, &st ) || !S_ISDIR( st.st_mode )) return made > 0;
++        }
++        else if (!S_ISDIR( st.st_mode )) return made > 0;
++        path[end] = saved;
++        start = end + 1;
++    }
++    return made > 0;
++}
++#endif
++
+ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBUTES *attr,
+                               IO_STATUS_BLOCK *io, LARGE_INTEGER *alloc_size,
+                               ULONG attributes, ULONG sharing, ULONG disposition,
+@@ -4735,6 +4822,18 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
+     }
+     else status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, disposition,
+                                          options & FILE_OPEN_REPARSE_POINT );
++#ifdef WINE_IOS
++    if (status == STATUS_OBJECT_PATH_NOT_FOUND && !(options & FILE_OPEN_BY_FILE_ID) &&
++        !attr->RootDirectory && disposition != FILE_OPEN && disposition != FILE_OVERWRITE &&
++        ios_make_missing_game_dirs( nt_name.Buffer ? &nt_name : attr->ObjectName ))
++    {
++        free( unix_name );
++        free( nt_name.Buffer );
++        new_attr = *attr;
++        status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, disposition,
++                                        options & FILE_OPEN_REPARSE_POINT );
++    }
++#endif
+ 
+     if (status == STATUS_BAD_DEVICE_TYPE)
+     {

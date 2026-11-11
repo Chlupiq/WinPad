@@ -74,6 +74,16 @@ targets:
       - JITPool.c
       - WinPadJIT.h
       - WinPadJIT.m
+      # Microsoft's DirectX DLLs, downloaded when a game needs them, out of Microsoft's
+      # cabinets with libmspack (fetch-mspack.sh).
+      - Redist.h
+      - Redist.c
+      - WinPadRedist.h
+      - WinPadRedist.m
+      - path: mspack
+        compilerFlags: "-w"
+        excludes:
+          - COPYING.LIB
       # The "program" setting in the Settings app (main.m, ProgramName).
       - Settings.bundle
     dependencies:
@@ -135,6 +145,8 @@ targets:
         # The host defines symbols Wine's libraries refer to (thread-locals,
         # the winios hooks); keep them in the executable itself.
         ENABLE_DEBUG_DYLIB: NO
+        # libmspack includes its own headers as <system.h>, <mspack.h>.
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/mspack"
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
         # Wine for the platform being built: lib/iphoneos or lib/iphonesimulator.
         OTHER_LDFLAGS:

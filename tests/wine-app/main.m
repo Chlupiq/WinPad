@@ -51,10 +51,12 @@
 
 #import "Library.h"
 #import "WinPadJIT.h"
+#import "WinPadRedist.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 int winehost_main(int argc, char* argv[]);
@@ -586,6 +588,9 @@ static NSString* WindowsDir(NSString* path) {
 // (madeira_link_syswow64 in Madeira's WineProcessBridge.m). The links point
 // into the bundle, whose path changes with every install, so they are made
 // anew on every launch.
+// The DirectX DLLs from Microsoft MakePrefix linked in place of Wine's (d3dx9_30...).
+static NSArray<NSString*>* directx_native;
+
 static NSString* MakePrefix(NSString* bundle) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* prefix = DocumentsPath(@"prefix");
@@ -606,6 +611,10 @@ static NSString* MakePrefix(NSString* bundle) {
                              error:nil];
     }
   }
+  // Microsoft's DirectX DLLs, when the app downloaded them (WinPadRedist.m): the ones Wine
+  // lacks, and with the setting also those it has, loaded native first (ApplyGameSettings).
+  directx_native = WinPadDirectXLink([prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"],
+                                     [bundle stringByAppendingPathComponent:@"i386-windows"]);
   // The registry Wine's wineboot would have made: the builtin COM classes
   // the games need, such as DirectSound's audio device enumerator
   // (tests/wine-loader/prefix/system.reg, the same as run-host.sh's prefix).
@@ -625,6 +634,25 @@ static NSString* MakePrefix(NSString* bundle) {
     }
   }
   return prefix;
+}
+
+// Gives the owner write access to the game's folder and everything in it where it lacks
+// it, so the game can save its settings and progress there. Files copied off a disc or an
+// installer often come read-only (r--r--r--), which Wine reports to the game as a read-only
+// file, so its saves fail. Returns how many it changed.
+static NSUInteger MakeWritable(NSString* folder) {
+  NSUInteger changed = 0;
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSMutableArray<NSString*>* paths = [NSMutableArray arrayWithObject:folder];
+  for (NSString* rel in [fm enumeratorAtPath:folder]) [paths addObject:[folder stringByAppendingPathComponent:rel]];
+  for (NSString* path in paths) {
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) || S_ISLNK(st.st_mode)) continue;
+    const mode_t want = st.st_mode | S_IWUSR | (S_ISDIR(st.st_mode) ? S_IXUSR | S_IRUSR : S_IRUSR);
+    if (want == st.st_mode) continue;
+    if (!chmod(path.fileSystemRepresentation, want & 07777)) changed++;
+  }
+  return changed;
 }
 
 // A game's settings from its winpad.json (WinPadGameSettings in Library.m: a game profile
@@ -773,6 +801,10 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
   NSDictionary* s = game.settings ?: @{};
   if (game.profile) [said addObject:[NSString stringWithFormat:@"game profile %@", game.profile]];
   NSMutableDictionary* dlls = [@{@"dinput8" : @"n,b"} mutableCopy];
+  for (NSString* dll in directx_native) dlls[dll] = @"n,b";
+  if (directx_native.count)
+    [said addObject:[NSString stringWithFormat:@"DirectX from Microsoft in place of Wine's: %@",
+                                               [directx_native componentsJoinedByString:@" "]]];
   NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
   NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
   if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {
@@ -812,6 +844,21 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     if (args.count) [said addObject:[@"arguments: " stringByAppendingString:[args componentsJoinedByString:@" "]]];
   }
   [said addObjectsFromArray:AddRegistryDefaults(prefix, s[@"registry"], [game.arch isEqualToString:@"32bit"])];
+  // Empty folders the game writes into (Mafia's Maps): copying a game often leaves them out,
+  // and then its saves fail with "path not found".
+  if ([s[@"folders"] isKindOfClass:NSArray.class] && game.folder.length) {
+    NSString* root = DocumentsPath(game.folder);
+    for (id name in s[@"folders"]) {
+      if (![name isKindOfClass:NSString.class] || ![name length] || [name hasPrefix:@"/"] ||
+          [[name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].pathComponents containsObject:@".."])
+        continue;
+      NSString* path = [root stringByAppendingPathComponent:[name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"]];
+      BOOL dir = NO;
+      if ([NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&dir]) continue;
+      if ([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil])
+        [said addObject:[NSString stringWithFormat:@"made the game's folder %@", name]];
+    }
+  }
   return said;
 }
 
@@ -1063,6 +1110,12 @@ static CFTimeInterval fps_shown;
   // space on an iPad. The 32-bit program's 4 GB guest window fits, but not with the 8 GB
   // Madeira wants left over by default.
   setenv("MADEIRA_WOW_MIN_FREE_GB", "2", 1);
+  // A 32-bit program's read-write-execute memory stays plain read-write memory on the host:
+  // FEX translates its x86 code, so the host never runs those pages. Shared with the JIT
+  // pool instead, a page is physically read-only and only its alias takes writes, which a
+  // file read into it (NFS Carbon's race data) does not use. A game's winpad.json can still
+  // set it to 0.
+  setenv("MADEIRA_WOW_RWX_PLAIN", "1", 1);
   setenv("WINEHOST_RETURN", "1", 1);
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
@@ -1070,6 +1123,13 @@ static CFTimeInterval fps_shown;
   if (game) {
     NSString* exe = self.game ? self.game.exe : [NSUserDefaults.standardUserDefaults stringForKey:@"game"];
     program = DocumentsPath(exe.length ? exe : @"NFSU2/SPEED2.EXE");
+    // The game saves into its own folder (savegame\...): make it writable.
+    NSString* game_folder = self.game ? DocumentsPath(self.game.folder) : program.stringByDeletingLastPathComponent;
+    const NSUInteger writable = MakeWritable(game_folder);
+    if (writable) printf("WinPad Wine: made %lu read-only files and folders of the game writable\n", (unsigned long)writable);
+    // Folders the copy of the game lacks (empty ones) are made when the game creates a file in
+    // them (patches/madeira/0009-game-dir-missing-folders).
+    setenv("WINE_IOS_GAME_DIR", game_folder.fileSystemRepresentation, 1);
     // The Ultimate ASI Loader many games carry is a dinput8.dll of their own; the game's
     // winpad.json (its profile) may add more.
     for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))

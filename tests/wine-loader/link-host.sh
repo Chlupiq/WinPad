@@ -82,9 +82,25 @@ sed 's/^/  /' "$out/missing"
     printf '%s\n' '  if (!*seen) { *seen = 1; fprintf(stderr, "winehost: stub %s called\n", name); }'
     echo '  return 0;'
     echo '}'
+    # A unix call table (nsi_unix_call_wow64_funcs...) is data: a function stub in its place
+    # was read as the table, and a 32-bit game's call jumped into the stub's instructions
+    # (NFS Carbon asking nsi.dll for its network adapters). It gets a table of entries
+    # that answer STATUS_NOT_SUPPORTED, which the DLLs handle.
+    echo 'static long winehost_unix_call_unsupported(void* args) { (void)args; return 0xC00000BBL; }'
     i=0
     while read -r sym; do
         name=${sym#_}
+        case $name in
+        *_unix_call_funcs | *_unix_call_wow64_funcs)
+            echo "static int seen_$i;"
+            echo "static long unix_call_$i(void* args) { winehost_stub(\"$name\", &seen_$i); return winehost_unix_call_unsupported(args); }"
+            echo "void* const table_$i[64] __asm__(\"$sym\") = {"
+            echo "  $(for _ in $(seq 64); do printf '(void*)unix_call_%s, ' "$i"; done)"
+            echo "};"
+            i=$((i + 1))
+            continue
+            ;;
+        esac
         echo "static int seen_$i;"
         echo "long stub_$i(void) __asm__(\"$sym\");"
         echo "long stub_$i(void) { return winehost_stub(\"$name\", &seen_$i); }"

@@ -53,6 +53,7 @@
 #import "Covers.h"
 #import "Package.h"
 #import "WinPadJIT.h"
+#import "WinPadRedist.h"
 
 #import <GameController/GameController.h>
 #import <PhotosUI/PhotosUI.h>
@@ -850,7 +851,17 @@ enum { AppearanceSection = 0 };
 
 @interface WinPadSettingsViewController : UITableViewController
 @property(nonatomic, copy) void (^run)(NSString* program);
+@property(nonatomic, copy) NSString* directXState;  // the download's progress or its error, or nil
 @end
+
+// The settings' section of Microsoft's DirectX DLLs, counted after the look like the others.
+enum { DirectXSection = 4 };
+
+// What the DirectX row says: downloaded or not.
+static NSString* DirectXSummary(void) {
+  const NSUInteger n = WinPadDirectXDLLs().count;
+  return n ? [NSString stringWithFormat:@"Staženo, %lu DLL", (unsigned long)n] : @"Nestaženo";
+}
 
 @implementation WinPadSettingsViewController
 - (instancetype)init {
@@ -882,7 +893,7 @@ enum { AppearanceSection = 0 };
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
-  return 6;
+  return 7;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
@@ -892,7 +903,7 @@ enum { AppearanceSection = 0 };
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"O aplikaci" ][section];
+  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"DirectX od Microsoftu", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -912,6 +923,10 @@ enum { AppearanceSection = 0 };
     return @"S JITem hra běží bez vlastního AOT obrazu: co ještě neběželo, FEX přeloží za běhu. JIT zapíná "
            @"vestavěný pomocník (potřebuje párovací soubor a LocalDevVPN nebo vestavěnou VPN), nebo aplikace StikDebug. Bez JITu hra "
            @"běží ze svého AOT obrazu a interpretu. Návod je pod štítkem JIT v knihovně.";
+  if (section == DirectXSection)
+    return @"Originální DLL od Microsoftu (D3DX9, D3DX10/11, XInput, XAudio2, XACT…) z jeho instalačky DirectX "
+           @"(červen 2010, asi 95 MB), stažené přímo od Microsoftu. Hra, které nějaká chybí, je dostane vždy; "
+           @"s přepínačem je dostanou všechny hry místo verzí z Wine.";
   return @"Hry se přidávají ve Finderu: iPad → Soubory → WinPad Wine, každá ve své složce.";
 }
 
@@ -992,6 +1007,17 @@ enum { AppearanceSection = 0 };
     cell.textLabel.text = @"Stav";
     cell.detailTextLabel.text = WinPadJITStatus();
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+  } else if (path.section == DirectXSection && path.row == 0) {
+    cell.textLabel.text = WinPadDirectXDLLs().count ? @"Stáhnout znovu" : @"Stáhnout od Microsoftu";
+    cell.detailTextLabel.text = self.directXState ?: DirectXSummary();
+    cell.textLabel.textColor = WinPadDirectXDownloading() ? UIColor.secondaryLabelColor : UIColor.systemBlueColor;
+  } else if (path.section == DirectXSection) {
+    cell.textLabel.text = @"Používat místo verzí z Wine";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = WinPadDirectXPreferred();
+    [toggle addTarget:self action:@selector(directXChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
   } else {
     NSDictionary* info = NSBundle.mainBundle.infoDictionary;
     cell.textLabel.text = path.row == 0 ? @"Verze" : @"Hry";
@@ -1053,6 +1079,34 @@ enum { AppearanceSection = 0 };
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"fpsOverlay"];
 }
 
+- (void)directXChanged:(UISwitch*)toggle {
+  WinPadDirectXSetPreferred(toggle.on);
+}
+
+- (void)downloadDirectX {
+  if (WinPadDirectXDownloading()) return;
+  __weak WinPadSettingsViewController* weak = self;
+  void (^show)(NSString*) = ^(NSString* state) {
+    weak.directXState = state;
+    [weak.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:DirectXSection + 1] ]
+                          withRowAnimation:UITableViewRowAnimationNone];
+  };
+  show(@"Stahuji…");
+  WinPadDirectXDownload(
+      ^(double fraction) {
+        show(fraction < 1 ? [NSString stringWithFormat:@"Stahuji %d %%", (int)(fraction * 100)] : @"Rozbaluji…");
+      },
+      ^(NSString* error) {
+        show(error ? @"Nepovedlo se" : nil);
+        if (!error || !weak) return;
+        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"DirectX se nestáhl"
+                                                                       message:error
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [weak presentViewController:alert animated:YES completion:nil];
+      });
+}
+
 - (void)jitChanged:(UISwitch*)toggle {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:toggle.tag == 0 ? @"jit" : @"jitStikDebug"];
 }
@@ -1074,6 +1128,10 @@ enum { AppearanceSection = 0 };
   if (path.section == 1) {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"padKeys"];
     [tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
+    return;
+  }
+  if (path.section == DirectXSection && path.row == 0) {
+    [self downloadDirectX];
     return;
   }
   if (path.section != 2 || path.row == 0) return;
@@ -1322,6 +1380,8 @@ enum { AppearanceSection = 0 };
 - (void)waitForJITThen:(void (^)(void))start;
 - (void)refreshJIT;
 - (void)openJITGuide;
+- (void)offerDirectX;
+- (void)downloadDirectXFor:(NSString*)dll;
 - (void)openSettings;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
@@ -1556,6 +1616,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [self openJITGuide];
   }
 #endif
+  [self offerDirectX];
   static BOOL tested;
   if (tested || ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
   tested = YES;
@@ -2043,6 +2104,60 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.jitBadge.configuration = config;
   self.jitBadge.accessibilityLabel = on ? @"JIT je zapnutý" : @"JIT je vypnutý, ťukni pro návod";
   [self.view setNeedsLayout];
+}
+
+// The last game run stopped because a DLL of Microsoft's DirectX was missing (Wine has no
+// file of it): offers the download, once for that run.
+- (void)offerDirectX {
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] || self.presentedViewController ||
+      self.installing || WinPadDirectXDownloading())
+    return;
+  NSString* dll = WinPadMissingDLLOfLastRun();
+  if (!dll || !WinPadDirectXProvides(dll) || [WinPadDirectXDLLs() containsObject:dll]) return;
+  NSString* log = [Documents() stringByAppendingPathComponent:@"wine.log"];
+  NSDate* date = [NSFileManager.defaultManager attributesOfItemAtPath:log error:nil].fileModificationDate;
+  NSString* key = [NSString stringWithFormat:@"%@ %.0f", dll, date.timeIntervalSince1970];
+  if ([[NSUserDefaults.standardUserDefaults stringForKey:@"directXOffered"] isEqualToString:key]) return;
+  [NSUserDefaults.standardUserDefaults setObject:key forKey:@"directXOffered"];
+  NSString* text = [NSString stringWithFormat:@"Hra potřebuje %@, kterou má DirectX od Microsoftu. Stáhnout ho "
+                                              @"(asi 95 MB, přímo od Microsoftu)?",
+                                              dll];
+  UIAlertController* ask = [UIAlertController alertControllerWithTitle:@"Chybí DLL"
+                                                               message:text
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Teď ne" style:UIAlertActionStyleCancel handler:nil]];
+  __weak LibraryViewController* weak = self;
+  [ask addAction:[UIAlertAction actionWithTitle:@"Stáhnout"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* action) {
+                                          [weak downloadDirectXFor:dll];
+                                        }]];
+  [self presentViewController:ask animated:YES completion:nil];
+}
+
+- (void)downloadDirectXFor:(NSString*)dll {
+  UIAlertController* busy = [UIAlertController alertControllerWithTitle:@"Stahuji DirectX"
+                                                                message:@"Od Microsoftu…"
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+  [self presentViewController:busy animated:YES completion:nil];
+  __weak LibraryViewController* weak = self;
+  WinPadDirectXDownload(
+      ^(double fraction) {
+        busy.message = fraction < 1 ? [NSString stringWithFormat:@"%d %%", (int)(fraction * 100)] : @"Rozbaluji…";
+      },
+      ^(NSString* error) {
+        [busy dismissViewControllerAnimated:YES completion:^{
+          const BOOL got = !error && [WinPadDirectXDLLs() containsObject:dll];
+          NSString* text = error         ? error
+                           : got         ? @"Hotovo. Spusť hru znovu."
+                                         : [NSString stringWithFormat:@"DirectX je stažený, ale %@ v něm není.", dll];
+          UIAlertController* result = [UIAlertController alertControllerWithTitle:error ? @"DirectX se nestáhl" : @"DirectX od Microsoftu"
+                                                                          message:text
+                                                                   preferredStyle:UIAlertControllerStyleAlert];
+          [result addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+          [weak presentViewController:result animated:YES completion:nil];
+        }];
+      });
 }
 
 - (void)openJITGuide {

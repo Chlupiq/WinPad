@@ -1,0 +1,107 @@
+From: WinPad
+Subject: [PATCH] virtual: Read a file into guest memory that is shared with the JIT pool.
+
+On iOS a page a program makes executable is physically RX, shared with the
+JIT pool, and only its RW alias takes writes. read() into it fails with
+EFAULT, and so did NtReadFile: NFS Carbon reads a race's data into a buffer
+whose first page it had made PAGE_EXECUTE_READ for the previous race, the
+buffer kept the old bytes, and the game followed a pointer out of them
+(read of 0xB7A5AB6A at NFSC.exe+0x498a75).
+
+virtual_locked_read/pread: when the read still fails with EFAULT and the
+buffer touches a pool-aliased page, the data is read into a bounce buffer
+and copied in 16 KB page by page, through the alias where there is one.
+Logged as "[read-alias] WinPad #N" (first 8).
+
+Applies to willfaust/Madeira at 48f9764 (build/), after 0001-0010.
+---
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index 462c685..ca80452 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -20503,6 +20503,57 @@ unsigned int virtual_locked_server_call( void *req_ptr )
+ /***********************************************************************
+  *           virtual_locked_read
+  */
++#ifdef WINE_IOS
++/* WinPad: a read() into guest memory a program made executable fails with EFAULT on iOS.
++ * Such a page is physically RX, shared with the JIT pool, and only its RW alias takes
++ * writes (ios_jit_anon_alias_lookup). NFS Carbon reads a race's data with ReadFile into a
++ * buffer whose first page it had made PAGE_EXECUTE_READ for the previous race: the read
++ * failed, the buffer kept the old bytes and the game followed a pointer out of them. When
++ * a read fails with EFAULT and the buffer touches such a page, the data is read into a
++ * bounce buffer and copied in page by page, through the alias where there is one. */
++static BOOL ios_range_has_jit_alias( const void *addr, size_t size )
++{
++    uintptr_t a = (uintptr_t)addr, end = a + size;
++    while (a < end)
++    {
++        if (ios_jit_anon_alias_lookup( a )) return TRUE;
++        a = (a | 0x3fff) + 1;
++    }
++    return FALSE;
++}
++
++static ssize_t ios_alias_bounce_read( int fd, void *addr, size_t size, off_t offset, BOOL positional )
++{
++    static int logged;
++    unsigned char *tmp = malloc( size ? size : 1 );
++    const unsigned char *src;
++    uintptr_t a = (uintptr_t)addr;
++    ssize_t ret, left;
++
++    if (!tmp) { errno = ENOMEM; return -1; }
++    ret = positional ? pread( fd, tmp, size, offset ) : read( fd, tmp, size );
++    if (ret > 0)
++    {
++        for (src = tmp, left = ret; left > 0; )
++        {
++            size_t chunk = 0x4000 - (a & 0x3fff);
++            uintptr_t rw = ios_jit_anon_alias_lookup( a );
++            if (chunk > (size_t)left) chunk = left;
++            memcpy( rw ? (void *)rw : (void *)a, src, chunk );
++            a += chunk; src += chunk; left -= chunk;
++        }
++        if (logged < 8)
++        {
++            logged++;
++            dprintf( 2, "[read-alias] WinPad #%d read %zd bytes into %p (+0x%zx) through the exec alias\n",
++                     logged, ret, addr, size );
++        }
++    }
++    free( tmp );
++    return ret;
++}
++#endif
++
+ ssize_t virtual_locked_read( int fd, void *addr, size_t size )
+ {
+     sigset_t sigset;
+@@ -20520,6 +20571,13 @@ ssize_t virtual_locked_read( int fd, void *addr, size_t size )
+         if (has_write_watch) update_write_watches( addr, size, max( 0, ret ));
+     }
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++#ifdef WINE_IOS
++    if (ret == -1 && err == EFAULT && ios_range_has_jit_alias( addr, size ))
++    {
++        ret = ios_alias_bounce_read( fd, addr, size, 0, FALSE );
++        err = ret == -1 ? errno : 0;
++    }
++#endif
+     errno = err;
+     return ret;
+ }
+@@ -20545,6 +20603,13 @@ ssize_t virtual_locked_pread( int fd, void *addr, size_t size, off_t offset )
+         if (has_write_watch) update_write_watches( addr, size, max( 0, ret ));
+     }
+     server_leave_uninterrupted_section( &virtual_mutex, &sigset );
++#ifdef WINE_IOS
++    if (ret == -1 && err == EFAULT && ios_range_has_jit_alias( addr, size ))
++    {
++        ret = ios_alias_bounce_read( fd, addr, size, offset, TRUE );
++        err = ret == -1 ? errno : 0;
++    }
++#endif
+     errno = err;
+     return ret;
+ }
