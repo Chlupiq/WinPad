@@ -346,7 +346,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     game.image = own ?: game.bundleImage;
     game.imageInFolder = own != nil;
     game.folderImageNote = note;
-    for (NSString* f in files) {
+    game.cover = [UIImage imageWithContentsOfFile:WinPadOwnCoverPath(folder)];
+    for (NSString* f in game.cover ? @[] : files) {
       if ([@[ @"cover.png", @"cover.jpg", @"cover.jpeg" ] containsObject:f.lowercaseString]) {
         game.cover = [UIImage imageWithContentsOfFile:[dir stringByAppendingPathComponent:f]];
         break;
@@ -1332,7 +1333,7 @@ static NSString* DirectXSummary(void) {
 }
 @end
 
-@interface LibraryViewController () <UIContextMenuInteractionDelegate>
+@interface LibraryViewController ()
 @property(nonatomic, strong) NSArray<WinPadGame*>* games;
 @property(nonatomic) NSInteger focus;
 @property(nonatomic, strong) WinPadBackdrop* backdrop;
@@ -1571,6 +1572,16 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     fake.title = [cover_test stringByAppendingString:@"_v1.2 (GOG)"];
     NSMutableString* report = [NSMutableString stringWithFormat:@"query: %@\n", WinPadCoverQuery(fake)];
     NSString* path = [Documents() stringByAppendingPathComponent:@"covers.txt"];
+    // Saving into a game folder copied read-only (build-xcode.sh makes "Cover Game" so).
+    WinPadGame* ro = [WinPadGame new];
+    ro.folder = @"Cover Game";
+    ro.title = @"Cover Game";
+    UIImage* red = [[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(20, 30)] imageWithActions:^(UIGraphicsImageRendererContext* ctx) {
+      [UIColor.redColor setFill];
+      UIRectFill(CGRectMake(0, 0, 20, 30));
+    }];
+    NSError* save_error = nil;
+    [report appendFormat:@"save read-only: %@\n", WinPadSaveCover(ro, red, &save_error) ? @"ok" : save_error.localizedDescription];
     WinPadFindCovers(cover_test, 0, ^(NSArray<WinPadCover*>* covers, NSError* error) {
       if (error) [report appendFormat:@"error: %@\n", error.localizedDescription];
       for (WinPadCover* c in covers) [report appendFormat:@"cover: %@ | %@ | %@\n", c.source, c.name, c.urls.firstObject];
@@ -1691,7 +1702,17 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     ShowCover(cover, placeholder, self.games[i]);
     [card addSubview:cover];
     [card addTarget:self action:@selector(tapCard:) forControlEvents:UIControlEventTouchUpInside];
-    [card addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:self]];
+    // A long press: the game's cover (a button's own menu; it opens on a long press).
+    __weak LibraryViewController* weak_menu = self;
+    WinPadGame* menu_game = self.games[i];
+    card.menu = [UIMenu menuWithTitle:menu_game.title
+                             children:@[ [UIAction actionWithTitle:@"Najít obal"
+                                                             image:[UIImage systemImageNamed:@"photo"]
+                                                        identifier:nil
+                                                           handler:^(UIAction* action) {
+                                                             [weak_menu pickCoverFor:menu_game];
+                                                           }] ]];
+    card.showsMenuAsPrimaryAction = NO;
     [self.row addSubview:card];
     [self.cards addObject:card];
   }
@@ -1738,26 +1759,6 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self presentViewController:nav animated:YES completion:nil];
 }
 
-// A long press on a tile: its game's cover.
-- (UIContextMenuConfiguration*)contextMenuInteraction:(UIContextMenuInteraction*)interaction
-                       configurationForMenuAtLocation:(CGPoint)location {
-  const NSInteger i = interaction.view.tag;
-  if (i < 0 || i >= (NSInteger)self.games.count) return nil;
-  WinPadGame* game = self.games[(NSUInteger)i];
-  __weak LibraryViewController* weak = self;
-  return [UIContextMenuConfiguration
-      configurationWithIdentifier:nil
-                  previewProvider:nil
-                   actionProvider:^UIMenu*(NSArray<UIMenuElement*>* suggested) {
-                     UIAction* find = [UIAction actionWithTitle:@"Najít obal"
-                                                          image:[UIImage systemImageNamed:@"magnifyingglass"]
-                                                     identifier:nil
-                                                        handler:^(UIAction* action) {
-                                                          [weak pickCoverFor:game];
-                                                        }];
-                     return [UIMenu menuWithTitle:game.title children:@[ find ]];
-                   }];
-}
 
 - (void)showFocus {
   for (UIButton* card in self.cards) {
@@ -1863,8 +1864,15 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     self.tags.frame = CGRectMake(m, y + title_h + 8, w - pw - 16, 26);
     self.play.frame = CGRectMake(m + w - pw, y + 6, pw, 48);
     [self titleExport:YES];
-    self.exportMaps.frame = CGRectMake(m + w - pw, y + 6 + 48 + 8, pw, 44);
-    self.coverButton.frame = CGRectMake(m + w - pw, y + 6 + 48 + 8 + (self.exportMaps.hidden ? 0 : 52), pw, 44);
+    // Under it Obal, and the export beside it when the game has maps: one row, which an
+    // iPhone on its side has room for.
+    const CGFloat row2 = y + 6 + 48 + 8;
+    if (self.exportMaps.hidden) {
+      self.coverButton.frame = CGRectMake(m + w - pw, row2, pw, 44);
+    } else {
+      self.coverButton.frame = CGRectMake(m + w - pw - 8 - 110, row2, 110, 44);
+      self.exportMaps.frame = CGRectMake(m + w - pw, row2, pw, 44);
+    }
     self.info.hidden = self.hints.hidden = YES;
   } else {
     self.heroTitle.frame = CGRectMake(m, y, MIN(w, 900), title_h);

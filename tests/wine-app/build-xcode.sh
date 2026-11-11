@@ -356,7 +356,14 @@ grep -qiF "[Software\\\\Wow6432Node\\\\WinPad\\\\$run_id]" "$docs/prefix/system.
 # Covers from the internet (Covers.m): what Steam, Wikipedia (and SteamGridDB, with a key) find
 # for a title, and the first one loaded. The sources are outside CI's control, so nothing found
 # is only a warning.
-rm -f "$docs/covers.txt"
+rm -f "$docs/covers.txt" "$docs/.covers/Cover Game.jpg"
+# A game copied off a disc: read-only files in a read-only folder.
+[ -d "$docs/Cover Game" ] && chmod -R u+w "$docs/Cover Game"
+rm -rf "$docs/Cover Game"
+mkdir -p "$docs/Cover Game"
+cp "$sim_app/i386-windows/hello.exe" "$docs/Cover Game/GAME.EXE"
+chmod 444 "$docs/Cover Game/GAME.EXE"
+chmod 555 "$docs/Cover Game"
 xcrun simctl launch "$udid" "$bundle" -coverTest "Need for Speed Underground 2"
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/covers.txt" 2>/dev/null && break
@@ -365,6 +372,12 @@ done
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the cover search ---"
 cat "$docs/covers.txt" || true
+grep -qF 'save read-only: ok' "$docs/covers.txt" 2>/dev/null &&
+    { [ -f "$docs/Cover Game/cover.jpg" ] || [ -f "$docs/.covers/Cover Game.jpg" ]; } ||
+    { echo "a cover of a read-only game folder was not saved" >&2; exit 1; }
+ls -la "$docs/Cover Game" "$docs/.covers" 2>/dev/null || true
+chmod -R u+w "$docs/Cover Game"
+rm -rf "$docs/Cover Game"
 grep -qF 'query: Need for Speed Underground 2' "$docs/covers.txt" 2>/dev/null ||
     { echo "the cover search did not clean up the folder name" >&2; exit 1; }
 grep -q '^loaded: .* [1-9][0-9]*x[1-9]' "$docs/covers.txt" 2>/dev/null ||

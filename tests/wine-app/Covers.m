@@ -20,6 +20,7 @@
 #import <PhotosUI/PhotosUI.h>
 
 #include <ctype.h>
+#include <sys/stat.h>
 
 static NSString* Documents(void) {
   return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -259,6 +260,10 @@ void WinPadLoadCover(WinPadCover* cover, BOOL thumb, void (^done)(UIImage*, NSDa
   LoadFrom(urls, 0, done);
 }
 
+NSString* WinPadOwnCoverPath(NSString* folder) {
+  return [[Documents() stringByAppendingPathComponent:@".covers"] stringByAppendingPathComponent:[folder stringByAppendingString:@".jpg"]];
+}
+
 static NSString* GameDir(WinPadGame* game) {
   return [Documents() stringByAppendingPathComponent:game.folder];
 }
@@ -284,14 +289,30 @@ BOOL WinPadSaveCover(WinPadGame* game, UIImage* image, NSError** error) {
       return NO;
     }
   }
+  // A game copied off a disc is often read-only, its folder too: the owner may write it (main.m
+  // does the same for the whole folder when the game starts).
+  struct stat st;
+  if (!stat(dir.fileSystemRepresentation, &st) && (st.st_mode & S_IWUSR) == 0)
+    chmod(dir.fileSystemRepresentation, (st.st_mode | S_IWUSR | S_IXUSR | S_IRUSR) & 07777);
+  NSString* own = WinPadOwnCoverPath(game.folder);
+  [fm removeItemAtPath:own error:nil];
   for (NSString* f in [fm contentsOfDirectoryAtPath:dir error:nil])
-    if ([@[ @"cover.png", @"cover.jpg", @"cover.jpeg" ] containsObject:f.lowercaseString])
-      [fm removeItemAtPath:[dir stringByAppendingPathComponent:f] error:nil];
+    if ([@[ @"cover.png", @"cover.jpg", @"cover.jpeg" ] containsObject:f.lowercaseString]) {
+      NSString* path = [dir stringByAppendingPathComponent:f];
+      chmod(path.fileSystemRepresentation, 0644);
+      [fm removeItemAtPath:path error:nil];
+    }
   if (!jpeg) {
     game.cover = nil;
     return YES;
   }
-  if (![jpeg writeToFile:[dir stringByAppendingPathComponent:@"cover.jpg"] options:NSDataWritingAtomic error:error]) return NO;
+  NSError* folder_error = nil;
+  if (![jpeg writeToFile:[dir stringByAppendingPathComponent:@"cover.jpg"] options:NSDataWritingAtomic error:&folder_error]) {
+    // Still not writable: the app's own copy, which the library takes first.
+    NSLog(@"WinPad Wine: cover for %@ not in its folder (%@), in %@", game.folder, folder_error.localizedDescription, own);
+    [fm createDirectoryAtPath:own.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+    if (![jpeg writeToFile:own options:NSDataWritingAtomic error:error]) return NO;
+  }
   game.cover = [UIImage imageWithData:jpeg];
   return YES;
 }

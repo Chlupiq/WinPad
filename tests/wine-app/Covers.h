@@ -25,8 +25,11 @@ void WinPadFindCovers(NSString* query, long steam_app_id, void (^done)(NSArray<W
 void WinPadLoadCover(WinPadCover* cover, BOOL thumb, void (^done)(UIImage* image, NSData* data));
 
 // Saves IMAGE as the game's cover (cover.jpg in its folder; other cover.* removed), or with nil
-// removes it. NO with why in *error.
+// removes it. NO with why in *error. A folder that stays read-only gets its cover in the app's
+// own Documents/.covers/FOLDER.jpg (WinPadOwnCoverPath), which the library takes first.
 BOOL WinPadSaveCover(WinPadGame* game, UIImage* image, NSError** error);
+
+NSString* WinPadOwnCoverPath(NSString* folder);
 
 // The title the game is searched by: its title without what folder names add (_, ., "GOG"...).
 NSString* WinPadCoverQuery(WinPadGame* game);
