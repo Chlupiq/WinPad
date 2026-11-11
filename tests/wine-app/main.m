@@ -269,10 +269,14 @@ static void ReadPad(GCExtendedGamepad* pad) {
   const float tilt = 0.5f;  // how far a stick or trigger goes before its key is down
   GCControllerDirectionPad *dpad = pad.dpad, *stick = pad.leftThumbstick, *right = pad.rightThumbstick;
   const BOOL in[PadCount] = {
-      [PadUp] = dpad.up.pressed || stick.yAxis.value > tilt,
-      [PadDown] = dpad.down.pressed || stick.yAxis.value < -tilt,
-      [PadLeft] = dpad.left.pressed || stick.xAxis.value < -tilt,
-      [PadRight] = dpad.right.pressed || stick.xAxis.value > tilt,
+      [PadUp] = dpad.up.pressed,
+      [PadDown] = dpad.down.pressed,
+      [PadLeft] = dpad.left.pressed,
+      [PadRight] = dpad.right.pressed,
+      [PadLUp] = stick.yAxis.value > tilt,
+      [PadLDown] = stick.yAxis.value < -tilt,
+      [PadLLeft] = stick.xAxis.value < -tilt,
+      [PadLRight] = stick.xAxis.value > tilt,
       [PadA] = pad.buttonA.pressed,
       [PadB] = pad.buttonB.pressed,
       [PadX] = pad.buttonX.pressed,
@@ -310,7 +314,9 @@ typedef enum { TouchButton, TouchStick, TouchDpad } TouchKind;
 // The touch controller, laid out as an Xbox controller over the game: the left
 // stick above the d-pad on the left, A B X Y above the right stick on the right,
 // LT and LB in the top left corner, RT and RB in the top right one, View and
-// Menu between them. Its parts are see-through and take several
+// Menu between them. In the PlayStation look (WinPadPadStyle) the d-pad is above
+// the left stick and the buttons are ✕ ○ □ △, L1 L2 R1 R2, Create and Options;
+// in Nintendo's B A Y X, L ZL R ZR, − and +. Its parts are see-through and take several
 // fingers at once; a finger can slide from button to button. Touches
 // elsewhere go to the views beneath it.
 @interface WinPadTouchPad : UIView
@@ -321,6 +327,7 @@ typedef enum { TouchButton, TouchStick, TouchDpad } TouchKind;
   NSArray<WinPadTouchPart*>* _parts;
   NSMapTable<UITouch*, WinPadTouchPart*>* _touches;
   BOOL _pressed[PadCount];  // press:down:, CI's
+  BOOL _dpadOnTop;          // the PlayStation look: the d-pad above the left stick
 }
 
 static UIView* TouchCircle(NSString* text, UIColor* color) {
@@ -366,20 +373,25 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     [parts addObject:part];
     return part;
   };
+  NSString* style = WinPadPadStyle();
+  _dpadOnTop = [style isEqualToString:@"playstation"];
   UIColor* white = UIColor.whiteColor;
-  add(TouchStick, PadUp, @"L", white);
+  // The face buttons' colours: Xbox's green, red, blue, yellow; PlayStation's blue cross, red
+  // circle, pink square, green triangle; Nintendo's are plain.
+  const uint32_t faces[3][4] = {{0x73D94D, 0xF2594D, 0x4D99FF, 0xFFCC33},
+                                {0x7FA8FF, 0xFF6666, 0xF08CD0, 0x4DD9A6},
+                                {0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF}};
+  const int look = _dpadOnTop ? 1 : [style isEqualToString:@"nintendo"] ? 2 : 0;
+  add(TouchStick, PadLUp, WinPadPadLabel(PadLUp, style), white);
   add(TouchDpad, PadUp, nil, white);
-  add(TouchStick, PadRUp, @"R", white);
-  add(TouchButton, PadA, @"A", [UIColor colorWithRed:0.45 green:0.85 blue:0.3 alpha:1]);
-  add(TouchButton, PadB, @"B", [UIColor colorWithRed:0.95 green:0.35 blue:0.3 alpha:1]);
-  add(TouchButton, PadX, @"X", [UIColor colorWithRed:0.3 green:0.6 blue:1 alpha:1]);
-  add(TouchButton, PadY, @"Y", [UIColor colorWithRed:1 green:0.8 blue:0.2 alpha:1]);
-  add(TouchButton, PadL2, @"LT", white);
-  add(TouchButton, PadL1, @"LB", white);
-  add(TouchButton, PadR2, @"RT", white);
-  add(TouchButton, PadR1, @"RB", white);
-  add(TouchButton, PadOptions, @"View", white);
-  add(TouchButton, PadMenu, @"Menu", white);
+  add(TouchStick, PadRUp, WinPadPadLabel(PadRUp, style), white);
+  for (int b = PadA; b <= PadY; b++) {
+    const uint32_t c = faces[look][b - PadA];
+    add(TouchButton, b, WinPadPadLabel(b, style),
+        [UIColor colorWithRed:(c >> 16) / 255.0 green:(c >> 8 & 0xff) / 255.0 blue:(c & 0xff) / 255.0 alpha:1]);
+  }
+  for (int b = PadL1; b <= PadOptions; b++) add(TouchButton, b, WinPadPadLabel(b, style), white);
+  printf("gamepad: touch controller in the %s look\n", style.UTF8String);
   _parts = parts;
   return self;
 }
@@ -406,16 +418,19 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     ((UILabel*)part.view).font = [UIFont systemFontOfSize:MIN(w, h) * 0.38 weight:UIFontWeightBold];
   };
   // The sticks: a base of 2.2 u, the knob 1.1 u.
-  for (WinPadTouchPart* stick in @[ [self part:PadUp kind:TouchStick], [self part:PadRUp kind:TouchStick] ]) {
-    const BOOL l = stick.input == PadUp;
-    place(stick, l ? left + 1.1 * u : right - 4.4 * u, l ? bottom - 3.0 * u : bottom - 1.3 * u, 2.2 * u, 2.2 * u);
+  for (WinPadTouchPart* stick in @[ [self part:PadLUp kind:TouchStick], [self part:PadRUp kind:TouchStick] ]) {
+    const BOOL l = stick.input == PadLUp;
+    // The PlayStation look: the left stick low and further in, where the d-pad is in Xbox's.
+    if (l && _dpadOnTop) place(stick, left + 3.7 * u, bottom - 1.3 * u, 2.2 * u, 2.2 * u);
+    else place(stick, l ? left + 1.1 * u : right - 4.4 * u, l ? bottom - 3.0 * u : bottom - 1.3 * u, 2.2 * u, 2.2 * u);
     stick.radius = 1.1 * u;
     stick.knob.frame = CGRectMake(0.55 * u, 0.55 * u, 1.1 * u, 1.1 * u);
     stick.knob.layer.cornerRadius = 0.55 * u;
     ((UILabel*)stick.knob).font = [UIFont systemFontOfSize:0.4 * u weight:UIFontWeightBold];
   }
   WinPadTouchPart* dpad = [self part:PadUp kind:TouchDpad];
-  place(dpad, left + 3.7 * u, bottom - 1.4 * u, 2.7 * u, 2.7 * u);
+  if (_dpadOnTop) place(dpad, left + 1.35 * u, bottom - 3.4 * u, 2.7 * u, 2.7 * u);
+  else place(dpad, left + 3.7 * u, bottom - 1.4 * u, 2.7 * u, 2.7 * u);
   dpad.radius = 1.35 * u;
   const CGFloat arm = 0.85 * u, c = 1.35 * u;
   const CGPoint arms[4] = {{c, c - 0.9 * u}, {c, c + 0.9 * u}, {c - 0.9 * u, c}, {c + 0.9 * u, c}};

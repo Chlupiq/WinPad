@@ -138,8 +138,15 @@ LT/RT, View a Menu (Nastavení → WinPad Wine → Touch controls). Tlačítka s
 na klávesy (`WinPadPadKeys` v `Library.m`): levá páčka a křížový ovladač jsou
 šipky, RT plyn (šipka nahoru), LT brzda (šipka dolů), A Enter, B Esc, X mezerník
 (ruční brzda), Y `C` (kamera), LB/RB `Z`/`A` (řazení), Menu Esc, View Enter;
-pravá páčka nemá výchozí klávesu. Každé tlačítko přeřadíš v nastavení knihovny (Y) →
-Mapování tlačítek.
+pravá páčka nemá výchozí klávesu. Každé tlačítko i každý směr páček přeřadíš v
+nastavení knihovny (Y) → Mapování tlačítek. Levá páčka má vlastní klávesy (do té
+doby je tím, čím křížový ovladač), řádky „Celý křížový ovladač / Celá levá páčka /
+Celá pravá páčka“ nastaví čtyři směry naráz (šipky, WASD, IJKL, nic).
+Ovládání → Rozvržení ovladače (`padStyle`: auto, xbox, playstation, nintendo;
+auto podle připojeného ovladače) mění názvy tlačítek v nastavení a vzhled
+ovladače na obrazovce: PlayStation má ✕ ○ □ △, L1/L2/R1/R2, Create/Options a
+křížový ovladač nad levou páčkou, Nintendo B A Y X, L/ZL/R/ZR, −/+. Tlačítka
+jsou podle místa (spodní je vždy `a` v `padKeys`).
 
 Obraz hry (nastavení knihovny → Obraz hry). Jakmile hra kreslí přes Metal, její
 vrstva zabere celý displej a obraz ji vyplní podle volby: **Zachovat tvar**
