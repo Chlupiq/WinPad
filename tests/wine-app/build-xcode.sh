@@ -382,6 +382,47 @@ grep -qF 'query: Need for Speed Underground 2' "$docs/covers.txt" 2>/dev/null ||
     { echo "the cover search did not clean up the folder name" >&2; exit 1; }
 grep -q '^loaded: .* [1-9][0-9]*x[1-9]' "$docs/covers.txt" 2>/dev/null ||
     echo "::warning::the cover search found or loaded no cover (no internet on the runner?)"
+grep -q '^cover button: visible' "$docs/covers.txt" ||
+    { echo "the library's Obal button is not on the iPad's screen" >&2; exit 1; }
+
+# The same on an iPhone, which runs the library on its side and smaller: Obal must be on the
+# screen there too, with a game that has code maps (Obal beside the export, the tightest).
+iphone=$(xcrun simctl list devices available -j | python3 -I -c '
+import json, sys
+best = None
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    if ".iOS-" not in runtime:
+        continue
+    version = tuple(int(x) for x in runtime.rsplit(".iOS-", 1)[1].split("-"))
+    for d in devices:
+        if d["name"].startswith("iPhone") and "SE" not in d["name"] and (best is None or version > best[0]):
+            best = (version, d["udid"])
+print(best[1] if best else "")')
+if [ -z "$iphone" ]; then
+    echo "::warning::no iPhone simulator: the library's iPhone layout was not checked"
+else
+    xcrun simctl boot "$iphone" 2>/dev/null || true
+    xcrun simctl bootstatus "$iphone" -b >/dev/null
+    xcrun simctl install "$iphone" "$sim_app"
+    phone_docs="$(xcrun simctl get_app_container "$iphone" "$bundle" data)/Documents"
+    rm -rf "$phone_docs/Phone Game" "$phone_docs/fexcache/Phone Game" "$phone_docs/covers.txt"
+    mkdir -p "$phone_docs/Phone Game" "$phone_docs/fexcache/Phone Game/codemap/new"
+    cp "$sim_app/i386-windows/hello.exe" "$phone_docs/Phone Game/GAME.EXE"
+    cp "$maps/1234.133456789.bin" "$phone_docs/fexcache/Phone Game/codemap/new/" 2>/dev/null ||
+        echo map >"$phone_docs/fexcache/Phone Game/codemap/new/1234.1.bin"
+    xcrun simctl launch "$iphone" "$bundle" -coverTest "Need for Speed Underground 2"
+    for _ in $(seq 60); do
+        grep -q '== finished' "$phone_docs/covers.txt" 2>/dev/null && break
+        sleep 1
+    done
+    xcrun simctl io "$iphone" screenshot "$out/library-screens/iphone.png" >/dev/null 2>&1 || true
+    xcrun simctl terminate "$iphone" "$bundle" 2>/dev/null || true
+    echo "--- the cover search on an iPhone ---"
+    cat "$phone_docs/covers.txt" || true
+    xcrun simctl shutdown "$iphone" 2>/dev/null || true
+    grep -q '^cover button: visible' "$phone_docs/covers.txt" ||
+        { echo "the library's Obal button is not on the iPhone's screen" >&2; exit 1; }
+fi
 
 # WinPad Translator takes the zip as it is: Test Game's map, the run-time code and the CPU features.
 echo "--- the exported zip ---"

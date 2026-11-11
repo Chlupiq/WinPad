@@ -1572,6 +1572,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     fake.title = [cover_test stringByAppendingString:@"_v1.2 (GOG)"];
     NSMutableString* report = [NSMutableString stringWithFormat:@"query: %@\n", WinPadCoverQuery(fake)];
     NSString* path = [Documents() stringByAppendingPathComponent:@"covers.txt"];
+    __weak LibraryViewController* weak_test = self;
     // Saving into a game folder copied read-only (build-xcode.sh makes "Cover Game" so).
     WinPadGame* ro = [WinPadGame new];
     ro.folder = @"Cover Game";
@@ -1586,6 +1587,21 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
       if (error) [report appendFormat:@"error: %@\n", error.localizedDescription];
       for (WinPadCover* c in covers) [report appendFormat:@"cover: %@ | %@ | %@\n", c.source, c.name, c.urls.firstObject];
       void (^finish)(void) = ^{
+        // Is "Obal" on the screen, inside the safe area and not under another button (an
+        // iPhone on its side is short: build-xcode.sh runs this on one too).
+        LibraryViewController* me = weak_test;
+        [me.view layoutIfNeeded];
+        const CGRect safe = UIEdgeInsetsInsetRect(me.view.bounds, me.view.safeAreaInsets);
+        const CGRect obal = me.coverButton.frame;
+        BOOL covered = NO;
+        for (UIView* other in @[ me.play, me.exportMaps, me.tags, me.heroTitle ])
+          if (!other.hidden && CGRectIntersectsRect(CGRectInset(other.frame, 1, 1), obal)) covered = YES;
+        [report appendFormat:@"cover button: %@ %@ in %@\n",
+                             !me || me.coverButton.hidden || !me.games.count ? @"hidden"
+                             : !CGRectContainsRect(safe, obal)               ? @"outside"
+                             : covered                                       ? @"covered"
+                                                                             : @"visible",
+                             NSStringFromCGRect(obal), NSStringFromCGRect(safe)];
         [report appendString:@"== finished\n"];
         [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
       };
@@ -1861,7 +1877,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     // Title and tags on the left, Spustit on the right, side by side.
     const CGFloat pw = MAX(play.width, 140);
     self.heroTitle.frame = CGRectMake(m, y, w - pw - 16, title_h);
-    self.tags.frame = CGRectMake(m, y + title_h + 8, w - pw - 16, 26);
+    // Narrower when Obal sits beside the export, left of Spustit's column.
+    self.tags.frame = CGRectMake(m, y + title_h + 8, w - pw - 16 - (self.exportMaps.hidden ? 0 : 118), 26);
     self.play.frame = CGRectMake(m + w - pw, y + 6, pw, 48);
     [self titleExport:YES];
     // Under it Obal, and the export beside it when the game has maps: one row, which an
