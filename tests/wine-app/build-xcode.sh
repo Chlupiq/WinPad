@@ -330,7 +330,9 @@ PY
 : >"$maps/1234.133456790.bin"
 echo code >"$maps/runtime/rtcode-1.fexrc"
 echo 'AFP=1' >"$maps/hostprobe.txt"
-xcrun simctl launch "$udid" "$bundle" -libraryTest YES
+# The test presses right and A from the focused game: start from Plain, so right is Test Game
+# whatever folders sort before it (Mafia does).
+xcrun simctl launch "$udid" "$bundle" -libraryTest YES -lastGame Plain
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
     sleep 1
