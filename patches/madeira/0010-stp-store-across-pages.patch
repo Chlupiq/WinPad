@@ -1,0 +1,100 @@
+From: WinPad
+Subject: [PATCH] signal: Emulate a 32-byte Q-pair store that runs past an exec page's alias.
+
+NFS Carbon froze while loading a race: it reads data into a buffer it then
+makes PAGE_EXECUTE_READWRITE, so those pages are physically RX with a JIT
+pool RW alias, and a backward memset's STP Q1,Q1,[X1] at 0x...3ffc wrote
+the last 4 bytes of such a page and 28 of the next, a plain page with no
+alias. The write-fault emulator (ml629) wanted the whole 32 bytes in one
+alias, refused ("[stp-emul] ml629 REFUSING: 32B span leaves the alias"),
+and the main thread died on the BUS error.
+
+Each byte now goes to its own place: its page's alias, or the address
+itself where its region is writable. Only if a byte has neither is the
+store refused as before. Logged as "[stp-emul] WinPad #N split a 32B
+store across pages" (first 4).
+
+Applies to willfaust/Madeira at 48f9764 (build/), after 0004 and 0008.
+---
+diff --git a/build/ntdll-unix/signal_arm64_ios.c b/build/ntdll-unix/signal_arm64_ios.c
+index 35c4ebf..1d644d3 100644
+--- a/build/ntdll-unix/signal_arm64_ios.c
++++ b/build/ntdll-unix/signal_arm64_ios.c
+@@ -3213,7 +3213,77 @@ static void *ios_mach_exception_thread( void *arg )
+                          * second copy would land outside it. */
+                         uintptr_t rw_end = in_jit ? (uintptr_t)(rw + ((fault_addr + 31) - rx))
+                                                   : (uintptr_t)ios_jit_anon_alias_lookup( fault_addr + 31 );
++                        /* WinPad: a 32-byte store that runs off the alias into the next page
++                         * (NFS Carbon loading a race: a backward memset whose STP Q1,Q1 at
++                         * 0x...3ffc reaches 0x...401b, past an exec page's alias into a plain
++                         * page) was refused, and the thread spun on it until the game froze.
++                         * Each byte goes to its own place instead: the alias of its page, or
++                         * the address itself where that page is writable. Only if a byte has
++                         * neither is the store refused as before. */
++                        int split_ok = 0;
+                         if (!rw_end || rw_end != (uintptr_t)rw_addr + 31)
++                        {
++                            unsigned char sbytes[32];
++                            uintptr_t sdst[32];
++                            uintptr_t wr_lo = 0, wr_hi = 0;   /* last writable region seen */
++                            int si;
++                            split_ok = 1;
++                            memcpy(sbytes, &neon_state.__v[rt], 16);
++                            memcpy(sbytes + 16, &neon_state.__v[rt2], 16);
++                            for (si = 0; si < 32 && split_ok; si++)
++                            {
++                                uintptr_t a = (uintptr_t)fault_addr + si;
++                                uintptr_t d = (rx && rw && sz && a >= rx && a < rx + sz)
++                                                  ? rw + (a - rx)
++                                                  : ios_jit_anon_alias_lookup( a );
++                                if (!d)
++                                {
++                                    if (a >= wr_lo && a < wr_hi) d = a;
++                                    else
++                                    {
++                                        mach_vm_address_t ra = (mach_vm_address_t)a;
++                                        mach_vm_size_t rs = 0;
++                                        vm_region_basic_info_data_64_t ri;
++                                        mach_msg_type_number_t rc = VM_REGION_BASIC_INFO_COUNT_64;
++                                        mach_port_t ro = MACH_PORT_NULL;
++                                        if (mach_vm_region( mach_task_self(), &ra, &rs, VM_REGION_BASIC_INFO_64,
++                                                            (vm_region_info_t)&ri, &rc, &ro ) == KERN_SUCCESS
++                                            && (uintptr_t)ra <= a && a < (uintptr_t)(ra + rs)
++                                            && (ri.protection & VM_PROT_WRITE))
++                                        {
++                                            wr_lo = (uintptr_t)ra;
++                                            wr_hi = (uintptr_t)(ra + rs);
++                                            d = a;
++                                        }
++                                    }
++                                }
++                                if (!d) split_ok = 0;
++                                sdst[si] = d;
++                            }
++                            if (split_ok)
++                            {
++                                uint64_t base_old = (mode == 3) ? (uint64_t)fault_addr - (uint64_t)off
++                                                                : (uint64_t)fault_addr;
++                                for (si = 0; si < 32; si++) *(volatile unsigned char *)sdst[si] = sbytes[si];
++                                if (mode == 1 || mode == 3)
++                                {
++                                    if (rn == 31) state.__sp = base_old + (uint64_t)off;
++                                    else          state.__x[rn] = base_old + (uint64_t)off;
++                                }
++                                emulated = 1;
++                                {
++                                    static int split_n;
++                                    if (split_n < 4)
++                                        dprintf(STDERR_FILENO,
++                                            "[stp-emul] WinPad #%d split a 32B store across pages "
++                                            "(insn=0x%08x addr=0x%llx first=0x%llx last=0x%llx)\n",
++                                            ++split_n, insn, (unsigned long long)fault_addr,
++                                            (unsigned long long)sdst[0], (unsigned long long)sdst[31]);
++                                }
++                            }
++                        }
++                        if (split_ok) { /* stored above */ }
++                        else if (!rw_end || rw_end != (uintptr_t)rw_addr + 31)
+                         {
+                             static int stp_span_n;
+                             if (stp_span_n < 4)

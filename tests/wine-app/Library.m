@@ -49,9 +49,12 @@
 #import "Library.h"
 
 #import "Package.h"
+#import "WinPadJIT.h"
+#import "WinPadRedist.h"
 
 #import <GameController/GameController.h>
 #import <PhotosUI/PhotosUI.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include <math.h>
 #include <string.h>
@@ -259,6 +262,137 @@ static NSString* NewMapsText(NSInteger n) {
                             : [NSString stringWithFormat:@"%ld nových code map", (long)n];
 }
 
+// The game profiles the app carries (tools/winpad-translator/data/profiles, copied into the
+// app's "profiles" folder): a game folder whose winpad.json has none, or an older version of
+// one, gets the app's (WithAppProfile). The file itself is left as it is.
+static NSArray<NSDictionary*>* AppProfiles(void) {
+  static NSArray* profiles;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSMutableArray* list = [NSMutableArray new];
+    NSString* dir = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"profiles"];
+    for (NSString* name in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]
+             sortedArrayUsingSelector:@selector(compare:)]) {
+      if (![name.pathExtension isEqualToString:@"json"]) continue;
+      NSData* data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:name]];
+      id prof = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+      if ([prof isKindOfClass:NSDictionary.class] && [prof[@"id"] isKindOfClass:NSString.class] &&
+          [prof[@"match"] isKindOfClass:NSArray.class])
+        [list addObject:prof];
+    }
+    profiles = list;
+  });
+  return profiles;
+}
+
+// The files of DIR by lowercase path relative to DIR (with /), as profiles.py's _files_ci: two
+// folders deep when DEEP (a rule names a file in a folder), else only DIR's own, which is
+// quick for a game of thousands of files.
+static NSDictionary<NSString*, NSString*>* FilesAnyCase(NSString* dir, BOOL deep) {
+  NSMutableDictionary* found = [NSMutableDictionary new];
+  NSDirectoryEnumerator* walk = [NSFileManager.defaultManager enumeratorAtPath:dir];
+  for (NSString* path in walk) {
+    const BOOL folder = [walk.fileAttributes.fileType isEqualToString:NSFileTypeDirectory];
+    if (folder && (!deep || walk.level >= 3)) [walk skipDescendants];
+    if (folder || found[path.lowercaseString]) continue;
+    found[path.lowercaseString] = path;
+  }
+  return found;
+}
+
+// Whether a rule of the app's profiles names a file inside a folder.
+static BOOL ProfilesNameFolders(void) {
+  for (NSDictionary* prof in AppProfiles())
+    for (NSDictionary* rule in prof[@"match"]) {
+      if (![rule isKindOfClass:NSDictionary.class]) continue;
+      NSMutableArray* names = [NSMutableArray arrayWithObject:[rule[@"exe"] isKindOfClass:NSString.class] ? rule[@"exe"] : @""];
+      if ([rule[@"files"] isKindOfClass:NSArray.class]) [names addObjectsFromArray:rule[@"files"]];
+      for (id name in names)
+        if ([name isKindOfClass:NSString.class] && ([name containsString:@"/"] || [name containsString:@"\\"])) return YES;
+    }
+  return NO;
+}
+
+// Whether PROF's match rules take the game in DIR (profiles.py match): its program, or @"".
+static NSString* ProfileMatch(NSDictionary* prof, NSDictionary<NSString*, NSString*>* files, NSNumber* steam_id) {
+  for (NSDictionary* rule in prof[@"match"]) {
+    if (![rule isKindOfClass:NSDictionary.class]) continue;
+    if (rule[@"steamAppId"] && ![rule[@"steamAppId"] isEqual:steam_id]) continue;
+    NSString* exe = @"";
+    if ([rule[@"exe"] isKindOfClass:NSString.class]) {
+      exe = files[[rule[@"exe"] stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString];
+      if (!exe) continue;
+    }
+    BOOL all = YES;
+    for (NSString* f in [rule[@"files"] isKindOfClass:NSArray.class] ? rule[@"files"] : @[])
+      if (![f isKindOfClass:NSString.class] ||
+          !files[[f stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString])
+        all = NO;
+    if (all) return exe;
+  }
+  return nil;
+}
+
+// The first program PROF's rules name that the folder has (profiles.py rule_exe).
+static NSString* ProfileRuleExe(NSDictionary* prof, NSDictionary<NSString*, NSString*>* files) {
+  for (NSDictionary* rule in prof[@"match"])
+    if ([rule isKindOfClass:NSDictionary.class] && [rule[@"exe"] isKindOfClass:NSString.class]) {
+      NSString* exe = files[[rule[@"exe"] stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString];
+      if (exe) return exe;
+    }
+  return nil;
+}
+
+// INFO (the folder's winpad.json) with the app's profile for the game in DIR when the file has
+// no profile, or an older version of the same one; *FROM_APP says so. The block is the one
+// profiles.py apply writes: id, version, title, notes, settings with the program and title.
+static NSDictionary* WithAppProfile(NSString* dir, NSDictionary* info, BOOL* from_app) {
+  *from_app = NO;
+  NSDictionary* had = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
+  NSDictionary* files = nil;
+  NSDictionary* prof = nil;
+  NSString* exe = nil;
+  if ([had[@"id"] isKindOfClass:NSString.class]) {
+    for (NSDictionary* p in AppProfiles())
+      if ([p[@"id"] isEqualToString:had[@"id"]]) prof = p;
+    if (!prof || [prof[@"version"] integerValue] <= [had[@"version"] integerValue]) return info;
+    files = FilesAnyCase(dir, ProfilesNameFolders());
+    NSDictionary* old_settings = [had[@"settings"] isKindOfClass:NSDictionary.class] ? had[@"settings"] : nil;
+    exe = [old_settings[@"exe"] isKindOfClass:NSString.class] ? old_settings[@"exe"] : nil;
+    if (!exe.length) exe = ProfileMatch(prof, files, nil) ?: ProfileRuleExe(prof, files);
+  } else {
+    if (had || !AppProfiles().count) return info;
+    files = FilesAnyCase(dir, ProfilesNameFolders());
+    NSString* steam = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"steam_appid.txt"]
+                                                encoding:NSUTF8StringEncoding
+                                                   error:nil];
+    NSNumber* steam_id = steam.integerValue > 0 ? @(steam.integerValue) : nil;
+    for (NSDictionary* p in AppProfiles()) {
+      exe = ProfileMatch(p, files, steam_id);
+      if (exe) {
+        prof = p;
+        break;
+      }
+    }
+    if (!prof) return info;
+    if (!exe.length) exe = ProfileRuleExe(prof, files);
+  }
+  NSMutableDictionary* settings =
+      [([prof[@"settings"] isKindOfClass:NSDictionary.class] ? prof[@"settings"] : @{}) mutableCopy];
+  if (exe.length) settings[@"exe"] = exe;
+  if (!settings[@"title"]) settings[@"title"] = prof[@"title"] ?: @"";
+  NSMutableDictionary* out = [(info ?: @{}) mutableCopy];
+  out[@"profile"] = @{
+    @"id" : prof[@"id"],
+    @"version" : prof[@"version"] ?: @0,
+    @"title" : prof[@"title"] ?: @"",
+    @"notes" : [prof[@"notes"] isKindOfClass:NSArray.class] ? prof[@"notes"] : @[],
+    @"settings" : settings
+  };
+  *from_app = YES;
+  return out;
+}
+
 NSDictionary* WinPadGameSettings(NSDictionary* info) {
   NSMutableDictionary* out = [NSMutableDictionary new];
   NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
@@ -306,6 +440,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
       id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
       if ([obj isKindOfClass:NSDictionary.class]) info = obj;
     }
+    BOOL profile_from_app = NO;
+    info = WithAppProfile(dir, info, &profile_from_app);
     NSDictionary* settings = WinPadGameSettings(info);
     NSString* exe = [settings[@"exe"] isKindOfClass:NSString.class] ? settings[@"exe"] : nil;
     if (exe && ([exe containsString:@".."] || ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:exe]])) exe = nil;
@@ -331,7 +467,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     game.settings = settings;
     NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
     if ([profile[@"id"] isKindOfClass:NSString.class])
-      game.profile = [NSString stringWithFormat:@"%@ v%@", profile[@"id"], profile[@"version"] ?: @"?"];
+      game.profile = [NSString stringWithFormat:@"%@ v%@%@", profile[@"id"], profile[@"version"] ?: @"?",
+                                                 profile_from_app ? @" (app)" : @""];
     game.title = title.length ? title : folder;
     game.arch = ProgramArch([docs stringByAppendingPathComponent:game.exe]);
     game.bundleImage = WinPadGameImage(folder);
@@ -845,7 +982,17 @@ enum { AppearanceSection = 0 };
 
 @interface WinPadSettingsViewController : UITableViewController
 @property(nonatomic, copy) void (^run)(NSString* program);
+@property(nonatomic, copy) NSString* directXState;  // the download's progress or its error, or nil
 @end
+
+// The settings' section of Microsoft's DirectX DLLs, counted after the look like the others.
+enum { DirectXSection = 4 };
+
+// What the DirectX row says: downloaded or not.
+static NSString* DirectXSummary(void) {
+  const NSUInteger n = WinPadDirectXDLLs().count;
+  return n ? [NSString stringWithFormat:@"Staženo, %lu DLL", (unsigned long)n] : @"Nestaženo";
+}
 
 @implementation WinPadSettingsViewController
 - (instancetype)init {
@@ -877,17 +1024,17 @@ enum { AppearanceSection = 0 };
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
-  return 5;
+  return 7;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
   if (section == AppearanceSection) return 2;
   section -= 1;
-  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : 2;
+  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : section == 3 ? 3 : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"O aplikaci" ][section];
+  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"DirectX od Microsoftu", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -900,6 +1047,14 @@ enum { AppearanceSection = 0 };
   if (section == 2)
     return @"Ukazatel FPS ukáže ve hře snímky za sekundu, nejdelší snímek za poslední sekundu a rozlišení. "
            @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
+  if (section == 3)
+    return @"S JITem hra běží bez vlastního AOT obrazu: co ještě neběželo, FEX přeloží za běhu. JIT zapíná "
+           @"vestavěný pomocník (potřebuje párovací soubor a LocalDevVPN nebo vestavěnou VPN), nebo aplikace StikDebug. Bez JITu hra "
+           @"běží ze svého AOT obrazu a interpretu. Návod je pod štítkem JIT v knihovně.";
+  if (section == DirectXSection)
+    return @"Originální DLL od Microsoftu (D3DX9, D3DX10/11, XInput, XAudio2, XACT…) z jeho instalačky DirectX "
+           @"(červen 2010, asi 95 MB), stažené přímo od Microsoftu. Hra, které nějaká chybí, je dostane vždy; "
+           @"s přepínačem je dostanou všechny hry místo verzí z Wine.";
   return @"Hry se přidávají ve Finderu: iPad → Soubory → WinPad Wine, každá ve své složce.";
 }
 
@@ -954,6 +1109,29 @@ enum { AppearanceSection = 0 };
   } else if (path.section == 2) {
     cell.textLabel.text = @[ @"Poslední log", @"Spustit hello.exe", @"Spustit window.exe" ][path.row - 1];
     cell.accessoryType = path.row == 1 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+  } else if (path.section == 3 && path.row < 2) {
+    cell.textLabel.text = path.row == 0 ? @"Hrát s JITem, když je k dispozici" : @"Před hrou zapnout JIT";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = path.row == 0 ? WinPadJITWanted() : WinPadJITAskWanted();
+    toggle.tag = path.row;
+    [toggle addTarget:self action:@selector(jitChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+  } else if (path.section == 3) {
+    cell.textLabel.text = @"Stav";
+    cell.detailTextLabel.text = WinPadJITStatus();
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+  } else if (path.section == DirectXSection && path.row == 0) {
+    cell.textLabel.text = WinPadDirectXDLLs().count ? @"Stáhnout znovu" : @"Stáhnout od Microsoftu";
+    cell.detailTextLabel.text = self.directXState ?: DirectXSummary();
+    cell.textLabel.textColor = WinPadDirectXDownloading() ? UIColor.secondaryLabelColor : UIColor.systemBlueColor;
+  } else if (path.section == DirectXSection) {
+    cell.textLabel.text = @"Používat místo verzí z Wine";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = WinPadDirectXPreferred();
+    [toggle addTarget:self action:@selector(directXChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
   } else {
     NSDictionary* info = NSBundle.mainBundle.infoDictionary;
     cell.textLabel.text = path.row == 0 ? @"Verze" : @"Hry";
@@ -977,6 +1155,38 @@ enum { AppearanceSection = 0 };
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"fpsOverlay"];
 }
 
+- (void)directXChanged:(UISwitch*)toggle {
+  WinPadDirectXSetPreferred(toggle.on);
+}
+
+- (void)downloadDirectX {
+  if (WinPadDirectXDownloading()) return;
+  __weak WinPadSettingsViewController* weak = self;
+  void (^show)(NSString*) = ^(NSString* state) {
+    weak.directXState = state;
+    [weak.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:DirectXSection + 1] ]
+                          withRowAnimation:UITableViewRowAnimationNone];
+  };
+  show(@"Stahuji…");
+  WinPadDirectXDownload(
+      ^(double fraction) {
+        show(fraction < 1 ? [NSString stringWithFormat:@"Stahuji %d %%", (int)(fraction * 100)] : @"Rozbaluji…");
+      },
+      ^(NSString* error) {
+        show(error ? @"Nepovedlo se" : nil);
+        if (!error || !weak) return;
+        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"DirectX se nestáhl"
+                                                                       message:error
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [weak presentViewController:alert animated:YES completion:nil];
+      });
+}
+
+- (void)jitChanged:(UISwitch*)toggle {
+  [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:toggle.tag == 0 ? @"jit" : @"jitStikDebug"];
+}
+
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
   [tableView deselectRowAtIndexPath:path animated:YES];
   if (path.section == AppearanceSection) {
@@ -995,6 +1205,10 @@ enum { AppearanceSection = 0 };
     [tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
     return;
   }
+  if (path.section == DirectXSection && path.row == 0) {
+    [self downloadDirectX];
+    return;
+  }
   if (path.section != 2 || path.row == 0) return;
   if (path.row == 1) {
     [self.navigationController pushViewController:[WinPadLogViewController new] animated:YES];
@@ -1008,12 +1222,199 @@ enum { AppearanceSection = 0 };
 }
 @end
 
+// How to turn the JIT on, step by step, with what is already done ticked. Opened from the
+// library's JIT badge and when a game needs the JIT.
+@interface WinPadJITGuideViewController : UITableViewController <UIDocumentPickerDelegate>
+@property(nonatomic, copy) void (^closed)(void);
+@property(nonatomic, strong) id observer;
+@property(nonatomic) BOOL busy;              // turning the JIT on
+@property(nonatomic, copy) NSString* lastError;  // why it did not, or why a pairing file was refused
+@end
+
+@implementation WinPadJITGuideViewController
+- (instancetype)init {
+  return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.title = @"Zapnout JIT";
+  self.tableView.backgroundView = [WinPadBackdrop new];
+  self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                                                         target:self
+                                                                                         action:@selector(done)];
+  __weak UITableView* table = self.tableView;
+  self.observer = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                                  object:nil
+                                                                   queue:NSOperationQueue.mainQueue
+                                                              usingBlock:^(NSNotification* note) {
+                                                                [table reloadData];
+                                                              }];
+}
+
+- (void)dealloc {
+  if (self.observer) [NSNotificationCenter.defaultCenter removeObserver:self.observer];
+}
+
+- (void)done {
+  void (^closed)(void) = self.closed;
+  [self dismissViewControllerAnimated:YES completion:closed];
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
+  return 2;
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  return section == 0 ? 1 : 4;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
+  return section == 0 ? @"Stav" : @"Jednou na iPadu";
+}
+
+// The built-in JIT, unless this installation cannot have it: then StikDebug.
+- (BOOL)builtin {
+  return WinPadJITBuiltInUnavailableReason() == nil;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
+  if (section == 0)
+    return @"S JITem běží každá hra hned, bez překladu předem. Bez JITu běží jen hry přeložené "
+           @"převodníkem WinPad Translator.";
+  if (self.builtin && WinPadVPNBuiltIn())
+    return @"Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine si zapne vlastní VPN i JIT sám, "
+           @"bez další aplikace. JIT platí do zavření aplikace.";
+  if (self.builtin)
+    return @"Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine si JIT zapne sám, bez další aplikace. "
+           @"Při spuštění musí být zapnutá LocalDevVPN. JIT platí do zavření aplikace. "
+           @"Místo vestavěného JITu jde použít i aplikace StikDebug.";
+  return [NSString stringWithFormat:@"%@ Pak už jen vybereš hru a ťukneš na Spustit: WinPad Wine sám otevře "
+                                    @"StikDebug, ten JIT zapne a hra se spustí.",
+                                    WinPadJITBuiltInUnavailableReason()];
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
+  UITableViewCell* cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+  cell.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+  cell.detailTextLabel.numberOfLines = 0;
+  cell.detailTextLabel.textColor = Hex(0xB8C8E8);
+  if (path.section == 0) {
+    const BOOL on = WinPadJITUsable();
+    cell.textLabel.text = self.busy ? @"Zapínám JIT…" : on ? @"JIT je zapnutý" : @"JIT je vypnutý";
+    cell.detailTextLabel.text = self.lastError ?: WinPadJITStatus();
+    cell.imageView.image = [UIImage systemImageNamed:on ? @"bolt.fill" : @"bolt.slash"];
+    cell.imageView.tintColor = on ? Hex(0x9BEDB5) : Hex(0xF2C46D);
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+  const BOOL builtin = self.builtin, on = WinPadJITUsable();
+  const BOOL pairing = builtin && WinPadJITHasPairing(), stikdebug = WinPadJITStikDebugInstalled();
+  const BOOL can = WinPadJITCanTurnOn();
+  NSString* title = nil;
+  NSString* detail = nil;
+  BOOL ticked = NO, action = NO;
+  switch (path.row) {
+    case 0:
+      title = @"1. Režim pro vývojáře";
+      detail = @"Nastavení → Soukromí a zabezpečení → Režim pro vývojáře → zapnout a restartovat iPad. "
+               @"Bývá zapnutý, pokud sem instaluješ aplikace z Xcode nebo SideStore.";
+      ticked = can || on;
+      break;
+    case 1:
+      if (builtin && WinPadVPNBuiltIn()) {
+        title = @"2. VPN";
+        detail = @"Vestavěná, zapne se sama při spuštění hry. Napoprvé iPad požádá o povolení konfigurace VPN.";
+        ticked = YES;
+        break;
+      }
+      title = @"2. LocalDevVPN";
+      detail = @"Zdarma z App Storu (ťukni). Zapni ji před hraním: přes ni se WinPad Wine připojí sám k sobě "
+               @"jako debugger. Pokud máš SideStore, nejspíš ji už máš.";
+      action = YES;
+      break;
+    case 2:
+      if (builtin) {
+        title = @"3. Párovací soubor";
+        detail = pairing ? @"Nahraný."
+                         : @"Ťukni a vyber ho, nebo ho na Macu přetáhni do Finder → iPad → Soubory → WinPad Wine. "
+                           @"Vyrobí ho jitterbugpair nebo idevice_pair (návod StikDebugu, stačí jednou). "
+                           @"Pokud používáš SideStore, je to tentýž soubor.";
+        ticked = pairing;
+        action = YES;
+      } else {
+        title = @"3. StikDebug";
+        detail = stikdebug ? @"Nainstalovaný." : @"Nainstaluj ho přes SideStore nebo AltStore (ťukni pro stikdebug.org).";
+        ticked = stikdebug;
+        action = !stikdebug;
+      }
+      break;
+    default:
+      title = @"4. Zapnout JIT teď";
+      detail = on ? @"Hotovo, JIT je zapnutý."
+             : self.busy ? @"Zapínám…"
+             : can ? @"Vyzkouší to hned. Jinak se JIT zapne sám při spuštění hry."
+                   : @"Až budou hotové kroky nahoře.";
+      ticked = on;
+      action = can && !on && !self.busy;
+      if (action) cell.textLabel.textColor = UIColor.systemBlueColor;
+      break;
+  }
+  cell.textLabel.text = title;
+  cell.detailTextLabel.text = detail;
+  cell.imageView.image = [UIImage systemImageNamed:ticked ? @"checkmark.circle.fill" : @"circle"];
+  cell.imageView.tintColor = ticked ? Hex(0x9BEDB5) : Hex(0xB8C8E8);
+  cell.accessoryType = action ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+  cell.selectionStyle = action ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+  return cell;
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
+  [tableView deselectRowAtIndexPath:path animated:YES];
+  if (path.section != 1) return;
+  UIApplication* app = UIApplication.sharedApplication;
+  if (path.row == 1 && !(self.builtin && WinPadVPNBuiltIn())) {
+    [app openURL:[NSURL URLWithString:@"itms-apps://search.itunes.apple.com/WebObjects/MZSearch.woa/wa/"
+                                      @"search?media=software&term=LocalDevVPN"]
+          options:@{}
+        completionHandler:nil];
+  } else if (path.row == 2 && self.builtin) {
+    UIDocumentPickerViewController* picker =
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeItem ] asCopy:YES];
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+  } else if (path.row == 2) {
+    [app openURL:[NSURL URLWithString:@"https://stikdebug.org"] options:@{} completionHandler:nil];
+  } else if (path.row == 3 && WinPadJITCanTurnOn() && !WinPadJITUsable() && !self.busy) {
+    self.busy = YES;
+    self.lastError = nil;
+    [tableView reloadData];
+    __weak WinPadJITGuideViewController* weak = self;
+    WinPadJITTurnOn(^(BOOL ok, NSString* message) {
+      WinPadJITGuideViewController* me = weak;
+      me.busy = NO;
+      me.lastError = ok ? nil : message;
+      [me.tableView reloadData];
+    });
+  }
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController*)picker didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
+  NSString* error = nil;
+  if (urls.firstObject && !WinPadJITImportPairing(urls.firstObject, &error)) self.lastError = error;
+  else self.lastError = nil;
+  [self.tableView reloadData];
+}
+@end
+
 @interface LibraryViewController ()
 @property(nonatomic, strong) NSArray<WinPadGame*>* games;
 @property(nonatomic) NSInteger focus;
 @property(nonatomic, strong) WinPadBackdrop* backdrop;
 @property(nonatomic, strong) UIButton* settings;
 @property(nonatomic, strong) UILabel* clock;
+// Is the JIT on: a tap opens the guide to turning it on (WinPadJITGuideViewController).
+@property(nonatomic, strong) UIButton* jitBadge;
 @property(nonatomic, strong) NSTimer* clockTimer;
 @property(nonatomic, strong) UILabel* heroTitle;
 @property(nonatomic, strong) UIStackView* tags;
@@ -1036,6 +1437,9 @@ enum { AppearanceSection = 0 };
 // installs said (for libraryTest's report).
 @property(nonatomic, strong) NSMutableArray<NSURL*>* packages;
 @property(nonatomic) BOOL installing;
+// StikDebug was asked for the JIT before this start (WinPadJIT.m): asked once per launch.
+@property(nonatomic) BOOL jitAsked;
+@property(nonatomic) BOOL dllsChecked;
 @property(nonatomic, strong) NSMutableString* installReport;
 - (void)reload;
 - (void)showFocus;
@@ -1045,6 +1449,13 @@ enum { AppearanceSection = 0 };
 - (void)exportFocused;
 - (void)titleExport:(BOOL)compact;
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game;
+- (void)waitForJITThen:(void (^)(void))start;
+- (void)refreshJIT;
+- (void)openJITGuide;
+- (void)offerDirectX;
+- (void)downloadDirectXFor:(NSString*)dll;
+- (BOOL)checkDLLsOf:(NSString*)program game:(WinPadGame*)game;
+- (void)askToStartWithout:(NSString*)text start:(void (^)(void))start cancel:(void (^)(void))cancel;
 - (void)openSettings;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
@@ -1087,6 +1498,11 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.settings.accessibilityLabel = @"Nastavení";
   [self.settings addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
   [self.view addSubview:self.settings];
+
+  self.jitBadge = [UIButton buttonWithConfiguration:[UIButtonConfiguration filledButtonConfiguration] primaryAction:nil];
+  [self.jitBadge addTarget:self action:@selector(openJITGuide) forControlEvents:UIControlEventTouchUpInside];
+  [self.view addSubview:self.jitBadge];
+  [self refreshJIT];
 
   self.clock = [UILabel new];
   self.clock.textColor = Hex(0xDCE8FF);
@@ -1198,6 +1614,19 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                         usingBlock:^(NSNotification* note) {
                                                                           [weak attach:note.object];
                                                                         }]];
+  // Back from StikDebug: the JIT pool right away, while its script waits for it.
+  [self.observers addObject:[NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                                            object:nil
+                                                                             queue:NSOperationQueue.mainQueue
+                                                                        usingBlock:^(NSNotification* note) {
+                                                                          if (WinPadJITWanted() && WinPadJITAttached()) {
+                                                                            NSString* why = nil;
+                                                                            WinPadJITPrepare(&why);
+                                                                            NSLog(@"WinPad Wine: JIT: %@", why);
+                                                                          }
+                                                                          [weak refreshJIT];
+                                                                          [weak showFocus];
+                                                                        }]];
   for (GCController* pad in GCController.controllers) [self attach:pad];
   if (!self.packages) self.packages = [NSMutableArray new];
   self.installReport = [NSMutableString new];
@@ -1217,6 +1646,16 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [super viewDidAppear:animated];
   [self becomeFirstResponder];
   [self openPackages:@[]];
+#if !TARGET_OS_SIMULATOR
+  // The first launch on a device without the JIT: how to turn it on, once.
+  if (![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:@"jitGuideShown"] && !WinPadJITUsable() &&
+      !self.installing && !self.presentedViewController) {
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"jitGuideShown"];
+    [self openJITGuide];
+  }
+#endif
+  [self offerDirectX];
   static BOOL tested;
   if (tested || ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
   tested = YES;
@@ -1329,13 +1768,19 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   UIColor* good = [Hex(0x7DDC9A) colorWithAlphaComponent:0.18];
   UIColor* warn = [Hex(0xF2C46D) colorWithAlphaComponent:0.18];
   [self.tags addArrangedSubview:LightTag(game.arch ? [@"Windows · " stringByAppendingString:game.arch] : @"Windows", 0xDCE8FF, plain)];
-  [self.tags addArrangedSubview:game.imageInFolder ? LightTag(@"Přeloženo (obraz ve složce hry)", 0x9BEDB5, good)
+  // A simulator keeps running a game with an image from its image (main.m).
+  const BOOL jit = WinPadJITUsable() && (!TARGET_OS_SIMULATOR || !game.image);
+  [self.tags addArrangedSubview:jit                ? LightTag(@"Poběží s JITem", 0x9BEDB5, good)
+                                 : game.imageInFolder ? LightTag(@"Přeloženo (obraz ve složce hry)", 0x9BEDB5, good)
                                  : game.image      ? LightTag(@"Přeloženo", 0x9BEDB5, good)
-                                                   : LightTag(@"Nepřeloženo", 0xF2C46D, warn)];
+                                                   : LightTag(@"Potřebuje JIT", 0xF2C46D, warn)];
   if (game.folderImageNote) [self.tags addArrangedSubview:LightTag(@"Obraz ve složce je pro jiné sestavení", 0xF2C46D, warn)];
   if (game.newMaps) [self.tags addArrangedSubview:LightTag(NewMapsText(game.newMaps), 0xF2C46D, warn)];
-  NSString* state = game.image ? @"Hra běží z přeloženého obrazu. Kód, který v něm chybí, doplní příští překlad z code map."
-                               : @"Hra zatím nemá přeložený obraz: poběží pomalu v interpretu a zapíše code mapy pro překlad.";
+  NSString* state = jit ? @"JIT je zapnutý: hra se přeloží za běhu, žádný překlad předem není potřeba."
+                    : game.image ? @"Hra běží z přeloženého obrazu. Rychlejší a bez překladu předem je to s JITem "
+                                   @"(ťukni na JIT nahoře)."
+                                 : @"Hra nemá přeložený obraz: zapni JIT (ťukni na JIT nahoře), nebo ji přelož "
+                                   @"převodníkem WinPad Translator.";
   NSMutableAttributedString* text = [NSMutableAttributedString new];
   [text appendAttributedString:[[NSAttributedString alloc]
                                    initWithString:@"STAV PŘEKLADU\n"
@@ -1366,6 +1811,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   const CGFloat w = b.size.width - 2 * m, button = compact ? 44 : 48;
   self.settings.frame = CGRectMake(m, top, button, button);
   self.settings.layer.cornerRadius = button / 2;
+  [self.jitBadge sizeToFit];
+  self.jitBadge.frame = CGRectMake(m + button + 12, top, MAX(self.jitBadge.bounds.size.width, 120), button);
   self.clock.font = [UIFont systemFontOfSize:compact ? 18 : 26 weight:UIFontWeightLight];
   self.clock.frame = CGRectMake(m + w - 200, top, 200, button);
 
@@ -1584,13 +2031,273 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game {
   if (self.started || self.installing) return;
+  // The DLLs the game imports and no one has: Microsoft's DirectX ones are downloaded first.
+  if (game && !self.dllsChecked && ![self checkDLLsOf:program game:game]) return;
+  // A game without the JIT: StikDebug turns it on first (WinPadJIT.m), if it is installed and the
+  // settings want it. The game starts once a debugger is attached, or without the JIT after 60 s
+  // or when the user says so.
+  if (game && !self.jitAsked && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+      WinPadJITShouldAskStikDebug()) {
+    self.jitAsked = YES;
+    [self waitForJITThen:^{
+      [self startProgram:program game:game];
+    }];
+    return;
+  }
+  // Without the JIT a game without an image cannot run on a device: say how to get one.
+  if (game && !game.image && !WinPadJITUsable() && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
+    self.jitAsked = NO;
+    UIAlertController* alert =
+        [UIAlertController alertControllerWithTitle:@"Hra potřebuje JIT"
+                                            message:@"Tahle hra nemá přeložený obraz, takže na iPadu poběží jen s JITem. "
+                                                    @"Zapni ho přes StikDebug, nebo hru přelož převodníkem WinPad Translator."
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Jak zapnout JIT"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction* action) {
+                                              [self openJITGuide];
+                                            }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Zavřít" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return;
+  }
   self.started = YES;
+  self.dllsChecked = NO;
   if (game) [NSUserDefaults.standardUserDefaults setObject:game.folder forKey:@"lastGame"];
   // The game reads the controllers itself (main.m's Gamepads).
   for (id observer in self.observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
   [self.observers removeAllObjects];
   for (GCController* pad in GCController.controllers) pad.extendedGamepad.valueChangedHandler = nil;
   if (self.start) self.start(program, game);
+}
+
+- (void)refreshJIT {
+  const BOOL on = WinPadJITUsable();
+  UIButtonConfiguration* config = [UIButtonConfiguration filledButtonConfiguration];
+  config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+  config.title = on ? @"JIT zapnutý" : @"JIT vypnutý";
+  config.image = [UIImage systemImageNamed:on ? @"bolt.fill" : @"bolt.slash"];
+  config.imagePadding = 8;
+  config.contentInsets = NSDirectionalEdgeInsetsMake(0, 16, 0, 18);
+  config.baseForegroundColor = on ? Hex(0x9BEDB5) : Hex(0xDCE8FF);
+  config.baseBackgroundColor = on ? [Hex(0x7DDC9A) colorWithAlphaComponent:0.22] : [UIColor colorWithWhite:1 alpha:0.12];
+  self.jitBadge.configuration = config;
+  self.jitBadge.accessibilityLabel = on ? @"JIT je zapnutý" : @"JIT je vypnutý, ťukni pro návod";
+  [self.view setNeedsLayout];
+}
+
+// The last game run stopped because a DLL of Microsoft's DirectX was missing (Wine has no
+// file of it): offers the download, once for that run.
+- (void)offerDirectX {
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] || self.presentedViewController ||
+      self.installing || WinPadDirectXDownloading())
+    return;
+  NSString* dll = WinPadMissingDLLOfLastRun();
+  if (!dll || !WinPadDirectXProvides(dll) || [WinPadDirectXDLLs() containsObject:dll]) return;
+  NSString* log = [Documents() stringByAppendingPathComponent:@"wine.log"];
+  NSDate* date = [NSFileManager.defaultManager attributesOfItemAtPath:log error:nil].fileModificationDate;
+  NSString* key = [NSString stringWithFormat:@"%@ %.0f", dll, date.timeIntervalSince1970];
+  if ([[NSUserDefaults.standardUserDefaults stringForKey:@"directXOffered"] isEqualToString:key]) return;
+  [NSUserDefaults.standardUserDefaults setObject:key forKey:@"directXOffered"];
+  NSString* text = [NSString stringWithFormat:@"Hra potřebuje %@, kterou má DirectX od Microsoftu. Stáhnout ho "
+                                              @"(asi 95 MB, přímo od Microsoftu)?",
+                                              dll];
+  UIAlertController* ask = [UIAlertController alertControllerWithTitle:@"Chybí DLL"
+                                                               message:text
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Teď ne" style:UIAlertActionStyleCancel handler:nil]];
+  __weak LibraryViewController* weak = self;
+  [ask addAction:[UIAlertAction actionWithTitle:@"Stáhnout"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* action) {
+                                          [weak downloadDirectXFor:dll];
+                                        }]];
+  [self presentViewController:ask animated:YES completion:nil];
+}
+
+// Before a game runs: looks for DLLs it imports that are nowhere (WinPadMissingDLLsOf). Those
+// of Microsoft's DirectX are downloaded right away and the game then starts; others are only
+// named, once per game and set of names, since a game may never load them. YES when the game
+// can start now; NO when this went on with an alert and starts it (or not) itself.
+- (BOOL)checkDLLsOf:(NSString*)program game:(WinPadGame*)game {
+  self.dllsChecked = YES;
+  NSArray<NSString*>* missing = WinPadMissingDLLsOf(program, [Documents() stringByAppendingPathComponent:game.folder]);
+  if (!missing.count) return YES;
+  NSMutableArray<NSString*>* fetch = [NSMutableArray new];
+  NSMutableArray<NSString*>* others = [NSMutableArray new];
+  // Once DirectX is downloaded, what it lacks (xinput1_4...) another download would not bring.
+  const BOOL have_directx = WinPadDirectXDLLs().count > 0;
+  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx ? fetch : others addObject:dll];
+  printf("WinPad Library: %s lacks DLLs: %s\n", game.folder.UTF8String,
+         [missing componentsJoinedByString:@", "].UTF8String);
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return YES;
+  __weak LibraryViewController* weak = self;
+  void (^start)(void) = ^{
+    [weak startProgram:program game:game];
+  };
+  void (^cancel)(void) = ^{
+    weak.dllsChecked = NO;
+    weak.jitAsked = NO;
+  };
+  if (fetch.count && !WinPadDirectXDownloading()) {
+    UIAlertController* busy = [UIAlertController
+        alertControllerWithTitle:@"Stahuji chybějící DLL"
+                         message:[NSString stringWithFormat:@"Hra potřebuje %@ z DirectX od Microsoftu. Stahuji ho "
+                                                            @"přímo od Microsoftu (asi 95 MB)…",
+                                                            [fetch componentsJoinedByString:@", "]]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    NSString* intro = busy.message;
+    [self presentViewController:busy animated:YES completion:nil];
+    WinPadDirectXDownload(
+        ^(double fraction) {
+          busy.message = fraction < 1 ? [NSString stringWithFormat:@"%@\n%d %%", intro, (int)(fraction * 100)]
+                                      : [intro stringByAppendingString:@"\nRozbaluji…"];
+        },
+        ^(NSString* error) {
+          [busy dismissViewControllerAnimated:YES completion:^{
+            LibraryViewController* me = weak;
+            if (!me) return;
+            NSMutableArray* still = [NSMutableArray new];
+            for (NSString* dll in fetch)
+              if (![WinPadDirectXDLLs() containsObject:dll]) [still addObject:dll];
+            [still addObjectsFromArray:others];
+            if (!error && !still.count) {
+              start();
+              return;
+            }
+            NSString* text = error ? [NSString stringWithFormat:@"DirectX se nestáhl: %@\n\nChybí: %@", error,
+                                                                [still componentsJoinedByString:@", "]]
+                                   : [NSString stringWithFormat:@"Tyhle DLL nemá ani DirectX od Microsoftu: %@",
+                                                                [still componentsJoinedByString:@", "]];
+            [me askToStartWithout:text start:start cancel:cancel];
+          }];
+        });
+    return NO;
+  }
+  // Only DLLs the app cannot get: said once for this game and these names.
+  NSString* key = [@"dllsMissing." stringByAppendingString:game.folder];
+  NSString* names = [missing componentsJoinedByString:@", "];
+  if ([[NSUserDefaults.standardUserDefaults stringForKey:key] isEqualToString:names]) return YES;
+  [NSUserDefaults.standardUserDefaults setObject:names forKey:key];
+  [self askToStartWithout:[NSString stringWithFormat:@"Hra importuje DLL, které WinPad nemá a neumí stáhnout: %@. "
+                                                     @"Pokud je hra opravdu načte, nespustí se. Můžeš je nakopírovat "
+                                                     @"do složky hry.",
+                                                     names]
+                    start:start
+                   cancel:cancel];
+  return NO;
+}
+
+- (void)askToStartWithout:(NSString*)text start:(void (^)(void))start cancel:(void (^)(void))cancel {
+  UIAlertController* ask = [UIAlertController alertControllerWithTitle:@"Chybí DLL"
+                                                               message:text
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit"
+                                          style:UIAlertActionStyleCancel
+                                        handler:^(UIAlertAction* action) {
+                                          cancel();
+                                        }]];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Spustit i tak"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* action) {
+                                          start();
+                                        }]];
+  [self presentViewController:ask animated:YES completion:nil];
+}
+
+- (void)downloadDirectXFor:(NSString*)dll {
+  UIAlertController* busy = [UIAlertController alertControllerWithTitle:@"Stahuji DirectX"
+                                                                message:@"Od Microsoftu…"
+                                                         preferredStyle:UIAlertControllerStyleAlert];
+  [self presentViewController:busy animated:YES completion:nil];
+  __weak LibraryViewController* weak = self;
+  WinPadDirectXDownload(
+      ^(double fraction) {
+        busy.message = fraction < 1 ? [NSString stringWithFormat:@"%d %%", (int)(fraction * 100)] : @"Rozbaluji…";
+      },
+      ^(NSString* error) {
+        [busy dismissViewControllerAnimated:YES completion:^{
+          const BOOL got = !error && [WinPadDirectXDLLs() containsObject:dll];
+          NSString* text = error         ? error
+                           : got         ? @"Hotovo. Spusť hru znovu."
+                                         : [NSString stringWithFormat:@"DirectX je stažený, ale %@ v něm není.", dll];
+          UIAlertController* result = [UIAlertController alertControllerWithTitle:error ? @"DirectX se nestáhl" : @"DirectX od Microsoftu"
+                                                                          message:text
+                                                                   preferredStyle:UIAlertControllerStyleAlert];
+          [result addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+          [weak presentViewController:result animated:YES completion:nil];
+        }];
+      });
+}
+
+- (void)openJITGuide {
+  if (self.presentedViewController || self.started) return;
+  WinPadJITGuideViewController* guide = [WinPadJITGuideViewController new];
+  __weak LibraryViewController* weak = self;
+  guide.closed = ^{
+    [weak refreshJIT];
+    [weak showFocus];
+  };
+  UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:guide];
+  nav.modalPresentationStyle = UIModalPresentationFormSheet;
+  nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)waitForJITThen:(void (^)(void))start {
+  const BOOL builtin = !WinPadJITBuiltInUnavailableReason() && WinPadJITHasPairing();
+  UIAlertController* alert = [UIAlertController
+      alertControllerWithTitle:@"Zapínám JIT"
+                       message:builtin ? @"Vestavěný JIT se připojuje k WinPad Wine. Poprvé po restartu iPadu to může "
+                                         @"chvíli trvat (stahuje se vývojářský obraz disku)."
+                                       : @"StikDebug se připojuje k WinPad Wine. Pokud se neotevře sám, vrať se sem "
+                                         @"po zapnutí JITu ve StikDebugu."
+                preferredStyle:UIAlertControllerStyleAlert];
+  __block BOOL finished = NO;
+  [alert addAction:[UIAlertAction actionWithTitle:@"Spustit bez JITu"
+                                            style:UIAlertActionStyleCancel
+                                          handler:^(UIAlertAction* action) {
+                                            finished = YES;
+                                            dispatch_async(dispatch_get_main_queue(), start);
+                                          }]];
+  [self presentViewController:alert animated:YES completion:nil];
+  __weak LibraryViewController* weak = self;
+  WinPadJITTurnOn(^(BOOL ok, NSString* message) {
+    if (finished) return;
+    if (ok) {
+      finished = YES;
+      [weak refreshJIT];
+      if (alert.presentingViewController)
+        [alert dismissViewControllerAnimated:YES completion:start];
+      else
+        start();
+      return;
+    }
+    // Why not, with the choice still there: without the JIT, or how to get it.
+    finished = YES;
+    UIAlertController* why = [UIAlertController alertControllerWithTitle:@"JIT se nezapnul"
+                                                                 message:message
+                                                          preferredStyle:UIAlertControllerStyleAlert];
+    [why addAction:[UIAlertAction actionWithTitle:@"Jak zapnout JIT"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction* action) {
+                                            LibraryViewController* me = weak;
+                                            me.jitAsked = NO;
+                                            [me openJITGuide];
+                                          }]];
+    [why addAction:[UIAlertAction actionWithTitle:@"Spustit bez JITu"
+                                            style:UIAlertActionStyleCancel
+                                          handler:^(UIAlertAction* action) {
+                                            dispatch_async(dispatch_get_main_queue(), start);
+                                          }]];
+    void (^show)(void) = ^{
+      [weak presentViewController:why animated:YES completion:nil];
+    };
+    if (alert.presentingViewController)
+      [alert dismissViewControllerAnimated:YES completion:show];
+    else
+      show();
+  });
 }
 
 - (void)openSettings {

@@ -53,9 +53,24 @@ $cc -I"$src" -DWINE_IOS=1 -Wno-implicit-function-declaration \
 for f in "$wine"/server/*.c; do
     name=$(basename "$f" .c)
     case $name in
+        registry-winpad) continue ;;  # a copy a failed run left
         request | main | mach | unicode | fd | window | mapping | queue) f="$src/${name}_ios.c" ;;
+        registry)
+            # The registry is saved 2 s after a change instead of 30 s: iOS ends an app
+            # without warning (swiped away, or in the background), and the in-process
+            # server never gets to save it then, so a game lost the settings it had just
+            # written. Only changed branches are written (KEY_DIRTY). The copy stays next to
+            # the original: its "..." includes must find server/'s headers before Madeira's.
+            sed 's/save_period = 30 \* -TICKS_PER_SEC;/save_period = 2 * -TICKS_PER_SEC;/' "$f" >"$wine/server/registry-winpad.c"
+            grep -q 'save_period = 2 \* -TICKS_PER_SEC;' "$wine/server/registry-winpad.c" || {
+                echo "registry.c: no save_period to change" >&2
+                exit 1
+            }
+            f="$wine/server/registry-winpad.c"
+            ;;
     esac
     compile "$f" "$name"
+    rm -f "$wine/server/registry-winpad.c"
 done
 compile "$src/wine_log_ios.c" wine_log_ios
 compile "$src/hidpad_ios.c" hidpad_ios

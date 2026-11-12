@@ -25,6 +25,9 @@ Settings keys (the app's):
   env                 {"NAME": "value"}: environment variables (not the app's own: WINE*, FEX_*, ...)
   registry            {"HKLM\\Software\\...": {"name": "text" | 123 | {"hex": "00ff"}}}: values
                       the registry gets when it does not have them yet (the game may change them)
+  folders             ["Maps", ...]: folders, relative to the game's, the app makes before the
+                      game starts: empty ones a game writes into (Mafia saves a mission's
+                      progress in Maps), which copying the game often leaves out
 """
 import json
 import os
@@ -34,7 +37,7 @@ from . import paths
 
 PROFILES_DIR = os.path.join(paths.DATA, "profiles")
 WINPAD_JSON = "winpad.json"
-SETTINGS_KEYS = ("title", "exe", "args", "dllOverrides", "env", "registry")
+SETTINGS_KEYS = ("title", "exe", "args", "dllOverrides", "env", "registry", "folders")
 DICT_KEYS = ("dllOverrides", "env", "registry")
 REGISTRY_ROOTS = ("HKLM", "HKEY_LOCAL_MACHINE", "HKCU", "HKEY_CURRENT_USER")
 
@@ -89,6 +92,10 @@ def check_settings(s):
             out.append(f"{key} must be text")
     if "args" in s and not (isinstance(s["args"], list) and all(isinstance(a, str) for a in s["args"])):
         out.append("args must be a list of texts")
+    if "folders" in s and not (isinstance(s["folders"], list) and all(
+            isinstance(f, str) and f and not f.startswith(("/", "\\")) and ".." not in re.split(r"[/\\]", f)
+            for f in s["folders"])):
+        out.append("folders must be a list of folder names inside the game's")
     for key in ("dllOverrides", "env"):
         if key in s and not (isinstance(s[key], dict) and all(isinstance(v, str) for v in s[key].values())):
             out.append(f"{key} must map names to texts")

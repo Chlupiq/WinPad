@@ -52,6 +52,12 @@ for sdk in iphoneos iphonesimulator; do
     sh "$root/tests/wine-loader/link-host.sh" $sdk "$work" "$out/host-$sdk"
     mkdir -p "$proj/lib/$sdk" "$proj/wine/$sdk" "$proj/Frameworks/$sdk"
     cp "$out/host-$sdk/winehost-lib.o" "$proj/lib/$sdk/winehost.o"
+    # FEX flushes the code it writes through Wine's NtFlushInstructionCache, which needs a real
+    # __clear_cache (winehost.c); a stub leaves stale instructions running on an iPad.
+    if grep -qx '___clear_cache' "$out/host-$sdk/stubbed"; then
+        echo "__clear_cache is a stub for $sdk" >&2
+        exit 1
+    fi
     cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$sdk/"
     [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$sdk/"
@@ -81,12 +87,20 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Package.h" "$here/Package.c" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
+rm -rf "$proj/profiles"
+mkdir -p "$proj/profiles"
+cp "$here/../../tools/winpad-translator/data/profiles/"*.json "$proj/profiles/"
+# The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
+cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
+sh "$here/build-stikjit.sh" "$proj/StikJIT"
+# libmspack's cabinet decompressor, for Microsoft's DirectX installer (Redist.c).
+sh "$here/fetch-mspack.sh" "$proj/mspack"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
     libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
-    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI"
+    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers NetworkExtension"
     if [ -n "$d3d9" ]; then
         libs="$libs metal-display.o libdxmt_combined.a"
         frameworks="$frameworks Metal QuartzCore IOSurface"
@@ -144,6 +158,20 @@ build() {
         test -f "$product/$f" || { echo "the $1 build lacks $f" >&2; exit 1; }
     done
     test -f "$product/Settings.bundle/Root.plist" || { echo "the $1 build lacks its Settings.bundle" >&2; exit 1; }
+    test -f "$product/profiles/mafia.json" || { echo "the $1 build lacks the game profiles" >&2; exit 1; }
+    test -f "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" ||
+        { echo "the $1 build lacks the JIT helper extension" >&2; exit 1; }
+    # The app's own VPN is built, but left out without WINPAD_VPN = YES (WinPad.xcconfig).
+    test -f "$out/xcode-derived/Build/Products/Debug-$1/WinPadVPN.appex/WinPadVPN" ||
+        { echo "the $1 build did not build the VPN extension" >&2; exit 1; }
+    test ! -e "$product/PlugIns/WinPadVPN.appex" || { echo "the $1 build carries the VPN without WINPAD_VPN" >&2; exit 1; }
+    if [ "$1" = iphoneos ]; then
+        nm "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" >"$out/helper-symbols.txt"
+        grep -q JITSession "$out/helper-symbols.txt" ||
+            { echo "the $1 JIT helper lacks StikJIT" >&2; exit 1; }
+        test -f "$product/PlugIns/WinPadJITHelper.appex/universal.js" ||
+            { echo "the $1 JIT helper lacks universal.js" >&2; exit 1; }
+    fi
     if [ -n "$sim_window_aot" ]; then
         for f in Frameworks/fexaot-window.dylib i386-windows/window.exe; do
             test -f "$product/$f" || { echo "the $1 build lacks $f" >&2; exit 1; }
@@ -238,9 +266,9 @@ echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT
 # writes: the library unpacks the ones waiting in Documents and in its Inbox
 # (where AirDrop puts them) into game folders first; a broken one stays.
 docs="$data/Documents"
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/library.txt" "$docs/broken.winpad" \
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Zed Game" "$docs/library.txt" "$docs/broken.winpad" \
     "$docs/Inbox/Zed Game.winpad"
-mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Inbox"
+mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Inbox"
 packed=$(mktemp -d)
 mkdir -p "$packed/Zed Game/DATA"
 cp "$sim_app/i386-windows/hello.exe" "$packed/Zed Game/PACKED.EXE"
@@ -277,6 +305,10 @@ JSON
 perl -pi -e "s/RUNID/$run_id/g" "$docs/Test Game/winpad.json"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
 echo notes >"$docs/Empty/readme.txt"
+# A Mafia folder whose winpad.json has profile v1 (no registry): the app's newer one wins.
+for f in Game.exe Setup.exe LS3DF.dll; do cp "$sim_app/i386-windows/hello.exe" "$docs/Mafia/$f"; done
+printf '{"profile": {"id": "mafia", "version": 1, "title": "Mafia", "settings": {"exe": "Game.exe", "title": "Mafia"}}}\n' \
+    >"$docs/Mafia/winpad.json"
 # An image WinPad Translator signed into a game folder: used for this build of the app only.
 cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Plain/fexaot.dylib"
 cp "$sim_app/winpad-build.txt" "$docs/Plain/fexaot.build"
@@ -298,7 +330,9 @@ PY
 : >"$maps/1234.133456790.bin"
 echo code >"$maps/runtime/rtcode-1.fexrc"
 echo 'AFP=1' >"$maps/hostprobe.txt"
-xcrun simctl launch "$udid" "$bundle" -libraryTest YES
+# The test presses right and A from the focused game: start from Plain, so right is Test Game
+# whatever folders sort before it (Mafia does).
+xcrun simctl launch "$udid" "$bundle" -libraryTest YES -lastGame Plain
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
     sleep 1
@@ -309,7 +343,7 @@ xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
-for expect in 'library: 3 games' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
+for expect in 'library: 4 games' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v4 (app)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
     'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none | profile test v3' \
     'start: game Test Game/TEST.EXE, image none' 'settings: game profile test v3' \
     'settings: WINEDLLOVERRIDES=d3d8=b;dinput8=n,b;dsound=n' 'settings: WINPAD_TEST=1' \

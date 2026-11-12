@@ -31,10 +31,12 @@
 // game has a Metal layer, its first window's GDI frames show there instead
 // (a launcher, a message box), and a status line above says how long it has
 // run and how many frames it has drawn.
-// An iPad with TXM runs no JIT code even under the debugger, so the game
+// An iPad with TXM runs no JIT code under Xcode's debugger, so the game
 // runs with NoJIT from Frameworks/fexaot-game.dylib when the project has one
 // (game-aot.sh builds it on the Mac with the game), FEX's interpreter running
-// the blocks it lacks.
+// the blocks it lacks. With StikDebug attached (its universal.js script, which
+// makes the JIT pool executable: JITPool.c, WinPadJIT.m) the game runs with
+// FEX's JIT instead and needs no image.
 //
 // Everything Wine and FEX print goes to Documents/wine.log, shown on screen
 // while it runs. An x86 block missing from the image runs in FEX's IR
@@ -48,10 +50,13 @@
 #import <UIKit/UIKit.h>
 
 #import "Library.h"
+#import "WinPadJIT.h"
+#import "WinPadRedist.h"
 
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 int winehost_main(int argc, char* argv[]);
@@ -583,6 +588,9 @@ static NSString* WindowsDir(NSString* path) {
 // (madeira_link_syswow64 in Madeira's WineProcessBridge.m). The links point
 // into the bundle, whose path changes with every install, so they are made
 // anew on every launch.
+// The DirectX DLLs from Microsoft MakePrefix linked in place of Wine's (d3dx9_30...).
+static NSArray<NSString*>* directx_native;
+
 static NSString* MakePrefix(NSString* bundle) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* prefix = DocumentsPath(@"prefix");
@@ -603,6 +611,10 @@ static NSString* MakePrefix(NSString* bundle) {
                              error:nil];
     }
   }
+  // Microsoft's DirectX DLLs, when the app downloaded them (WinPadRedist.m): the ones Wine
+  // lacks, and with the setting also those it has, loaded native first (ApplyGameSettings).
+  directx_native = WinPadDirectXLink([prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"],
+                                     [bundle stringByAppendingPathComponent:@"i386-windows"]);
   // The registry Wine's wineboot would have made: the builtin COM classes
   // the games need, such as DirectSound's audio device enumerator
   // (tests/wine-loader/prefix/system.reg, the same as run-host.sh's prefix).
@@ -622,6 +634,25 @@ static NSString* MakePrefix(NSString* bundle) {
     }
   }
   return prefix;
+}
+
+// Gives the owner write access to the game's folder and everything in it where it lacks
+// it, so the game can save its settings and progress there. Files copied off a disc or an
+// installer often come read-only (r--r--r--), which Wine reports to the game as a read-only
+// file, so its saves fail. Returns how many it changed.
+static NSUInteger MakeWritable(NSString* folder) {
+  NSUInteger changed = 0;
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSMutableArray<NSString*>* paths = [NSMutableArray arrayWithObject:folder];
+  for (NSString* rel in [fm enumeratorAtPath:folder]) [paths addObject:[folder stringByAppendingPathComponent:rel]];
+  for (NSString* path in paths) {
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) || S_ISLNK(st.st_mode)) continue;
+    const mode_t want = st.st_mode | S_IWUSR | (S_ISDIR(st.st_mode) ? S_IXUSR | S_IRUSR : S_IRUSR);
+    if (want == st.st_mode) continue;
+    if (!chmod(path.fileSystemRepresentation, want & 07777)) changed++;
+  }
+  return changed;
 }
 
 // A game's settings from its winpad.json (WinPadGameSettings in Library.m: a game profile
@@ -770,6 +801,10 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
   NSDictionary* s = game.settings ?: @{};
   if (game.profile) [said addObject:[NSString stringWithFormat:@"game profile %@", game.profile]];
   NSMutableDictionary* dlls = [@{@"dinput8" : @"n,b"} mutableCopy];
+  for (NSString* dll in directx_native) dlls[dll] = @"n,b";
+  if (directx_native.count)
+    [said addObject:[NSString stringWithFormat:@"DirectX from Microsoft in place of Wine's: %@",
+                                               [directx_native componentsJoinedByString:@" "]]];
   NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
   NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
   if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {
@@ -809,6 +844,21 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     if (args.count) [said addObject:[@"arguments: " stringByAppendingString:[args componentsJoinedByString:@" "]]];
   }
   [said addObjectsFromArray:AddRegistryDefaults(prefix, s[@"registry"], [game.arch isEqualToString:@"32bit"])];
+  // Empty folders the game writes into (Mafia's Maps): copying a game often leaves them out,
+  // and then its saves fail with "path not found".
+  if ([s[@"folders"] isKindOfClass:NSArray.class] && game.folder.length) {
+    NSString* root = DocumentsPath(game.folder);
+    for (id name in s[@"folders"]) {
+      if (![name isKindOfClass:NSString.class] || ![name length] || [name hasPrefix:@"/"] ||
+          [[name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].pathComponents containsObject:@".."])
+        continue;
+      NSString* path = [root stringByAppendingPathComponent:[name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"]];
+      BOOL dir = NO;
+      if ([NSFileManager.defaultManager fileExistsAtPath:path isDirectory:&dir]) continue;
+      if ([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil])
+        [said addObject:[NSString stringWithFormat:@"made the game's folder %@", name]];
+    }
+  }
   return said;
 }
 
@@ -1060,6 +1110,12 @@ static CFTimeInterval fps_shown;
   // space on an iPad. The 32-bit program's 4 GB guest window fits, but not with the 8 GB
   // Madeira wants left over by default.
   setenv("MADEIRA_WOW_MIN_FREE_GB", "2", 1);
+  // A 32-bit program's read-write-execute memory stays plain read-write memory on the host:
+  // FEX translates its x86 code, so the host never runs those pages. Shared with the JIT
+  // pool instead, a page is physically read-only and only its alias takes writes, which a
+  // file read into it (NFS Carbon's race data) does not use. A game's winpad.json can still
+  // set it to 0.
+  setenv("MADEIRA_WOW_RWX_PLAIN", "1", 1);
   setenv("WINEHOST_RETURN", "1", 1);
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
@@ -1067,6 +1123,13 @@ static CFTimeInterval fps_shown;
   if (game) {
     NSString* exe = self.game ? self.game.exe : [NSUserDefaults.standardUserDefaults stringForKey:@"game"];
     program = DocumentsPath(exe.length ? exe : @"NFSU2/SPEED2.EXE");
+    // The game saves into its own folder (savegame\...): make it writable.
+    NSString* game_folder = self.game ? DocumentsPath(self.game.folder) : program.stringByDeletingLastPathComponent;
+    const NSUInteger writable = MakeWritable(game_folder);
+    if (writable) printf("WinPad Wine: made %lu read-only files and folders of the game writable\n", (unsigned long)writable);
+    // Folders the copy of the game lacks (empty ones) are made when the game creates a file in
+    // them (patches/madeira/0009-game-dir-missing-folders).
+    setenv("WINE_IOS_GAME_DIR", game_folder.fileSystemRepresentation, 1);
     // The Ultimate ASI Loader many games carry is a dinput8.dll of their own; the game's
     // winpad.json (its profile) may add more.
     for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))
@@ -1077,9 +1140,21 @@ static CFTimeInterval fps_shown;
   // The library picked a game's own image (Library.m), else fexaot-game.dylib.
   NSString* frameworks = NSBundle.mainBundle.privateFrameworksPath;
   NSString* game_image = self.game ? self.game.image : [frameworks stringByAppendingPathComponent:@"fexaot-game.dylib"];
-  if (self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
+  // With the JIT (StikDebug attached, WinPadJIT.m) the game runs from FEX's JIT and needs no
+  // image: what it has not run yet is translated as it runs, at the JIT's speed instead of the
+  // interpreter's. Without it, its image and the interpreter, as before.
+  if (game && !self.record) {
+    NSString* jit_note = nil;
+    const BOOL jit = WinPadJITPrepare(&jit_note);
+    if (jit_note) printf("WinPad Wine: JIT: %s\n", jit_note.UTF8String);
+    if (jit) {
+      game_image = nil;
+      printf("WinPad Wine: the game runs with FEX's JIT, not an AOT image\n");
+    }
+  }
+  if (game_image && self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
   // An image in the game folder loads only if it is signed by the app's team; else the bundle's.
-  if (!self.record && self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
+  if (!self.record && game_image && self.game.imageInFolder && !dlopen(game_image.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL)) {
     printf("WinPad Wine: the game folder's image did not load (%s), taking %s\n", dlerror(),
            self.game.bundleImage ? self.game.bundleImage.lastPathComponent.UTF8String : "none");
     game_image = self.game.bundleImage;
@@ -1271,6 +1346,13 @@ static CFTimeInterval fps_shown;
 
 @implementation WineAppDelegate
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)options {
+  // StikDebug started the app with its script attached: the JIT pool is made now, while the
+  // script waits for it (WinPadJIT.m).
+  if (WinPadJITAttached()) {
+    NSString* note = nil;
+    WinPadJITPrepare(&note);
+    NSLog(@"WinPad Wine: JIT at launch: %@", note);
+  }
   return YES;
 }
 

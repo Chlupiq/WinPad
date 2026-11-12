@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the unix side of Wine's ntdll the way Madeira's build/ntdll-unix/build.sh
 # does (Madeira's *_ios.c files in place of Wine's), with
-# the patches in patches/madeira (0001: adopt PE images from dylibs; 0005 is
+# the patches in patches/madeira (0001: adopt PE images from dylibs; 0005 and 0009 are
 # for Madeira's wine submodule, the others for build/), into
 # libntdll_unix.a for SDK.
 # Leaves out the unix libraries of other DLLs (GnuTLS, FFmpeg, FreeType):
@@ -32,7 +32,9 @@ sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
 git -C "$madeira" apply "$root"/patches/madeira/*.patch
 trap 'git -C "$madeira" checkout -q -- build; git -C "$wine" checkout -q -- dlls/ntdll/unix/file.c' EXIT
 
-compile() {  # SOURCE NAME
+compile() {  # SOURCE NAME [FLAGS...]
+    c_src=$1 c_name=$2
+    shift 2
     if xcrun -sdk "$sdk_name" clang -target "$target" -isysroot "$sdk" \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
@@ -48,11 +50,11 @@ compile() {  # SOURCE NAME
         -DWINE_UNIX_LIB -DWINE_IOS=1 \
         -Dget_thread_context=ntdll_get_thread_context \
         -Dset_thread_context=ntdll_set_thread_context \
-        -c "$1" -o "$out/$2.o" 2>"$out/$2.err"; then
-        echo "$2" >>"$out/ok"
+        "$@" -c "$c_src" -o "$out/$c_name.o" 2>"$out/$c_name.err"; then
+        echo "$c_name" >>"$out/ok"
     else
-        echo "$2" >>"$out/failed"
-        sed -n '1,15p' "$out/$2.err" >&2
+        echo "$c_name" >>"$out/failed"
+        sed -n '1,15p' "$out/$c_name.err" >&2
     fi
 }
 
@@ -67,6 +69,38 @@ for f in "$wine"/dlls/ntdll/unix/*.c; do
     esac
     compile "$f" "$name"
 done
+
+# The unix sides of nsi.dll (network adapters, IP addresses, TCP tables: nsiproxy.sys is
+# not shipped, nsi.dll falls back to these) and dnsapi.dll, as Madeira's build.sh builds
+# them. Without them their call tables were missing and link-host.sh's stand-ins answer
+# every call STATUS_NOT_SUPPORTED. A file that does not build here is left out with a
+# warning (the stand-in takes its place) instead of failing the build.
+optional() {  # SOURCE NAME [FLAGS...]
+    compile "$@"
+    if [ -f "$out/failed" ] && grep -qx "$2" "$out/failed"; then
+        echo "warning: $2 did not build, its unix calls answer STATUS_NOT_SUPPORTED:" >&2
+        sed -n '1,10p' "$out/$2.err" >&2
+        grep -vx "$2" "$out/failed" >"$out/failed.tmp" || true
+        mv "$out/failed.tmp" "$out/failed"
+        [ -s "$out/failed" ] || rm -f "$out/failed"
+        rm -f "$out/$2.o"
+    fi
+}
+nsi_ok=1
+for f in nsi_unixlib_ios:nsi_unixlib_ios nsi_network_ios:nsi_network_ios nsi_ndis_ios:nsi_ndis nsi_ip_ios:nsi_ip; do
+    optional "$src/${f%%:*}.c" "${f#*:}"
+    [ -f "$out/${f#*:}.o" ] || nsi_ok=0
+done
+# The four belong together: nsi_unixlib_ios hands the other tables to nsi_network_ios.
+if [ "$nsi_ok" = 0 ]; then
+    echo "warning: nsi's unix side is incomplete, leaving all of it out" >&2
+    rm -f "$out/nsi_unixlib_ios.o" "$out/nsi_network_ios.o" "$out/nsi_ndis.o" "$out/nsi_ip.o"
+fi
+optional "$src/dnsapi_unixlib_ios.c" dnsapi_unixlib_ios
+# Winsock's unix side (sockets for a game's network code), named as Madeira's
+# compile_unixlib names it.
+optional "$wine/dlls/ws2_32/unixlib.c" ws2_32_unixlib -I"$wine/dlls/ws2_32" \
+    -D__wine_unix_call_funcs=ws2_32_unix_call_funcs -D__wine_unix_call_wow64_funcs=ws2_32_unix_call_wow64_funcs
 
 ok=$(wc -l <"$out/ok" | tr -d ' ')
 failed=0

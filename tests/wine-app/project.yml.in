@@ -2,7 +2,59 @@ name: WinPadWine
 options:
   deploymentTarget:
     iOS: "@MIN_IOS@"
+# WinPad.xcconfig: the WINPAD_VPN switch (the app's own VPN for the built-in JIT).
+configFiles:
+  Debug: WinPad.xcconfig
+  Release: WinPad.xcconfig
 targets:
+  # The app's own loopback VPN for the built-in JIT (VPN/), in place of LocalDevVPN: only with
+  # WINPAD_VPN = YES (a paid account signs its Network Extension entitlement); else the app's
+  # script below leaves it out of the app.
+  WinPadVPN:
+    type: app-extension
+    platform: iOS
+    sources:
+      - VPN/WinPadVPNProvider.swift
+    settings:
+      base:
+        INFOPLIST_FILE: VPN/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@.VPN
+        PRODUCT_NAME: WinPadVPN
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        ARCHS: arm64
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
+  # The built-in JIT helper (JITHelper/): an app extension the app starts to enable its own
+  # JIT, with StikJIT's sources compiled in (StikJIT/, fetched by build-stikjit.sh) and its
+  # scripts as resources. idevice's library is for a device only, so the simulator leaves
+  # StikJIT out (WinPadJITHelper.swift answers there that it works on a device only).
+  WinPadJITHelper:
+    type: app-extension
+    platform: iOS
+    sources:
+      - JITHelper/WinPadJITHelper.swift
+      - StikJIT/Sources
+      - path: StikJIT/Scripts
+        buildPhase: resources
+    settings:
+      base:
+        INFOPLIST_FILE: JITHelper/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@.JITHelper
+        PRODUCT_NAME: WinPadJITHelper
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        ARCHS: arm64
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_INCLUDE_PATHS: "$(PROJECT_DIR)/StikJIT/idevice $(PROJECT_DIR)/StikJIT/iokit"
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/StikJIT/idevice $(PROJECT_DIR)/StikJIT/iokit"
+        LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/StikJIT/idevice"
+        "OTHER_LDFLAGS[sdk=iphoneos*]": "-Wl,-hidden-lidevice_ffi -framework JavaScriptCore -framework Network -framework Security -framework CFNetwork -framework SystemConfiguration -framework IOKit"
+        "EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]": "BundledScript.swift DDISession.swift DeveloperDiskImageService.swift EndpointProbe.swift IdeviceFFI.swift JITSession.swift ProcessInfo+TXM.swift RemotePairingPortResolver.swift ScriptRunner.swift StikJIT.swift StikJITError.swift SynchronousDDIDownloader.swift"
+        # One binary, also in Debug: no WinPadJITHelper.debug.dylib beside a stub that loads it.
+        ENABLE_DEBUG_DYLIB: NO
   WinPadWine:
     type: application
     platform: iOS
@@ -14,8 +66,33 @@ targets:
       # WinPad packages (.winpad): a game in one file, opened from AirDrop or Files.
       - Package.h
       - Package.c
+      # FEX's JIT with StikDebug: the JIT pool its universal.js script makes executable.
+      - JITPool.h
+      - JITPool.c
+      - WinPadJIT.h
+      - WinPadJIT.m
+      # Microsoft's DirectX DLLs, downloaded when a game needs them, out of Microsoft's
+      # cabinets with libmspack (fetch-mspack.sh).
+      - Redist.h
+      - Redist.c
+      - WinPadRedist.h
+      - WinPadRedist.m
+      - path: mspack
+        compilerFlags: "-w"
+        excludes:
+          - COPYING.LIB
       # The "program" setting in the Settings app (main.m, ProgramName).
       - Settings.bundle
+      # The game profiles (tools/winpad-translator/data/profiles) for games whose winpad.json
+      # has none or an older one (Library.m, WithAppProfile).
+      - path: profiles
+        type: folder
+    dependencies:
+      - target: WinPadJITHelper
+      # Built always, embedded by the script below only with WINPAD_VPN = YES: an embedded
+      # extension Xcode would validate after the script had removed it.
+      - target: WinPadVPN
+        embed: false
     postBuildScripts:
       # Wine's files for the platform being built, laid out next to the
       # executable as in Madeira's app, and the AOT images in Frameworks/
@@ -43,6 +120,13 @@ targets:
           if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; fi
           mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
           cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          # The app's own VPN only when it is signed for it (WinPad.xcconfig).
+          # (signed by its own target with its entitlement; the app's signature seals it).
+          rm -rf "$app/PlugIns/WinPadVPN.appex"
+          if [ "${WINPAD_VPN:-NO}" = YES ]; then
+            mkdir -p "$app/PlugIns"
+            cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$app/PlugIns/"
+          fi
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
             for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib; do
               codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
@@ -52,6 +136,7 @@ targets:
       base:
         INFOPLIST_FILE: Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@
+        CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         ARCHS: arm64
@@ -61,6 +146,8 @@ targets:
         # The host defines symbols Wine's libraries refer to (thread-locals,
         # the winios hooks); keep them in the executable itself.
         ENABLE_DEBUG_DYLIB: NO
+        # libmspack includes its own headers as <system.h>, <mspack.h>.
+        HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/mspack"
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
         # Wine for the platform being built: lib/iphoneos or lib/iphonesimulator.
         OTHER_LDFLAGS:
