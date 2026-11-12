@@ -19,9 +19,23 @@ static unsigned pe_machine(const char* path) {
   return h[off + 4] | h[off + 5] << 8;
 }
 
+static void print_import(const char* dll, void* ctx) {
+  (void)ctx;
+  puts(dll);
+}
+
 int main(int argc, char** argv) {
   if (argc == 2 && !strcmp(argv[1], "--url")) {
     puts(WINPAD_DIRECTX_URL);
+    return 0;
+  }
+  // The DLLs a PE file imports (winpad_pe_imports), one per line.
+  if (argc == 3 && !strcmp(argv[1], "--imports")) {
+    char err[512];
+    if (winpad_pe_imports(argv[2], print_import, NULL, err, sizeof(err))) {
+      fprintf(stderr, "%s\n", err);
+      return 1;
+    }
     return 0;
   }
   if (argc != 3) {

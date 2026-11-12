@@ -28,6 +28,12 @@ int winpad_redist_sha256(const char* path, char hex[65], char* err, size_t errle
 // lowercase names. *COUNT gets how many. 0 when done, else -1 with why in ERR.
 int winpad_redist_extract_directx(const char* exe, const char* dest, int* count, char* err, size_t errlen);
 
+// The DLLs the PE file PATH imports, normally or delay-loaded: calls FOUND with each name as
+// the file has it (any case), duplicates included. 0 when read, else -1 with why in ERR (not
+// a PE file, a damaged table...). Used before a game's first run to find the DLLs it lacks.
+int winpad_pe_imports(const char* path, void (*found)(const char* dll, void* ctx), void* ctx, char* err,
+                      size_t errlen);
+
 #ifdef __cplusplus
 }
 #endif
