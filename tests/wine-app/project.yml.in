@@ -86,6 +86,10 @@ targets:
           - COPYING.LIB
       # The "program" setting in the Settings app (main.m, ProgramName).
       - Settings.bundle
+      # The game profiles (tools/winpad-translator/data/profiles) for games whose winpad.json
+      # has none or an older one (Library.m, WithAppProfile).
+      - path: profiles
+        type: folder
     dependencies:
       - target: WinPadJITHelper
       # Built always, embedded by the script below only with WINPAD_VPN = YES: an embedded

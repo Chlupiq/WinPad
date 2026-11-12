@@ -265,6 +265,137 @@ static NSString* NewMapsText(NSInteger n) {
                             : [NSString stringWithFormat:@"%ld nových code map", (long)n];
 }
 
+// The game profiles the app carries (tools/winpad-translator/data/profiles, copied into the
+// app's "profiles" folder): a game folder whose winpad.json has none, or an older version of
+// one, gets the app's (WithAppProfile). The file itself is left as it is.
+static NSArray<NSDictionary*>* AppProfiles(void) {
+  static NSArray* profiles;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSMutableArray* list = [NSMutableArray new];
+    NSString* dir = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"profiles"];
+    for (NSString* name in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil]
+             sortedArrayUsingSelector:@selector(compare:)]) {
+      if (![name.pathExtension isEqualToString:@"json"]) continue;
+      NSData* data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:name]];
+      id prof = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+      if ([prof isKindOfClass:NSDictionary.class] && [prof[@"id"] isKindOfClass:NSString.class] &&
+          [prof[@"match"] isKindOfClass:NSArray.class])
+        [list addObject:prof];
+    }
+    profiles = list;
+  });
+  return profiles;
+}
+
+// The files of DIR by lowercase path relative to DIR (with /), as profiles.py's _files_ci: two
+// folders deep when DEEP (a rule names a file in a folder), else only DIR's own, which is
+// quick for a game of thousands of files.
+static NSDictionary<NSString*, NSString*>* FilesAnyCase(NSString* dir, BOOL deep) {
+  NSMutableDictionary* found = [NSMutableDictionary new];
+  NSDirectoryEnumerator* walk = [NSFileManager.defaultManager enumeratorAtPath:dir];
+  for (NSString* path in walk) {
+    const BOOL folder = [walk.fileAttributes.fileType isEqualToString:NSFileTypeDirectory];
+    if (folder && (!deep || walk.level >= 3)) [walk skipDescendants];
+    if (folder || found[path.lowercaseString]) continue;
+    found[path.lowercaseString] = path;
+  }
+  return found;
+}
+
+// Whether a rule of the app's profiles names a file inside a folder.
+static BOOL ProfilesNameFolders(void) {
+  for (NSDictionary* prof in AppProfiles())
+    for (NSDictionary* rule in prof[@"match"]) {
+      if (![rule isKindOfClass:NSDictionary.class]) continue;
+      NSMutableArray* names = [NSMutableArray arrayWithObject:[rule[@"exe"] isKindOfClass:NSString.class] ? rule[@"exe"] : @""];
+      if ([rule[@"files"] isKindOfClass:NSArray.class]) [names addObjectsFromArray:rule[@"files"]];
+      for (id name in names)
+        if ([name isKindOfClass:NSString.class] && ([name containsString:@"/"] || [name containsString:@"\\"])) return YES;
+    }
+  return NO;
+}
+
+// Whether PROF's match rules take the game in DIR (profiles.py match): its program, or @"".
+static NSString* ProfileMatch(NSDictionary* prof, NSDictionary<NSString*, NSString*>* files, NSNumber* steam_id) {
+  for (NSDictionary* rule in prof[@"match"]) {
+    if (![rule isKindOfClass:NSDictionary.class]) continue;
+    if (rule[@"steamAppId"] && ![rule[@"steamAppId"] isEqual:steam_id]) continue;
+    NSString* exe = @"";
+    if ([rule[@"exe"] isKindOfClass:NSString.class]) {
+      exe = files[[rule[@"exe"] stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString];
+      if (!exe) continue;
+    }
+    BOOL all = YES;
+    for (NSString* f in [rule[@"files"] isKindOfClass:NSArray.class] ? rule[@"files"] : @[])
+      if (![f isKindOfClass:NSString.class] ||
+          !files[[f stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString])
+        all = NO;
+    if (all) return exe;
+  }
+  return nil;
+}
+
+// The first program PROF's rules name that the folder has (profiles.py rule_exe).
+static NSString* ProfileRuleExe(NSDictionary* prof, NSDictionary<NSString*, NSString*>* files) {
+  for (NSDictionary* rule in prof[@"match"])
+    if ([rule isKindOfClass:NSDictionary.class] && [rule[@"exe"] isKindOfClass:NSString.class]) {
+      NSString* exe = files[[rule[@"exe"] stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString];
+      if (exe) return exe;
+    }
+  return nil;
+}
+
+// INFO (the folder's winpad.json) with the app's profile for the game in DIR when the file has
+// no profile, or an older version of the same one; *FROM_APP says so. The block is the one
+// profiles.py apply writes: id, version, title, notes, settings with the program and title.
+static NSDictionary* WithAppProfile(NSString* dir, NSDictionary* info, BOOL* from_app) {
+  *from_app = NO;
+  NSDictionary* had = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
+  NSDictionary* files = nil;
+  NSDictionary* prof = nil;
+  NSString* exe = nil;
+  if ([had[@"id"] isKindOfClass:NSString.class]) {
+    for (NSDictionary* p in AppProfiles())
+      if ([p[@"id"] isEqualToString:had[@"id"]]) prof = p;
+    if (!prof || [prof[@"version"] integerValue] <= [had[@"version"] integerValue]) return info;
+    files = FilesAnyCase(dir, ProfilesNameFolders());
+    NSDictionary* old_settings = [had[@"settings"] isKindOfClass:NSDictionary.class] ? had[@"settings"] : nil;
+    exe = [old_settings[@"exe"] isKindOfClass:NSString.class] ? old_settings[@"exe"] : nil;
+    if (!exe.length) exe = ProfileMatch(prof, files, nil) ?: ProfileRuleExe(prof, files);
+  } else {
+    if (had || !AppProfiles().count) return info;
+    files = FilesAnyCase(dir, ProfilesNameFolders());
+    NSString* steam = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"steam_appid.txt"]
+                                                encoding:NSUTF8StringEncoding
+                                                   error:nil];
+    NSNumber* steam_id = steam.integerValue > 0 ? @(steam.integerValue) : nil;
+    for (NSDictionary* p in AppProfiles()) {
+      exe = ProfileMatch(p, files, steam_id);
+      if (exe) {
+        prof = p;
+        break;
+      }
+    }
+    if (!prof) return info;
+    if (!exe.length) exe = ProfileRuleExe(prof, files);
+  }
+  NSMutableDictionary* settings =
+      [([prof[@"settings"] isKindOfClass:NSDictionary.class] ? prof[@"settings"] : @{}) mutableCopy];
+  if (exe.length) settings[@"exe"] = exe;
+  if (!settings[@"title"]) settings[@"title"] = prof[@"title"] ?: @"";
+  NSMutableDictionary* out = [(info ?: @{}) mutableCopy];
+  out[@"profile"] = @{
+    @"id" : prof[@"id"],
+    @"version" : prof[@"version"] ?: @0,
+    @"title" : prof[@"title"] ?: @"",
+    @"notes" : [prof[@"notes"] isKindOfClass:NSArray.class] ? prof[@"notes"] : @[],
+    @"settings" : settings
+  };
+  *from_app = YES;
+  return out;
+}
+
 NSDictionary* WinPadGameSettings(NSDictionary* info) {
   NSMutableDictionary* out = [NSMutableDictionary new];
   NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
@@ -312,6 +443,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
       id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
       if ([obj isKindOfClass:NSDictionary.class]) info = obj;
     }
+    BOOL profile_from_app = NO;
+    info = WithAppProfile(dir, info, &profile_from_app);
     NSDictionary* settings = WinPadGameSettings(info);
     NSString* exe = [settings[@"exe"] isKindOfClass:NSString.class] ? settings[@"exe"] : nil;
     if (exe && ([exe containsString:@".."] || ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:exe]])) exe = nil;
@@ -337,7 +470,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     game.settings = settings;
     NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
     if ([profile[@"id"] isKindOfClass:NSString.class])
-      game.profile = [NSString stringWithFormat:@"%@ v%@", profile[@"id"], profile[@"version"] ?: @"?"];
+      game.profile = [NSString stringWithFormat:@"%@ v%@%@", profile[@"id"], profile[@"version"] ?: @"?",
+                                                 profile_from_app ? @" (app)" : @""];
     game.title = title.length ? title : folder;
     game.arch = ProgramArch([docs stringByAppendingPathComponent:game.exe]);
     game.bundleImage = WinPadGameImage(folder);

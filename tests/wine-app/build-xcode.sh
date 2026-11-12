@@ -89,6 +89,9 @@ du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  
 
 cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
+rm -rf "$proj/profiles"
+mkdir -p "$proj/profiles"
+cp "$here/../../tools/winpad-translator/data/profiles/"*.json "$proj/profiles/"
 # The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
 cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
 sh "$here/build-stikjit.sh" "$proj/StikJIT"
@@ -155,6 +158,7 @@ build() {
         test -f "$product/$f" || { echo "the $1 build lacks $f" >&2; exit 1; }
     done
     test -f "$product/Settings.bundle/Root.plist" || { echo "the $1 build lacks its Settings.bundle" >&2; exit 1; }
+    test -f "$product/profiles/mafia.json" || { echo "the $1 build lacks the game profiles" >&2; exit 1; }
     test -f "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" ||
         { echo "the $1 build lacks the JIT helper extension" >&2; exit 1; }
     # The app's own VPN is built, but left out without WINPAD_VPN = YES (WinPad.xcconfig).
@@ -262,9 +266,9 @@ echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT
 # writes: the library unpacks the ones waiting in Documents and in its Inbox
 # (where AirDrop puts them) into game folders first; a broken one stays.
 docs="$data/Documents"
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/library.txt" "$docs/broken.winpad" \
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Zed Game" "$docs/library.txt" "$docs/broken.winpad" \
     "$docs/Inbox/Zed Game.winpad"
-mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Inbox"
+mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Inbox"
 packed=$(mktemp -d)
 mkdir -p "$packed/Zed Game/DATA"
 cp "$sim_app/i386-windows/hello.exe" "$packed/Zed Game/PACKED.EXE"
@@ -301,6 +305,10 @@ JSON
 perl -pi -e "s/RUNID/$run_id/g" "$docs/Test Game/winpad.json"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
 echo notes >"$docs/Empty/readme.txt"
+# A Mafia folder whose winpad.json has profile v1 (no registry): the app's newer one wins.
+for f in Game.exe Setup.exe LS3DF.dll; do cp "$sim_app/i386-windows/hello.exe" "$docs/Mafia/$f"; done
+printf '{"profile": {"id": "mafia", "version": 1, "title": "Mafia", "settings": {"exe": "Game.exe", "title": "Mafia"}}}\n' \
+    >"$docs/Mafia/winpad.json"
 # An image WinPad Translator signed into a game folder: used for this build of the app only.
 cp "$sim_app/Frameworks/fexaot.dylib" "$docs/Plain/fexaot.dylib"
 cp "$sim_app/winpad-build.txt" "$docs/Plain/fexaot.build"
@@ -333,7 +341,7 @@ xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
-for expect in 'library: 3 games' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
+for expect in 'library: 4 games' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v4 (app)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
     'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none | profile test v3' \
     'start: game Test Game/TEST.EXE, image none' 'settings: game profile test v3' \
     'settings: WINEDLLOVERRIDES=d3d8=b;dinput8=n,b;dsound=n' 'settings: WINPAD_TEST=1' \
