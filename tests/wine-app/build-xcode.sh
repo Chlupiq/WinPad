@@ -87,7 +87,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 rm -rf "$proj/profiles"
 mkdir -p "$proj/profiles"
@@ -330,7 +330,9 @@ PY
 : >"$maps/1234.133456790.bin"
 echo code >"$maps/runtime/rtcode-1.fexrc"
 echo 'AFP=1' >"$maps/hostprobe.txt"
-xcrun simctl launch "$udid" "$bundle" -libraryTest YES
+# The test presses right and A from the focused game: start from Plain, so right is Test Game
+# whatever folders sort before it (Mafia does).
+xcrun simctl launch "$udid" "$bundle" -libraryTest YES -lastGame Plain
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
     sleep 1
@@ -361,6 +363,77 @@ grep -qiF "[Software\\\\Wow6432Node\\\\WinPad\\\\$run_id]" "$docs/prefix/system.
     grep -qF '"Resolution"=dword:00000002' "$docs/prefix/system.reg" &&
     grep -qF '"Mode"="fullscreen"' "$docs/prefix/user.reg" ||
     { echo "the game profile's registry values are not in the prefix" >&2; exit 1; }
+# Covers from the internet (Covers.m): what Steam, Wikipedia (and SteamGridDB, with a key) find
+# for a title, and the first one loaded. The sources are outside CI's control, so nothing found
+# is only a warning.
+rm -f "$docs/covers.txt" "$docs/.covers/Cover Game.jpg"
+# A game copied off a disc: read-only files in a read-only folder.
+[ -d "$docs/Cover Game" ] && chmod -R u+w "$docs/Cover Game"
+rm -rf "$docs/Cover Game"
+mkdir -p "$docs/Cover Game"
+cp "$sim_app/i386-windows/hello.exe" "$docs/Cover Game/GAME.EXE"
+chmod 444 "$docs/Cover Game/GAME.EXE"
+chmod 555 "$docs/Cover Game"
+xcrun simctl launch "$udid" "$bundle" -coverTest "Need for Speed Underground 2"
+for _ in $(seq 60); do
+    grep -q '== finished' "$docs/covers.txt" 2>/dev/null && break
+    sleep 1
+done
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+echo "--- the cover search ---"
+cat "$docs/covers.txt" || true
+grep -qF 'save read-only: ok' "$docs/covers.txt" 2>/dev/null &&
+    { [ -f "$docs/Cover Game/cover.jpg" ] || [ -f "$docs/.covers/Cover Game.jpg" ]; } ||
+    { echo "a cover of a read-only game folder was not saved" >&2; exit 1; }
+ls -la "$docs/Cover Game" "$docs/.covers" 2>/dev/null || true
+chmod -R u+w "$docs/Cover Game"
+rm -rf "$docs/Cover Game"
+grep -qF 'query: Need for Speed Underground 2' "$docs/covers.txt" 2>/dev/null ||
+    { echo "the cover search did not clean up the folder name" >&2; exit 1; }
+grep -q '^loaded: .* [1-9][0-9]*x[1-9]' "$docs/covers.txt" 2>/dev/null ||
+    echo "::warning::the cover search found or loaded no cover (no internet on the runner?)"
+grep -q '^cover button: visible' "$docs/covers.txt" ||
+    { echo "the library's Obal button is not on the iPad's screen" >&2; exit 1; }
+
+# The same on an iPhone, which runs the library on its side and smaller: Obal must be on the
+# screen there too, with a game that has code maps (Obal beside the export, the tightest).
+iphone=$(xcrun simctl list devices available -j | python3 -I -c '
+import json, sys
+best = None
+for runtime, devices in json.load(sys.stdin)["devices"].items():
+    if ".iOS-" not in runtime:
+        continue
+    version = tuple(int(x) for x in runtime.rsplit(".iOS-", 1)[1].split("-"))
+    for d in devices:
+        if d["name"].startswith("iPhone") and "SE" not in d["name"] and (best is None or version > best[0]):
+            best = (version, d["udid"])
+print(best[1] if best else "")')
+if [ -z "$iphone" ]; then
+    echo "::warning::no iPhone simulator: the library's iPhone layout was not checked"
+else
+    xcrun simctl boot "$iphone" 2>/dev/null || true
+    xcrun simctl bootstatus "$iphone" -b >/dev/null
+    xcrun simctl install "$iphone" "$sim_app"
+    phone_docs="$(xcrun simctl get_app_container "$iphone" "$bundle" data)/Documents"
+    rm -rf "$phone_docs/Phone Game" "$phone_docs/fexcache/Phone Game" "$phone_docs/covers.txt"
+    mkdir -p "$phone_docs/Phone Game" "$phone_docs/fexcache/Phone Game/codemap/new"
+    cp "$sim_app/i386-windows/hello.exe" "$phone_docs/Phone Game/GAME.EXE"
+    cp "$maps/1234.133456789.bin" "$phone_docs/fexcache/Phone Game/codemap/new/" 2>/dev/null ||
+        echo map >"$phone_docs/fexcache/Phone Game/codemap/new/1234.1.bin"
+    xcrun simctl launch "$iphone" "$bundle" -coverTest "Need for Speed Underground 2"
+    for _ in $(seq 60); do
+        grep -q '== finished' "$phone_docs/covers.txt" 2>/dev/null && break
+        sleep 1
+    done
+    xcrun simctl io "$iphone" screenshot "$out/library-screens/iphone.png" >/dev/null 2>&1 || true
+    xcrun simctl terminate "$iphone" "$bundle" 2>/dev/null || true
+    echo "--- the cover search on an iPhone ---"
+    cat "$phone_docs/covers.txt" || true
+    xcrun simctl shutdown "$iphone" 2>/dev/null || true
+    grep -q '^cover button: visible' "$phone_docs/covers.txt" ||
+        { echo "the library's Obal button is not on the iPhone's screen" >&2; exit 1; }
+fi
+
 # WinPad Translator takes the zip as it is: Test Game's map, the run-time code and the CPU features.
 echo "--- the exported zip ---"
 unzip -l "$docs/export-Test Game.zip"
