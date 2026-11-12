@@ -160,11 +160,15 @@ static CALayer* game_layer;
 // it stays out of an iPhone's camera cutout; set before the game starts.
 static NSString* picture_scaling;
 static BOOL picture_avoids_cutout;
+static NSInteger picture_stretch;  // "custom": how much wider than its shape, in percent
+static CGSize picture_laid_out;    // the drawable size the custom layout was made for
 
 // DXMT presents frames of the game window's size (1024x768) into the layer; Core Animation
 // scales them to the layer's frame as its contentsGravity says.
 static void ScalePicture(CALayer* layer) {
-  layer.contentsGravity = [picture_scaling isEqualToString:@"stretch"] ? kCAGravityResize
+  // "custom" sizes the layer itself (viewDidLayoutSubviews) and fills it.
+  layer.contentsGravity = [picture_scaling isEqualToString:@"stretch"] || [picture_scaling isEqualToString:@"custom"]
+                              ? kCAGravityResize
                           : [picture_scaling isEqualToString:@"fill"]  ? kCAGravityResizeAspectFill
                                                                        : kCAGravityResizeAspect;
   layer.masksToBounds = YES;
@@ -957,6 +961,7 @@ static CFTimeInterval fps_shown;
   metal_fill = [self.program isEqualToString:@"game"];
   picture_scaling = WinPadPictureScaling(self.game.settings);
   picture_avoids_cutout = WinPadPictureAvoidsCutout();
+  picture_stretch = WinPadPictureStretch(self.game.settings);
   // The monitor Wine reports to the program (runWine): the display's size is read here, on the
   // main thread.
   for (UIScene* scene in UIApplication.sharedApplication.connectedScenes)
@@ -1016,9 +1021,20 @@ static CFTimeInterval fps_shown;
     self.view.backgroundColor = UIColor.blackColor;
     self.status.hidden = YES;
     self.text.hidden = YES;
+    CGRect frame = game_rect;
+    if ([picture_scaling isEqualToString:@"custom"]) {
+      // The picture in its own shape (4:3 until DXMT sized the drawable), then wider by
+      // picture_stretch percent, at most as wide as the screen; black at the sides.
+      const CGSize d = [game_layer isKindOfClass:CAMetalLayer.class] ? ((CAMetalLayer*)game_layer).drawableSize : CGSizeZero;
+      const CGFloat aspect = d.width > 0 && d.height > 0 ? d.width / d.height : 4.0 / 3;
+      const CGFloat h = MIN(game_rect.size.height, game_rect.size.width / aspect);
+      const CGFloat w = MIN(game_rect.size.width, h * aspect * (1 + picture_stretch / 100.0));
+      frame = CGRectMake(CGRectGetMidX(game_rect) - w / 2, CGRectGetMidY(game_rect) - h / 2, w, h);
+      picture_laid_out = d;
+    }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    game_layer.frame = game_rect;
+    game_layer.frame = frame;
     [CATransaction commit];
     [self placeFps];
     return;
@@ -1095,6 +1111,10 @@ static CFTimeInterval fps_shown;
 
 - (void)showLog {
   NSString* summary = self.summary;
+  // The custom stretch follows the game's resolution as it changes it.
+  if (game_has_layer && [picture_scaling isEqualToString:@"custom"] && [game_layer isKindOfClass:CAMetalLayer.class] &&
+      !CGSizeEqualToSize(((CAMetalLayer*)game_layer).drawableSize, picture_laid_out))
+    [self.view setNeedsLayout];
   if (self.status) {
     if (!self.started) self.started = [NSDate date];
     // host/metal-display.m counts them; the bundle has it only when it has DXMT.
@@ -1176,7 +1196,10 @@ static CFTimeInterval fps_shown;
     printf("WinPad Wine: monitor %.0fx%.0f for the program (display %.0fx%.0f points)\n", screen.width, screen.height,
            self.display.width, self.display.height);
   }
-  if (game) printf("WinPad Wine: picture %s%s\n", picture_scaling.UTF8String, picture_avoids_cutout ? ", out of the cutout" : "");
+  if (game)
+    printf("WinPad Wine: picture %s%s%s\n", picture_scaling.UTF8String,
+           [picture_scaling isEqualToString:@"custom"] ? [NSString stringWithFormat:@" +%ld %%", (long)picture_stretch].UTF8String : "",
+           picture_avoids_cutout ? ", out of the cutout" : "");
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
   NSMutableArray<NSString*>* game_args = [NSMutableArray new];

@@ -151,7 +151,8 @@ jsou podle místa (spodní je vždy `a` v `padKeys`).
 Obraz hry (nastavení knihovny → Obraz hry). Jakmile hra kreslí přes Metal, její
 vrstva zabere celý displej a obraz ji vyplní podle volby: **Zachovat tvar**
 (celý obraz v poměru hry, po stranách černé pruhy; dřív napevno 4:3),
-**Roztáhnout** (celý displej, obraz 4:3 se roztáhne do šířky; na iPhonu asi o
+**Vlastní roztažení** (obraz širší o nastavená procenta, 0–100 % po 5 %, nejvýš
+na celý displej; posuvník tento režim sám zapne), **Roztáhnout na celý displej** (celý displej, obraz 4:3 se roztáhne do šířky; na iPhonu asi o
 63 %) nebo **Přiblížit** (celý displej v poměru hry, nahoře a dole se obraz
 uřízne). Škáluje Core Animation (`contentsGravity` vrstvy, `ScalePicture` v
 `main.m`), hra kreslí dál ve svém rozlišení, takže to nic nestojí.
@@ -162,7 +163,7 @@ pak obsahuje standardní rozlišení do tolika pixelů (1280×720, 1366×768…)
 hra, která širokoúhlá rozlišení umí, je nabídne a vykreslí víc scény bez
 roztažení. **Mimo výřez displeje** nechá obraz mimo výřez kamery a kulaté rohy
 iPhonu. Hra to může mít ve `winpad.json` po svém: `"scaling": "fit" | "stretch"
-| "fill"`, `"screen": "wide" | "4:3" | "1280x720"`.
+| "fill" | "custom"` (s `"stretch": 30`), `"screen": "wide" | "4:3" | "1280x720"`.
 
 Ukazatel FPS (nastavení knihovny → Diagnostika → Ukazatel FPS, nebo Nastavení →
 WinPad Wine → FPS overlay) ukáže v levém horním rohu hry snímky za poslední

@@ -899,13 +899,23 @@ static BOOL BackgroundWaves(void) {
 
 // The game's picture (Library.h). The settings keep "pictureScaling", "pictureAvoidsCutout" and
 // "gameScreen"; a game's winpad.json "scaling" and "screen" win over them.
-static NSArray<NSString*>* PictureScalings(void) { return @[ @"fit", @"stretch", @"fill" ]; }
+static NSArray<NSString*>* PictureScalings(void) { return @[ @"fit", @"custom", @"stretch", @"fill" ]; }
 
 NSString* WinPadPictureScaling(NSDictionary* settings) {
   id own = settings[@"scaling"];
   if ([own isKindOfClass:NSString.class] && [PictureScalings() containsObject:[own lowercaseString]]) return [own lowercaseString];
   NSString* set = [NSUserDefaults.standardUserDefaults stringForKey:@"pictureScaling"];
   return [PictureScalings() containsObject:set] ? set : @"fit";
+}
+
+NSInteger WinPadPictureStretch(NSDictionary* settings) {
+  id own = settings[@"stretch"];
+  const NSInteger p = [own respondsToSelector:@selector(integerValue)]
+                          ? [own integerValue]
+                          : [NSUserDefaults.standardUserDefaults objectForKey:@"pictureStretch"]
+                                ? [NSUserDefaults.standardUserDefaults integerForKey:@"pictureStretch"]
+                                : 25;
+  return MAX(0, MIN(100, p));
 }
 
 BOOL WinPadPictureAvoidsCutout(void) {
@@ -932,7 +942,8 @@ CGSize WinPadGameScreen(NSDictionary* settings, CGSize display) {
 
 // The picture's choices as the settings show them.
 static NSString* PictureScalingName(NSString* scaling) {
-  return @{@"fit" : @"Zachovat tvar", @"stretch" : @"Roztáhnout", @"fill" : @"Přiblížit"}[scaling];
+  return @{@"fit" : @"Zachovat tvar", @"custom" : @"Vlastní roztažení", @"stretch" : @"Roztáhnout na celý displej",
+            @"fill" : @"Přiblížit"}[scaling];
 }
 
 // The settings: touch controls, the controller's keys, the last log, the test programs.
@@ -1013,7 +1024,7 @@ static NSString* DirectXSummary(void) {
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
   if (section == AppearanceSection) return 4;
-  if (section == PictureSection) return 3;
+  if (section == PictureSection) return 4;
   section -= OtherSections;
   return section == 0 ? 3 : section == 1 ? PadCount + PadPresets + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : section == 3 ? 3 : 2;
 }
@@ -1028,7 +1039,9 @@ static NSString* DirectXSummary(void) {
            @"podle názvu (Steam, Wikipedie) a uloží jen ten, jehož název sedí; jiný vybereš tlačítkem Obal pod hrou. "
            @"S klíčem SteamGridDB (zdarma: steamgriddb.com › Preferences › API) najde víc a hezčích obalů.";
   if (section == PictureSection)
-    return @"Zachovat tvar: celý obraz hry v jeho poměru stran, po stranách černé pruhy. Roztáhnout: celý displej, "
+    return @"Zachovat tvar: celý obraz hry v jeho poměru stran, po stranách černé pruhy. Vlastní roztažení: obraz se "
+           @"roztáhne do šířky o tolik procent, kolik nastavíš posuvníkem (nejvýš na celý displej; posunutím se tento "
+           @"režim zapne). Roztáhnout na celý displej: "
            @"obraz 4:3 se roztáhne do šířky. Přiblížit: celý displej v poměru hry, nahoře a dole se kus obrazu uřízne. "
            @"Širokoúhlý monitor: hra dostane monitor v poměru stran displeje (na iPhonu 16 Pro 1670×768) a hra, která "
            @"umí širokoúhlá rozlišení, vykreslí víc scény bez roztažení (vyber ho pak v nastavení hry). "
@@ -1093,10 +1106,23 @@ static NSString* DirectXSummary(void) {
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
   }
+  if (path.section == PictureSection && path.row == 1) {
+    const NSInteger stretch = WinPadPictureStretch(nil);
+    cell.textLabel.text = [NSString stringWithFormat:@"Roztažení o %ld %%", (long)stretch];
+    UISlider* slider = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 170, 32)];
+    slider.minimumValue = 0;
+    slider.maximumValue = 100;
+    slider.value = stretch;
+    [slider addTarget:self action:@selector(stretchChanged:) forControlEvents:UIControlEventValueChanged];
+    [slider addTarget:self action:@selector(stretchDone:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    cell.accessoryView = slider;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
   if (path.section == PictureSection) {
-    cell.textLabel.text = path.row == 1 ? @"Širokoúhlý monitor" : @"Mimo výřez displeje";
+    cell.textLabel.text = path.row == 2 ? @"Širokoúhlý monitor" : @"Mimo výřez displeje";
     UISwitch* toggle = [UISwitch new];
-    toggle.on = path.row == 1 ? [[NSUserDefaults.standardUserDefaults stringForKey:@"gameScreen"] isEqualToString:@"wide"]
+    toggle.on = path.row == 2 ? [[NSUserDefaults.standardUserDefaults stringForKey:@"gameScreen"] isEqualToString:@"wide"]
                               : WinPadPictureAvoidsCutout();
     toggle.tag = path.row;
     [toggle addTarget:self action:@selector(pictureChanged:) forControlEvents:UIControlEventValueChanged];
@@ -1233,8 +1259,23 @@ static NSString* DirectXSummary(void) {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"touchControls"];
 }
 
+// The stretch slider, in steps of 5 %: moving it picks "Vlastní roztažení" too.
+- (void)stretchChanged:(UISlider*)slider {
+  const NSInteger stretch = lround(slider.value / 5) * 5;
+  [NSUserDefaults.standardUserDefaults setInteger:stretch forKey:@"pictureStretch"];
+  [NSUserDefaults.standardUserDefaults setObject:@"custom" forKey:@"pictureScaling"];
+  UITableViewCell* cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:PictureSection]];
+  cell.textLabel.text = [NSString stringWithFormat:@"Roztažení o %ld %%", (long)stretch];
+}
+
+- (void)stretchDone:(UISlider*)slider {
+  slider.value = WinPadPictureStretch(nil);
+  [self.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:PictureSection] ]
+                        withRowAnimation:UITableViewRowAnimationNone];
+}
+
 - (void)pictureChanged:(UISwitch*)toggle {
-  if (toggle.tag == 1) {
+  if (toggle.tag == 2) {
     if (toggle.on) [NSUserDefaults.standardUserDefaults setObject:@"wide" forKey:@"gameScreen"];
     else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"gameScreen"];
   } else {

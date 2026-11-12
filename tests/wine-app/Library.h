@@ -55,6 +55,9 @@ NSString* WinPadPictureScaling(NSDictionary* settings);
 // Whether the picture stays out of an iPhone's camera cutout and rounded corners (left and
 // right safe area in landscape).
 BOOL WinPadPictureAvoidsCutout(void);
+// With "custom" scaling: how much wider than its own shape the picture is, in percent (0-100,
+// the "pictureStretch" setting or winpad.json "stretch"), at most as wide as the screen.
+NSInteger WinPadPictureStretch(NSDictionary* settings);
 // The monitor the game is told it has (MADEIRA_SCREEN_W/H), or CGSizeZero for Wine's 1024x768.
 // "Širokoúhlý monitor" (the "gameScreen" setting "wide") or the game's winpad.json "screen":
 // "wide" makes it 768 lines tall in the shape of DISPLAY (an iPhone 16 Pro: 1670x768), so a game
