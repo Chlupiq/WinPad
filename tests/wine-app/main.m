@@ -44,6 +44,7 @@
 // Documents/fexcache/<game folder>/codemap/new (the test programs:
 // Documents/fexcache/codemap/new), so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
+#import <objc/message.h>
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
@@ -156,6 +157,24 @@ static BOOL metal_fill;
 static CGRect game_rect;
 static BOOL game_has_layer;
 static CALayer* game_layer;
+// How the picture fills the screen (WinPadPictureScaling: fit, stretch or fill) and whether
+// it stays out of an iPhone's camera cutout; set before the game starts.
+static NSString* picture_scaling;
+static BOOL picture_avoids_cutout;
+static NSInteger picture_stretch;  // "custom": how much wider than its shape, in percent
+static CGSize picture_laid_out;    // the drawable size the custom layout was made for
+
+// DXMT presents frames of the game window's size (1024x768) into the layer; Core Animation
+// scales them to the layer's frame as its contentsGravity says.
+static void ScalePicture(CALayer* layer) {
+  // "custom" sizes the layer itself (viewDidLayoutSubviews) and fills it.
+  layer.contentsGravity = [picture_scaling isEqualToString:@"stretch"] || [picture_scaling isEqualToString:@"custom"]
+                              ? kCAGravityResize
+                          : [picture_scaling isEqualToString:@"fill"]  ? kCAGravityResizeAspectFill
+                                                                       : kCAGravityResizeAspect;
+  layer.masksToBounds = YES;
+  layer.backgroundColor = UIColor.blackColor.CGColor;
+}
 
 __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALayer* layer) {
   // On the main thread (host/metal-display.m), so the layer is placed in the
@@ -170,6 +189,7 @@ __attribute__((used, visibility("default"))) void winehost_show_metal_layer(CALa
     else [metal_view.layer addSublayer:layer];
     if (metal_fill) {
       // From now on the game has the whole screen (viewDidLayoutSubviews).
+      ScalePicture(layer);
       game_has_layer = YES;
       game_layer = layer;
       frame_view.hidden = YES;
@@ -250,14 +270,51 @@ static void ApplyPad(int from, const BOOL in[PadCount]) {
     }
 }
 
+// Exit (the touch controller's button between View and Menu, a controller's Xbox/Home
+// button): asks whether to end the game (WineViewController askToExit). Wine runs once per
+// process, so ending the game closes the app; opened again, it shows the game library.
+// While the question shows, Exit or Home again or A ends the game, B goes back to it.
+enum { PadExit = PadCount };  // the touch controller's Exit, which no key is
+static void (^exit_asked)(void);   // set by the WineViewController running a game
+static UIAlertController* exit_alert;
+static void (^exit_now)(void);
+
+static void RequestExit(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (exit_alert && exit_now) exit_now();
+    else if (exit_asked) exit_asked();
+  });
+}
+
 static void ReadPad(GCExtendedGamepad* pad) {
+  static BOOL home_was;
+  const BOOL home = pad.buttonHome.pressed;
+  if (home && !home_was) RequestExit();
+  home_was = home;
+  // While the question is up the controller answers it and the game gets nothing.
+  if (exit_alert) {
+    static BOOL a_was, b_was;
+    if (pad.buttonA.pressed && !a_was && exit_now) dispatch_async(dispatch_get_main_queue(), exit_now);
+    if (pad.buttonB.pressed && !b_was)
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [exit_alert dismissViewControllerAnimated:YES completion:nil];
+        exit_alert = nil;
+      });
+    a_was = pad.buttonA.pressed;
+    b_was = pad.buttonB.pressed;
+    return;
+  }
   const float tilt = 0.5f;  // how far a stick or trigger goes before its key is down
   GCControllerDirectionPad *dpad = pad.dpad, *stick = pad.leftThumbstick, *right = pad.rightThumbstick;
   const BOOL in[PadCount] = {
-      [PadUp] = dpad.up.pressed || stick.yAxis.value > tilt,
-      [PadDown] = dpad.down.pressed || stick.yAxis.value < -tilt,
-      [PadLeft] = dpad.left.pressed || stick.xAxis.value < -tilt,
-      [PadRight] = dpad.right.pressed || stick.xAxis.value > tilt,
+      [PadUp] = dpad.up.pressed,
+      [PadDown] = dpad.down.pressed,
+      [PadLeft] = dpad.left.pressed,
+      [PadRight] = dpad.right.pressed,
+      [PadLUp] = stick.yAxis.value > tilt,
+      [PadLDown] = stick.yAxis.value < -tilt,
+      [PadLLeft] = stick.xAxis.value < -tilt,
+      [PadLRight] = stick.xAxis.value > tilt,
       [PadA] = pad.buttonA.pressed,
       [PadB] = pad.buttonB.pressed,
       [PadX] = pad.buttonX.pressed,
@@ -295,7 +352,9 @@ typedef enum { TouchButton, TouchStick, TouchDpad } TouchKind;
 // The touch controller, laid out as an Xbox controller over the game: the left
 // stick above the d-pad on the left, A B X Y above the right stick on the right,
 // LT and LB in the top left corner, RT and RB in the top right one, View and
-// Menu between them. Its parts are see-through and take several
+// Menu between them. In the PlayStation look (WinPadPadStyle) the d-pad is above
+// the left stick and the buttons are ✕ ○ □ △, L1 L2 R1 R2, Create and Options;
+// in Nintendo's B A Y X, L ZL R ZR, − and +. Its parts are see-through and take several
 // fingers at once; a finger can slide from button to button. Touches
 // elsewhere go to the views beneath it.
 @interface WinPadTouchPad : UIView
@@ -306,6 +365,8 @@ typedef enum { TouchButton, TouchStick, TouchDpad } TouchKind;
   NSArray<WinPadTouchPart*>* _parts;
   NSMapTable<UITouch*, WinPadTouchPart*>* _touches;
   BOOL _pressed[PadCount];  // press:down:, CI's
+  BOOL _dpadOnTop;          // the PlayStation look: the d-pad above the left stick
+  BOOL _exitHeld;           // a finger is on Exit
 }
 
 static UIView* TouchCircle(NSString* text, UIColor* color) {
@@ -351,20 +412,26 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     [parts addObject:part];
     return part;
   };
+  NSString* style = WinPadPadStyle();
+  _dpadOnTop = [style isEqualToString:@"playstation"];
   UIColor* white = UIColor.whiteColor;
-  add(TouchStick, PadUp, @"L", white);
+  // The face buttons' colours: Xbox's green, red, blue, yellow; PlayStation's blue cross, red
+  // circle, pink square, green triangle; Nintendo's are plain.
+  const uint32_t faces[3][4] = {{0x73D94D, 0xF2594D, 0x4D99FF, 0xFFCC33},
+                                {0x7FA8FF, 0xFF6666, 0xF08CD0, 0x4DD9A6},
+                                {0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF}};
+  const int look = _dpadOnTop ? 1 : [style isEqualToString:@"nintendo"] ? 2 : 0;
+  add(TouchStick, PadLUp, WinPadPadLabel(PadLUp, style), white);
   add(TouchDpad, PadUp, nil, white);
-  add(TouchStick, PadRUp, @"R", white);
-  add(TouchButton, PadA, @"A", [UIColor colorWithRed:0.45 green:0.85 blue:0.3 alpha:1]);
-  add(TouchButton, PadB, @"B", [UIColor colorWithRed:0.95 green:0.35 blue:0.3 alpha:1]);
-  add(TouchButton, PadX, @"X", [UIColor colorWithRed:0.3 green:0.6 blue:1 alpha:1]);
-  add(TouchButton, PadY, @"Y", [UIColor colorWithRed:1 green:0.8 blue:0.2 alpha:1]);
-  add(TouchButton, PadL2, @"LT", white);
-  add(TouchButton, PadL1, @"LB", white);
-  add(TouchButton, PadR2, @"RT", white);
-  add(TouchButton, PadR1, @"RB", white);
-  add(TouchButton, PadOptions, @"View", white);
-  add(TouchButton, PadMenu, @"Menu", white);
+  add(TouchStick, PadRUp, WinPadPadLabel(PadRUp, style), white);
+  for (int b = PadA; b <= PadY; b++) {
+    const uint32_t c = faces[look][b - PadA];
+    add(TouchButton, b, WinPadPadLabel(b, style),
+        [UIColor colorWithRed:(c >> 16) / 255.0 green:(c >> 8 & 0xff) / 255.0 blue:(c & 0xff) / 255.0 alpha:1]);
+  }
+  for (int b = PadL1; b <= PadOptions; b++) add(TouchButton, b, WinPadPadLabel(b, style), white);
+  add(TouchButton, PadExit, @"Exit", [UIColor colorWithRed:1 green:0.55 blue:0.5 alpha:1]);
+  printf("gamepad: touch controller in the %s look\n", style.UTF8String);
   _parts = parts;
   return self;
 }
@@ -391,16 +458,19 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     ((UILabel*)part.view).font = [UIFont systemFontOfSize:MIN(w, h) * 0.38 weight:UIFontWeightBold];
   };
   // The sticks: a base of 2.2 u, the knob 1.1 u.
-  for (WinPadTouchPart* stick in @[ [self part:PadUp kind:TouchStick], [self part:PadRUp kind:TouchStick] ]) {
-    const BOOL l = stick.input == PadUp;
-    place(stick, l ? left + 1.1 * u : right - 4.4 * u, l ? bottom - 3.0 * u : bottom - 1.3 * u, 2.2 * u, 2.2 * u);
+  for (WinPadTouchPart* stick in @[ [self part:PadLUp kind:TouchStick], [self part:PadRUp kind:TouchStick] ]) {
+    const BOOL l = stick.input == PadLUp;
+    // The PlayStation look: the left stick low and further in, where the d-pad is in Xbox's.
+    if (l && _dpadOnTop) place(stick, left + 3.7 * u, bottom - 1.3 * u, 2.2 * u, 2.2 * u);
+    else place(stick, l ? left + 1.1 * u : right - 4.4 * u, l ? bottom - 3.0 * u : bottom - 1.3 * u, 2.2 * u, 2.2 * u);
     stick.radius = 1.1 * u;
     stick.knob.frame = CGRectMake(0.55 * u, 0.55 * u, 1.1 * u, 1.1 * u);
     stick.knob.layer.cornerRadius = 0.55 * u;
     ((UILabel*)stick.knob).font = [UIFont systemFontOfSize:0.4 * u weight:UIFontWeightBold];
   }
   WinPadTouchPart* dpad = [self part:PadUp kind:TouchDpad];
-  place(dpad, left + 3.7 * u, bottom - 1.4 * u, 2.7 * u, 2.7 * u);
+  if (_dpadOnTop) place(dpad, left + 1.35 * u, bottom - 3.4 * u, 2.7 * u, 2.7 * u);
+  else place(dpad, left + 3.7 * u, bottom - 1.4 * u, 2.7 * u, 2.7 * u);
   dpad.radius = 1.35 * u;
   const CGFloat arm = 0.85 * u, c = 1.35 * u;
   const CGPoint arms[4] = {{c, c - 0.9 * u}, {c, c + 0.9 * u}, {c - 0.9 * u, c}, {c + 0.9 * u, c}};
@@ -419,8 +489,10 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
   place([self part:PadR1 kind:TouchButton], right - u, top + 1.4 * u, 2 * u, 0.8 * u);
   // View and Menu at the top in the middle, as on the controller: at the bottom
   // they would cover the right stick on a screen held upright.
-  place([self part:PadOptions kind:TouchButton], mid - 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
-  place([self part:PadMenu kind:TouchButton], mid + 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  // Exit between them ends the game (RequestExit).
+  place([self part:PadOptions kind:TouchButton], mid - 1.45 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  place([self part:PadExit kind:TouchButton], mid, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  place([self part:PadMenu kind:TouchButton], mid + 1.45 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
   [self update];
 }
 
@@ -471,6 +543,7 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
 }
 
 - (void)press:(int)input down:(BOOL)down {
+  if (input < 0 || input >= PadCount) return;
   _pressed[input] = down;
   [self update];
 }
@@ -486,7 +559,7 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     if (![part isKindOfClass:WinPadTouchPart.class]) continue;
     [held addObject:part];
     if (part.kind == TouchButton) {
-      in[part.input] = YES;
+      if (part.input < PadCount) in[part.input] = YES;
       continue;
     }
     const CGPoint p = [touch locationInView:self];
@@ -503,7 +576,11 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     if (part.kind == TouchStick) [knobs setObject:[NSValue valueWithCGPoint:CGPointMake(dx, dy)] forKey:part];
   }
   for (WinPadTouchPart* part in _parts) {
-    const BOOL down = [held containsObject:part] || (part.kind == TouchButton && _pressed[part.input]);
+    const BOOL down = [held containsObject:part] || (part.kind == TouchButton && part.input < PadCount && _pressed[part.input]);
+    if (part.input == PadExit && part.kind == TouchButton) {
+      if (down && !_exitHeld) RequestExit();
+      _exitHeld = down;
+    }
     if (part.kind == TouchButton) {
       part.view.backgroundColor = [UIColor colorWithWhite:1 alpha:down ? 0.45 : 0.15];
     } else if (part.kind == TouchStick) {
@@ -528,6 +605,8 @@ static void Gamepads(UIView* view) {
   void (^attach)(GCController*) = ^(GCController* c) {
     if (!c.extendedGamepad) return;
     printf("gamepad: %s connected\n", (c.vendorName ?: @"a controller").UTF8String);
+    // The Xbox/Home button ends the game (RequestExit) instead of opening the system's menu.
+    if (@available(iOS 14.0, *)) c.extendedGamepad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
       ReadPad(pad);
     };
@@ -875,6 +954,8 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
 // WinPad Translator's "Play and record" on a Mac (-recordGame FOLDER, simulator only): the game runs
 // with FEX's JIT, not its image, and FEX writes every block it compiles to the game's code maps.
 @property(nonatomic) BOOL record;
+@property(nonatomic) CGSize display;  // the screen's size in points, for WinPadGameScreen
+- (void)askToExit;
 @end
 
 // The FPS overlay: the display link looks at Metal's frame count every screen
@@ -924,6 +1005,16 @@ static CFTimeInterval fps_shown;
   }
   metal_view = self.view;
   metal_fill = [self.program isEqualToString:@"game"];
+  picture_scaling = WinPadPictureScaling(self.game.settings);
+  picture_avoids_cutout = WinPadPictureAvoidsCutout();
+  picture_stretch = WinPadPictureStretch(self.game.settings);
+  // The monitor Wine reports to the program (runWine): the display's size is read here, on the
+  // main thread.
+  for (UIScene* scene in UIApplication.sharedApplication.connectedScenes)
+    if ([scene isKindOfClass:UIWindowScene.class]) {
+      self.display = ((UIWindowScene*)scene).screen.bounds.size;
+      break;
+    }
   if (metal_fill) HardwareKeyboard();
   gamepad_test = [self.program isEqualToString:@"window"] && [NSUserDefaults.standardUserDefaults boolForKey:@"gamepadTest"];
 
@@ -940,6 +1031,10 @@ static CFTimeInterval fps_shown;
       return;
     }
   }
+  __weak WineViewController* weak = self;
+  exit_asked = ^{
+    [weak askToExit];
+  };
   self.text.text = @"WinPad Wine: starting…";
   self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer* timer) {
     [self showLog];
@@ -947,6 +1042,44 @@ static CFTimeInterval fps_shown;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     [self runWine];
   });
+}
+
+// Exit or the controller's Home button (RequestExit): asks, then ends the game and the app.
+- (void)askToExit {
+  if (exit_alert) return;
+  UIAlertController* ask = [UIAlertController
+      alertControllerWithTitle:@"Ukončit hru?"
+                       message:@"Neuložený postup se ztratí. Aplikace se zavře a po dalším otevření ukáže "
+                               @"knihovnu her.\n\nNa ovladači: A ukončit, B zpět do hry."
+                preferredStyle:UIAlertControllerStyleAlert];
+  exit_now = ^{
+    // The log ends as a finished run, not one that crashed (wine.log.crashed).
+    printf("WinPad Wine: the player ended the game (Exit)\n%s, exit 0\n", FinishedMarker.UTF8String);
+    fflush(stdout);
+    exit_alert = nil;
+    // To the home screen first, as when the player leaves the app, then gone: Wine cannot
+    // start a second game in this process.
+    UIApplication* app = UIApplication.sharedApplication;
+    const SEL suspend = NSSelectorFromString(@"suspend");
+    if ([app respondsToSelector:suspend]) ((void (*)(id, SEL))objc_msgSend)(app, suspend);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      exit(0);
+    });
+  };
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zpět do hry"
+                                          style:UIAlertActionStyleCancel
+                                        handler:^(UIAlertAction* action) {
+                                          exit_alert = nil;
+                                        }]];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Ukončit hru"
+                                          style:UIAlertActionStyleDestructive
+                                        handler:^(UIAlertAction* action) {
+                                          exit_now();
+                                        }]];
+  exit_alert = ask;
+  UIViewController* top = self;
+  while (top.presentedViewController) top = top.presentedViewController;
+  [top presentViewController:ask animated:YES completion:nil];
 }
 
 // The touch controller goes on the window, so the controllers start once it shows.
@@ -966,16 +1099,30 @@ static CFTimeInterval fps_shown;
   [self.view bringSubviewToFront:touch_pad];
   if (self.fps) [self.view bringSubviewToFront:self.fps];
   if (self.status && game_has_layer) {
-    // Once the game draws through Metal its picture fills the screen at 4:3,
-    // the status line and the log hidden (the log stays in Documents/wine.log).
-    const CGFloat w = MIN(b.size.width, b.size.height * 4 / 3), h = w * 3 / 4;
-    game_rect = CGRectMake((b.size.width - w) / 2, (b.size.height - h) / 2, w, h);
+    // Once the game draws through Metal its layer takes the whole screen, the status line
+    // and the log hidden (the log stays in Documents/wine.log); the picture fills it as the
+    // settings say (ScalePicture): in its own shape, stretched, or cut to the screen's shape.
+    // With "Mimo výřez displeje" it leaves out an iPhone's camera cutout and rounded corners
+    // at the sides (the home indicator hides by itself, so not the bottom).
+    const UIEdgeInsets safe = self.view.safeAreaInsets;
+    game_rect = picture_avoids_cutout ? UIEdgeInsetsInsetRect(b, UIEdgeInsetsMake(0, safe.left, 0, safe.right)) : b;
     self.view.backgroundColor = UIColor.blackColor;
     self.status.hidden = YES;
     self.text.hidden = YES;
+    CGRect frame = game_rect;
+    if ([picture_scaling isEqualToString:@"custom"]) {
+      // The picture in its own shape (4:3 until DXMT sized the drawable), then wider by
+      // picture_stretch percent, at most as wide as the screen; black at the sides.
+      const CGSize d = [game_layer isKindOfClass:CAMetalLayer.class] ? ((CAMetalLayer*)game_layer).drawableSize : CGSizeZero;
+      const CGFloat aspect = d.width > 0 && d.height > 0 ? d.width / d.height : 4.0 / 3;
+      const CGFloat h = MIN(game_rect.size.height, game_rect.size.width / aspect);
+      const CGFloat w = MIN(game_rect.size.width, h * aspect * (1 + picture_stretch / 100.0));
+      frame = CGRectMake(CGRectGetMidX(game_rect) - w / 2, CGRectGetMidY(game_rect) - h / 2, w, h);
+      picture_laid_out = d;
+    }
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    game_layer.frame = game_rect;
+    game_layer.frame = frame;
     [CATransaction commit];
     [self placeFps];
     return;
@@ -1001,7 +1148,10 @@ static CFTimeInterval fps_shown;
 - (void)placeFps {
   if (!self.fps) return;
   const CGSize size = [self.fps sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)];
-  self.fps.frame = CGRectMake(game_rect.origin.x + 6, game_rect.origin.y + 6, size.width + 12, size.height + 6);
+  // In the picture's corner, but never under an iPhone's cutout.
+  const UIEdgeInsets safe = self.view.safeAreaInsets;
+  self.fps.frame = CGRectMake(MAX(game_rect.origin.x, safe.left) + 6, MAX(game_rect.origin.y, safe.top) + 6,
+                              size.width + 12, size.height + 6);
   self.fps.textAlignment = NSTextAlignmentCenter;
 }
 
@@ -1049,6 +1199,10 @@ static CFTimeInterval fps_shown;
 
 - (void)showLog {
   NSString* summary = self.summary;
+  // The custom stretch follows the game's resolution as it changes it.
+  if (game_has_layer && [picture_scaling isEqualToString:@"custom"] && [game_layer isKindOfClass:CAMetalLayer.class] &&
+      !CGSizeEqualToSize(((CAMetalLayer*)game_layer).drawableSize, picture_laid_out))
+    [self.view setNeedsLayout];
   if (self.status) {
     if (!self.started) self.started = [NSDate date];
     // host/metal-display.m counts them; the bundle has it only when it has DXMT.
@@ -1117,6 +1271,23 @@ static CFTimeInterval fps_shown;
   // set it to 0.
   setenv("MADEIRA_WOW_RWX_PLAIN", "1", 1);
   setenv("WINEHOST_RETURN", "1", 1);
+  // The monitor Wine's display driver and DXMT report (Madeira's sysparams_ios.c ios_screen_size,
+  // DXMT's wsi_monitor_headless.cpp): 1024x768 unless "Širokoúhlý monitor" or the game's
+  // winpad.json asks for another. Its modes are the standard ones up to that many pixels, so a
+  // game that lists them can pick a wide one. Set before the game's winpad.json env, which may
+  // still change it.
+  const CGSize screen = WinPadGameScreen(self.game.settings, self.display);
+  if (screen.width > 0) {
+    setenv("MADEIRA_SCREEN_W", [NSString stringWithFormat:@"%.0f", screen.width].UTF8String, 1);
+    setenv("MADEIRA_SCREEN_H", [NSString stringWithFormat:@"%.0f", screen.height].UTF8String, 1);
+    setenv("MADEIRA_SCREEN_SRC", "WinPad", 1);
+    printf("WinPad Wine: monitor %.0fx%.0f for the program (display %.0fx%.0f points)\n", screen.width, screen.height,
+           self.display.width, self.display.height);
+  }
+  if (game)
+    printf("WinPad Wine: picture %s%s%s\n", picture_scaling.UTF8String,
+           [picture_scaling isEqualToString:@"custom"] ? [NSString stringWithFormat:@" +%ld %%", (long)picture_stretch].UTF8String : "",
+           picture_avoids_cutout ? ", out of the cutout" : "");
   NSString* program = [bundle stringByAppendingPathComponent:[NSString stringWithFormat:@"i386-windows/%@.exe", name]];
   NSString* image = @"none (JIT)";
   NSMutableArray<NSString*>* game_args = [NSMutableArray new];

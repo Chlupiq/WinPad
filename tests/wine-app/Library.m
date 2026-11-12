@@ -606,17 +606,14 @@ static BOOL InDocuments(NSURL* url) {
   return [path hasPrefix:[docs stringByAppendingString:@"/"]];
 }
 
-// The controller's inputs, named as on an Xbox controller: their names in the settings and in the
-// "padKeys" setting (the first names, kept from before), and the keys they are by default: the
-// left stick and d-pad steer, RT accelerates and LT brakes; the right stick is no key.
-static NSString* const PadTitles[PadCount] = {
-    @"Nahoru", @"Dolů", @"Doleva", @"Doprava", @"A", @"B", @"X", @"Y", @"LB", @"RB", @"LT", @"RT", @"Menu", @"View",
-    @"Pravá páčka nahoru", @"Pravá páčka dolů", @"Pravá páčka doleva", @"Pravá páčka doprava"};
-static NSString* const PadIds[PadCount] = {@"up", @"down", @"left", @"right", @"a",  @"b",    @"x",       @"y",
-                                           @"l1", @"r1",   @"l2",   @"r2",    @"menu", @"options", @"rup", @"rdown",
-                                           @"rleft", @"rright"};
-static const unsigned short PadDefaults[PadCount] = {0x26, 0x28, 0x25, 0x27, 0x0d, 0x1b, 0x20, 'C', 'Z',
-                                                     'A',  0x28, 0x26, 0x1b, 0x0d, 0,    0,    0,    0};
+// The controller's inputs: their names in the "padKeys" setting (the first ones kept from
+// before) and the keys they are by default, made for a racing game: the d-pad and the left stick
+// steer, RT accelerates and LT brakes; the right stick is no key.
+static NSString* const PadIds[PadCount] = {@"up",   @"down",  @"left", @"right", @"a",   @"b",     @"x",      @"y",
+                                           @"l1",   @"r1",    @"l2",   @"r2",    @"menu", @"options", @"rup",  @"rdown",
+                                           @"rleft", @"rright", @"lup", @"ldown", @"lleft", @"lright"};
+static const unsigned short PadDefaults[PadCount] = {0x26, 0x28, 0x25, 0x27, 0x0d, 0x1b, 0x20, 'C', 'Z', 'A',  0x28,
+                                                     0x26, 0x1b, 0x0d, 0,    0,    0,    0,    0x26, 0x28, 0x25, 0x27};
 
 void WinPadPadKeys(unsigned short keys[PadCount]) {
   NSDictionary* saved = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"padKeys"];
@@ -624,12 +621,90 @@ void WinPadPadKeys(unsigned short keys[PadCount]) {
     id key = saved[PadIds[i]];
     keys[i] = [key respondsToSelector:@selector(intValue)] ? (unsigned short)([key intValue] & 0xff) : PadDefaults[i];
   }
+  // The left stick was the d-pad until it had keys of its own: one not set yet is still the d-pad's.
+  for (int d = 0; d < 4; d++)
+    if (![saved[PadIds[PadLUp + d]] respondsToSelector:@selector(intValue)]) keys[PadLUp + d] = keys[PadUp + d];
 }
+
+NSString* WinPadPadStyle(void) {
+  NSString* set = [NSUserDefaults.standardUserDefaults stringForKey:@"padStyle"];
+  if ([@[ @"xbox", @"playstation", @"nintendo" ] containsObject:set]) return set;
+  GCController* pad = GCController.controllers.firstObject;
+  GCExtendedGamepad* extended = pad.extendedGamepad;
+  if ([extended isKindOfClass:GCDualSenseGamepad.class] || [extended isKindOfClass:GCDualShockGamepad.class])
+    return @"playstation";
+  NSString* name = [NSString stringWithFormat:@"%@ %@", pad.productCategory ?: @"", pad.vendorName ?: @""].lowercaseString;
+  if ([name containsString:@"switch"] || [name containsString:@"joy-con"] || [name containsString:@"nintendo"])
+    return @"nintendo";
+  return @"xbox";
+}
+
+NSString* WinPadPadLabel(int input, NSString* style) {
+  const int s = [style isEqualToString:@"playstation"] ? 1 : [style isEqualToString:@"nintendo"] ? 2 : 0;
+  static NSString* const buttons[3][10] = {
+      {@"A", @"B", @"X", @"Y", @"LB", @"RB", @"LT", @"RT", @"Menu", @"View"},
+      {@"✕", @"○", @"□", @"△", @"L1", @"R1", @"L2", @"R2", @"Options", @"Create"},
+      {@"B", @"A", @"Y", @"X", @"L", @"R", @"ZL", @"ZR", @"+", @"−"},
+  };
+  if (input >= PadA && input <= PadOptions) return buttons[s][input - PadA];
+  if (input >= PadLUp) return @"L";
+  if (input >= PadRUp) return @"R";
+  return @[ @"▲", @"▼", @"◀", @"▶" ][input - PadUp];
+}
+
+// An input's name in the settings, in the controller's look.
+static NSString* PadTitle(int input) {
+  NSString* style = WinPadPadStyle();
+  NSArray<NSString*>* ways = @[ @"nahoru", @"dolů", @"doleva", @"doprava" ];
+  if (input <= PadRight) return [@"Křížový ovladač " stringByAppendingString:ways[input - PadUp]];
+  if (input >= PadLUp) return [@"Levá páčka " stringByAppendingString:ways[input - PadLUp]];
+  if (input >= PadRUp) return [@"Pravá páčka " stringByAppendingString:ways[input - PadRUp]];
+  NSString* label = WinPadPadLabel(input, style);
+  if (input > PadY) return label;
+  if ([style isEqualToString:@"playstation"])
+    return [NSString stringWithFormat:@"%@ (%@)", label, @[ @"křížek", @"kolečko", @"čtverec", @"trojúhelník" ][input - PadA]];
+  if ([style isEqualToString:@"nintendo"])
+    return [NSString stringWithFormat:@"%@ (%@)", label, @[ @"dole", @"vpravo", @"vlevo", @"nahoře" ][input - PadA]];
+  return label;
+}
+
+// The order the settings list the inputs in: the d-pad, the sticks, then the buttons.
+static const int PadOrder[PadCount] = {PadUp,  PadDown, PadLeft,  PadRight, PadLUp,   PadLDown,   PadLLeft, PadLRight,
+                                       PadRUp, PadRDown, PadRLeft, PadRRight, PadA,     PadB,       PadX,     PadY,
+                                       PadL1,  PadR1,   PadL2,    PadR2,    PadMenu,  PadOptions};
+
+// Keys for the four directions of the d-pad or a stick at once (the settings' presets).
+enum { PadPresets = 3 };
+static const int PadSetFirst[PadPresets] = {PadUp, PadLUp, PadRUp};
 
 static void SavePadKey(int input, unsigned short vk) {
   NSMutableDictionary* saved = [[NSUserDefaults.standardUserDefaults dictionaryForKey:@"padKeys"] mutableCopy] ?: [NSMutableDictionary new];
   saved[PadIds[input]] = @(vk);
   [NSUserDefaults.standardUserDefaults setObject:saved forKey:@"padKeys"];
+}
+
+// The look's name in the settings.
+static NSString* PadStyleName(NSString* style) {
+  return @{@"xbox" : @"Xbox", @"playstation" : @"PlayStation", @"nintendo" : @"Nintendo"}[style];
+}
+
+// Keys for the four directions (up, down, left, right) of the d-pad or a stick at once.
+static const struct {
+  const char* name;
+  unsigned short keys[4];
+} DirectionSets[] = {
+    {"Šipky", {0x26, 0x28, 0x25, 0x27}},
+    {"W A S D", {'W', 'S', 'A', 'D'}},
+    {"I J K L", {'I', 'K', 'J', 'L'}},
+    {"Nic", {0, 0, 0, 0}},
+};
+enum { DirectionSetCount = sizeof DirectionSets / sizeof DirectionSets[0] };
+
+// What four direction keys are, by the sets above, else "Vlastní".
+static NSString* DirectionsName(const unsigned short keys[4]) {
+  for (int set = 0; set < DirectionSetCount; set++)
+    if (!memcmp(keys, DirectionSets[set].keys, sizeof DirectionSets[set].keys)) return @(DirectionSets[set].name);
+  return @"Vlastní";
 }
 
 // The keys an input can be: those a game is most likely to use.
@@ -675,7 +750,7 @@ static NSString* KeyName(unsigned short vk) {
 
 - (void)viewDidLoad {
   [super viewDidLoad];
-  self.title = PadTitles[self.input];
+  self.title = PadTitle(self.input);
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
@@ -956,6 +1031,55 @@ static BOOL BackgroundWaves(void) {
 }
 @end
 
+// The game's picture (Library.h). The settings keep "pictureScaling", "pictureAvoidsCutout" and
+// "gameScreen"; a game's winpad.json "scaling" and "screen" win over them.
+static NSArray<NSString*>* PictureScalings(void) { return @[ @"fit", @"custom", @"stretch", @"fill" ]; }
+
+NSString* WinPadPictureScaling(NSDictionary* settings) {
+  id own = settings[@"scaling"];
+  if ([own isKindOfClass:NSString.class] && [PictureScalings() containsObject:[own lowercaseString]]) return [own lowercaseString];
+  NSString* set = [NSUserDefaults.standardUserDefaults stringForKey:@"pictureScaling"];
+  return [PictureScalings() containsObject:set] ? set : @"fit";
+}
+
+NSInteger WinPadPictureStretch(NSDictionary* settings) {
+  id own = settings[@"stretch"];
+  const NSInteger p = [own respondsToSelector:@selector(integerValue)]
+                          ? [own integerValue]
+                          : [NSUserDefaults.standardUserDefaults objectForKey:@"pictureStretch"]
+                                ? [NSUserDefaults.standardUserDefaults integerForKey:@"pictureStretch"]
+                                : 25;
+  return MAX(0, MIN(100, p));
+}
+
+BOOL WinPadPictureAvoidsCutout(void) {
+  return [NSUserDefaults.standardUserDefaults boolForKey:@"pictureAvoidsCutout"];
+}
+
+CGSize WinPadGameScreen(NSDictionary* settings, CGSize display) {
+  id own = settings[@"screen"];
+  NSString* want = [own isKindOfClass:NSString.class] ? [own lowercaseString]
+                                                     : [NSUserDefaults.standardUserDefaults stringForKey:@"gameScreen"];
+  if (!want.length || [want isEqualToString:@"4:3"]) return CGSizeZero;
+  if ([want isEqualToString:@"wide"]) {
+    const CGFloat across = MAX(display.width, display.height), down = MIN(display.width, display.height);
+    if (down <= 0) return CGSizeZero;
+    // 768 lines as now, as wide as the display's shape makes them (even, at most 2048).
+    const long w = MIN(2048, lround(768 * across / down / 2) * 2);
+    return w > 1024 ? CGSizeMake(w, 768) : CGSizeZero;
+  }
+  NSArray<NSString*>* parts = [want componentsSeparatedByString:@"x"];
+  if (parts.count != 2) return CGSizeZero;
+  const NSInteger w = parts[0].integerValue, h = parts[1].integerValue;
+  return w >= 320 && h >= 200 && w <= 4096 && h <= 4096 ? CGSizeMake(w, h) : CGSizeZero;
+}
+
+// The picture's choices as the settings show them.
+static NSString* PictureScalingName(NSString* scaling) {
+  return @{@"fit" : @"Zachovat tvar", @"custom" : @"Vlastní roztažení", @"stretch" : @"Roztáhnout na celý displej",
+            @"fill" : @"Přiblížit"}[scaling];
+}
+
 // The settings: touch controls, the controller's keys, the last log, the test programs.
 @interface WinPadLogViewController : UIViewController
 @end
@@ -981,15 +1105,16 @@ static BOOL BackgroundWaves(void) {
 }
 @end
 
-// The settings' section 0 is the look; the others follow it, numbered from 0 after it in the code.
-enum { AppearanceSection = 0 };
+// The settings' section 0 is the look, 1 the game's picture; the others follow them, numbered from 0
+// after them in the code.
+enum { AppearanceSection = 0, PictureSection = 1, OtherSections = 2 };
 
 @interface WinPadSettingsViewController : UITableViewController
 @property(nonatomic, copy) void (^run)(NSString* program);
 @property(nonatomic, copy) NSString* directXState;  // the download's progress or its error, or nil
 @end
 
-// The settings' section of Microsoft's DirectX DLLs, counted after the look like the others.
+// The settings' section of Microsoft's DirectX DLLs, counted after the look and the picture like the others.
 enum { DirectXSection = 4 };
 
 // What the DirectX row says: downloaded or not.
@@ -1028,17 +1153,18 @@ static NSString* DirectXSummary(void) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
-  return 7;
+  return 8;
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
   if (section == AppearanceSection) return 4;
-  section -= 1;
-  return section == 0 ? 2 : section == 1 ? PadCount + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : section == 3 ? 3 : 2;
+  if (section == PictureSection) return 4;
+  section -= OtherSections;
+  return section == 0 ? 3 : section == 1 ? PadCount + PadPresets + 1 : section == 2 ? (self.hasWindowProgram ? 4 : 3) : section == 3 ? 3 : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Vzhled", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"DirectX od Microsoftu", @"O aplikaci" ][section];
+  return @[ @"Vzhled", @"Obraz hry", @"Ovládání", @"Mapování tlačítek", @"Diagnostika", @"JIT", @"DirectX od Microsoftu", @"O aplikaci" ][section];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -1046,11 +1172,22 @@ static NSString* DirectXSummary(void) {
     return @"Pozadí knihovny a nastavení, na iPadu i iPhonu. Obaly her bez obalu aplikace sama najde na internetu "
            @"podle názvu (Steam, Wikipedie) a uloží jen ten, jehož název sedí; jiný vybereš tlačítkem Obal pod hrou. "
            @"S klíčem SteamGridDB (zdarma: steamgriddb.com › Preferences › API) najde víc a hezčích obalů.";
-  section -= 1;
-  if (section == 0) return @"Ovladač na obrazovce se ukáže jen tehdy, když není připojený herní ovladač.";
+  if (section == PictureSection)
+    return @"Zachovat tvar: celý obraz hry v jeho poměru stran, po stranách černé pruhy. Vlastní roztažení: obraz se "
+           @"roztáhne do šířky o tolik procent, kolik nastavíš posuvníkem (nejvýš na celý displej; posunutím se tento "
+           @"režim zapne). Roztáhnout na celý displej: "
+           @"obraz 4:3 se roztáhne do šířky. Přiblížit: celý displej v poměru hry, nahoře a dole se kus obrazu uřízne. "
+           @"Širokoúhlý monitor: hra dostane monitor v poměru stran displeje (na iPhonu 16 Pro 1670×768) a hra, která "
+           @"umí širokoúhlá rozlišení, vykreslí víc scény bez roztažení (vyber ho pak v nastavení hry). "
+           @"Hra to může mít jinak ve svém winpad.json (\"scaling\", \"screen\").";
+  section -= OtherSections;
+  if (section == 0)
+    return @"Ovladač na obrazovce se ukáže jen tehdy, když není připojený herní ovladač. Rozvržení určuje názvy "
+           @"tlačítek v nastavení a vzhled ovladače na obrazovce (PlayStation: ✕ ○ □ △, křížový ovladač nad levou páčkou).";
   if (section == 1)
-    return @"Klávesa, kterou hra dostane za každé tlačítko ovladače. Nahoru až doprava jsou křížový ovladač "
-           @"i levá páčka. Platí pro všechny hry.";
+    return @"Klávesa, kterou hra dostane za každé tlačítko a každý směr páček. Levá páčka je to, co křížový "
+           @"ovladač, dokud jí nedáš vlastní klávesy. „Celá páčka“ nastaví všechny čtyři směry naráz (šipky, WASD, "
+           @"IJKL, nic). Tlačítka jsou podle místa: ✕ na PlayStationu je A na Xboxu a B na Nintendu. Platí pro všechny hry.";
   if (section == 2)
     return @"Ukazatel FPS ukáže ve hře snímky za sekundu, nejdelší snímek za poslední sekundu a rozlišení. "
            @"Testovací programy spustí Wine místo hry; pro další hru aplikaci spusť znovu.";
@@ -1097,7 +1234,37 @@ static NSString* DirectXSummary(void) {
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     return cell;
   }
-  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - 1];
+  if (path.section == PictureSection && path.row == 0) {
+    cell.textLabel.text = @"Obraz";
+    cell.detailTextLabel.text = PictureScalingName(WinPadPictureScaling(nil));
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+  }
+  if (path.section == PictureSection && path.row == 1) {
+    const NSInteger stretch = WinPadPictureStretch(nil);
+    cell.textLabel.text = [NSString stringWithFormat:@"Roztažení o %ld %%", (long)stretch];
+    UISlider* slider = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 170, 32)];
+    slider.minimumValue = 0;
+    slider.maximumValue = 100;
+    slider.value = stretch;
+    [slider addTarget:self action:@selector(stretchChanged:) forControlEvents:UIControlEventValueChanged];
+    [slider addTarget:self action:@selector(stretchDone:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    cell.accessoryView = slider;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+  if (path.section == PictureSection) {
+    cell.textLabel.text = path.row == 2 ? @"Širokoúhlý monitor" : @"Mimo výřez displeje";
+    UISwitch* toggle = [UISwitch new];
+    toggle.on = path.row == 2 ? [[NSUserDefaults.standardUserDefaults stringForKey:@"gameScreen"] isEqualToString:@"wide"]
+                              : WinPadPictureAvoidsCutout();
+    toggle.tag = path.row;
+    [toggle addTarget:self action:@selector(pictureChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = toggle;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    return cell;
+  }
+  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - OtherSections];
   if (path.section == 0 && path.row == 0) {
     cell.textLabel.text = @"Dotykové ovládání";
     UISwitch* toggle = [UISwitch new];
@@ -1106,6 +1273,14 @@ static NSString* DirectXSummary(void) {
     [toggle addTarget:self action:@selector(touchChanged:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+  } else if (path.section == 0 && path.row == 2) {
+    cell.textLabel.text = @"Rozvržení ovladače";
+    NSString* set = [NSUserDefaults.standardUserDefaults stringForKey:@"padStyle"];
+    NSString* name = PadStyleName(WinPadPadStyle());
+    cell.detailTextLabel.text = [@[ @"xbox", @"playstation", @"nintendo" ] containsObject:set]
+                                    ? name
+                                    : [NSString stringWithFormat:@"Podle ovladače (%@)", name];
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
   } else if (path.section == 0) {
     cell.textLabel.text = @"Herní ovladač";
     GCController* pad = GCController.controllers.firstObject;
@@ -1114,8 +1289,16 @@ static NSString* DirectXSummary(void) {
   } else if (path.section == 1 && path.row < PadCount) {
     unsigned short keys[PadCount];
     WinPadPadKeys(keys);
-    cell.textLabel.text = PadTitles[path.row];
-    cell.detailTextLabel.text = KeyName(keys[path.row]);
+    const int input = PadOrder[path.row];
+    cell.textLabel.text = PadTitle(input);
+    cell.detailTextLabel.text = KeyName(keys[input]);
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+  } else if (path.section == 1 && path.row < PadCount + PadPresets) {
+    const int first = PadSetFirst[path.row - PadCount];
+    unsigned short keys[PadCount];
+    WinPadPadKeys(keys);
+    cell.textLabel.text = @[ @"Celý křížový ovladač", @"Celá levá páčka", @"Celá pravá páčka" ][path.row - PadCount];
+    cell.detailTextLabel.text = DirectionsName(keys + first);
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
   } else if (path.section == 1) {
     cell.textLabel.text = @"Obnovit výchozí mapování";
@@ -1210,6 +1393,92 @@ static NSString* DirectXSummary(void) {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"touchControls"];
 }
 
+// The stretch slider, in steps of 5 %: moving it picks "Vlastní roztažení" too.
+- (void)stretchChanged:(UISlider*)slider {
+  const NSInteger stretch = lround(slider.value / 5) * 5;
+  [NSUserDefaults.standardUserDefaults setInteger:stretch forKey:@"pictureStretch"];
+  [NSUserDefaults.standardUserDefaults setObject:@"custom" forKey:@"pictureScaling"];
+  UITableViewCell* cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:1 inSection:PictureSection]];
+  cell.textLabel.text = [NSString stringWithFormat:@"Roztažení o %ld %%", (long)stretch];
+}
+
+- (void)stretchDone:(UISlider*)slider {
+  slider.value = WinPadPictureStretch(nil);
+  [self.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:PictureSection] ]
+                        withRowAnimation:UITableViewRowAnimationNone];
+}
+
+- (void)pictureChanged:(UISwitch*)toggle {
+  if (toggle.tag == 2) {
+    if (toggle.on) [NSUserDefaults.standardUserDefaults setObject:@"wide" forKey:@"gameScreen"];
+    else [NSUserDefaults.standardUserDefaults removeObjectForKey:@"gameScreen"];
+  } else {
+    [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"pictureAvoidsCutout"];
+  }
+}
+
+// A sheet of CHOICES (title → action) from the row at PATH.
+- (void)sheet:(NSString*)title choices:(NSArray<NSArray*>*)choices at:(NSIndexPath*)path {
+  UIAlertController* sheet = [UIAlertController alertControllerWithTitle:title
+                                                                 message:nil
+                                                          preferredStyle:UIAlertControllerStyleActionSheet];
+  __weak UITableView* table = self.tableView;
+  for (NSArray* choice in choices) {
+    void (^picked)(void) = choice[1];
+    [sheet addAction:[UIAlertAction actionWithTitle:choice[0]
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction* action) {
+                                              picked();
+                                              [table reloadData];
+                                            }]];
+  }
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  UITableViewCell* cell = [self.tableView cellForRowAtIndexPath:path];
+  sheet.popoverPresentationController.sourceView = cell ?: self.view;
+  sheet.popoverPresentationController.sourceRect = cell ? cell.bounds : self.view.bounds;
+  [self presentViewController:sheet animated:YES completion:nil];
+}
+
+// The controller's look: by the connected controller, or one picked.
+- (void)pickPadStyle {
+  NSMutableArray* choices = [NSMutableArray new];
+  for (NSString* style in @[ @"auto", @"xbox", @"playstation", @"nintendo" ])
+    [choices addObject:@[ [style isEqualToString:@"auto"] ? @"Podle připojeného ovladače" : PadStyleName(style), ^{
+                 [NSUserDefaults.standardUserDefaults setObject:style forKey:@"padStyle"];
+               } ]];
+  [self sheet:@"Rozvržení ovladače" choices:choices at:[NSIndexPath indexPathForRow:2 inSection:OtherSections]];
+}
+
+// The four directions of the d-pad or a stick at once: arrows, WASD, IJKL or no keys.
+- (void)pickDirections:(int)first row:(NSInteger)row {
+  NSMutableArray* choices = [NSMutableArray new];
+  for (int set = 0; set < DirectionSetCount; set++)
+    [choices addObject:@[ @(DirectionSets[set].name), ^{
+                 for (int d = 0; d < 4; d++) SavePadKey(first + d, DirectionSets[set].keys[d]);
+               } ]];
+  [self sheet:@"Směry" choices:choices at:[NSIndexPath indexPathForRow:row inSection:1 + OtherSections]];
+}
+
+// The picture's choices in a sheet.
+- (void)pickPictureScaling {
+  UIAlertController* sheet = [UIAlertController alertControllerWithTitle:@"Obraz hry"
+                                                                 message:nil
+                                                          preferredStyle:UIAlertControllerStyleActionSheet];
+  __weak UITableView* table = self.tableView;
+  for (NSString* scaling in PictureScalings())
+    [sheet addAction:[UIAlertAction actionWithTitle:PictureScalingName(scaling)
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction* action) {
+                                              [NSUserDefaults.standardUserDefaults setObject:scaling forKey:@"pictureScaling"];
+                                              [table reloadData];
+                                            }]];
+  [sheet addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  UITableViewCell* cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:PictureSection]];
+  sheet.popoverPresentationController.sourceView = cell ?: self.view;
+  sheet.popoverPresentationController.sourceRect = cell ? cell.bounds : self.view.bounds;
+  [self presentViewController:sheet animated:YES completion:nil];
+}
+
 - (void)fpsChanged:(UISwitch*)toggle {
   [NSUserDefaults.standardUserDefaults setBool:toggle.on forKey:@"fpsOverlay"];
 }
@@ -1223,7 +1492,7 @@ static NSString* DirectXSummary(void) {
   __weak WinPadSettingsViewController* weak = self;
   void (^show)(NSString*) = ^(NSString* state) {
     weak.directXState = state;
-    [weak.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:DirectXSection + 1] ]
+    [weak.tableView reloadRowsAtIndexPaths:@[ [NSIndexPath indexPathForRow:0 inSection:DirectXSection + OtherSections] ]
                           withRowAnimation:UITableViewRowAnimationNone];
   };
   show(@"Stahuji…");
@@ -1253,16 +1522,28 @@ static NSString* DirectXSummary(void) {
     if (path.row == 3) [self askSteamGridDBKey];
     return;
   }
-  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - 1];
+  if (path.section == PictureSection) {
+    if (path.row == 0) [self pickPictureScaling];
+    return;
+  }
+  path = [NSIndexPath indexPathForRow:path.row inSection:path.section - OtherSections];
+  if (path.section == 0 && path.row == 2) {
+    [self pickPadStyle];
+    return;
+  }
+  if (path.section == 1 && path.row >= PadCount && path.row < PadCount + PadPresets) {
+    [self pickDirections:PadSetFirst[path.row - PadCount] row:path.row];
+    return;
+  }
   if (path.section == 1 && path.row < PadCount) {
     WinPadKeyPickerViewController* picker = [WinPadKeyPickerViewController new];
-    picker.input = (int)path.row;
+    picker.input = PadOrder[path.row];
     [self.navigationController pushViewController:picker animated:YES];
     return;
   }
   if (path.section == 1) {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"padKeys"];
-    [tableView reloadSections:[NSIndexSet indexSetWithIndex:2] withRowAnimation:UITableViewRowAnimationNone];
+    [tableView reloadSections:[NSIndexSet indexSetWithIndex:1 + OtherSections] withRowAnimation:UITableViewRowAnimationNone];
     return;
   }
   if (path.section == DirectXSection && path.row == 0) {
