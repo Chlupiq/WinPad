@@ -300,7 +300,8 @@ static void ReadPad(GCExtendedGamepad* pad) {
         [exit_alert dismissViewControllerAnimated:YES completion:nil];
         exit_alert = nil;
       });
-    a_was = pad.buttonA.pressed, b_was = pad.buttonB.pressed;
+    a_was = pad.buttonA.pressed;
+    b_was = pad.buttonB.pressed;
     return;
   }
   const float tilt = 0.5f;  // how far a stick or trigger goes before its key is down
