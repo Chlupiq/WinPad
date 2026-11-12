@@ -44,6 +44,7 @@
 // Documents/fexcache/<game folder>/codemap/new (the test programs:
 // Documents/fexcache/codemap/new), so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
+#import <objc/message.h>
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
@@ -269,7 +270,39 @@ static void ApplyPad(int from, const BOOL in[PadCount]) {
     }
 }
 
+// Exit (the touch controller's button between View and Menu, a controller's Xbox/Home
+// button): asks whether to end the game (WineViewController askToExit). Wine runs once per
+// process, so ending the game closes the app; opened again, it shows the game library.
+// While the question shows, Exit or Home again or A ends the game, B goes back to it.
+enum { PadExit = PadCount };  // the touch controller's Exit, which no key is
+static void (^exit_asked)(void);   // set by the WineViewController running a game
+static UIAlertController* exit_alert;
+static void (^exit_now)(void);
+
+static void RequestExit(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (exit_alert && exit_now) exit_now();
+    else if (exit_asked) exit_asked();
+  });
+}
+
 static void ReadPad(GCExtendedGamepad* pad) {
+  static BOOL home_was;
+  const BOOL home = pad.buttonHome.pressed;
+  if (home && !home_was) RequestExit();
+  home_was = home;
+  // While the question is up the controller answers it and the game gets nothing.
+  if (exit_alert) {
+    static BOOL a_was, b_was;
+    if (pad.buttonA.pressed && !a_was && exit_now) dispatch_async(dispatch_get_main_queue(), exit_now);
+    if (pad.buttonB.pressed && !b_was)
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [exit_alert dismissViewControllerAnimated:YES completion:nil];
+        exit_alert = nil;
+      });
+    a_was = pad.buttonA.pressed, b_was = pad.buttonB.pressed;
+    return;
+  }
   const float tilt = 0.5f;  // how far a stick or trigger goes before its key is down
   GCControllerDirectionPad *dpad = pad.dpad, *stick = pad.leftThumbstick, *right = pad.rightThumbstick;
   const BOOL in[PadCount] = {
@@ -332,6 +365,7 @@ typedef enum { TouchButton, TouchStick, TouchDpad } TouchKind;
   NSMapTable<UITouch*, WinPadTouchPart*>* _touches;
   BOOL _pressed[PadCount];  // press:down:, CI's
   BOOL _dpadOnTop;          // the PlayStation look: the d-pad above the left stick
+  BOOL _exitHeld;           // a finger is on Exit
 }
 
 static UIView* TouchCircle(NSString* text, UIColor* color) {
@@ -395,6 +429,7 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
         [UIColor colorWithRed:(c >> 16) / 255.0 green:(c >> 8 & 0xff) / 255.0 blue:(c & 0xff) / 255.0 alpha:1]);
   }
   for (int b = PadL1; b <= PadOptions; b++) add(TouchButton, b, WinPadPadLabel(b, style), white);
+  add(TouchButton, PadExit, @"Exit", [UIColor colorWithRed:1 green:0.55 blue:0.5 alpha:1]);
   printf("gamepad: touch controller in the %s look\n", style.UTF8String);
   _parts = parts;
   return self;
@@ -453,8 +488,10 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
   place([self part:PadR1 kind:TouchButton], right - u, top + 1.4 * u, 2 * u, 0.8 * u);
   // View and Menu at the top in the middle, as on the controller: at the bottom
   // they would cover the right stick on a screen held upright.
-  place([self part:PadOptions kind:TouchButton], mid - 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
-  place([self part:PadMenu kind:TouchButton], mid + 0.9 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  // Exit between them ends the game (RequestExit).
+  place([self part:PadOptions kind:TouchButton], mid - 1.45 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  place([self part:PadExit kind:TouchButton], mid, top + 0.4 * u, 1.2 * u, 0.7 * u);
+  place([self part:PadMenu kind:TouchButton], mid + 1.45 * u, top + 0.4 * u, 1.2 * u, 0.7 * u);
   [self update];
 }
 
@@ -505,6 +542,7 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
 }
 
 - (void)press:(int)input down:(BOOL)down {
+  if (input < 0 || input >= PadCount) return;
   _pressed[input] = down;
   [self update];
 }
@@ -520,7 +558,7 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     if (![part isKindOfClass:WinPadTouchPart.class]) continue;
     [held addObject:part];
     if (part.kind == TouchButton) {
-      in[part.input] = YES;
+      if (part.input < PadCount) in[part.input] = YES;
       continue;
     }
     const CGPoint p = [touch locationInView:self];
@@ -537,7 +575,11 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     if (part.kind == TouchStick) [knobs setObject:[NSValue valueWithCGPoint:CGPointMake(dx, dy)] forKey:part];
   }
   for (WinPadTouchPart* part in _parts) {
-    const BOOL down = [held containsObject:part] || (part.kind == TouchButton && _pressed[part.input]);
+    const BOOL down = [held containsObject:part] || (part.kind == TouchButton && part.input < PadCount && _pressed[part.input]);
+    if (part.input == PadExit && part.kind == TouchButton) {
+      if (down && !_exitHeld) RequestExit();
+      _exitHeld = down;
+    }
     if (part.kind == TouchButton) {
       part.view.backgroundColor = [UIColor colorWithWhite:1 alpha:down ? 0.45 : 0.15];
     } else if (part.kind == TouchStick) {
@@ -562,6 +604,8 @@ static void Gamepads(UIView* view) {
   void (^attach)(GCController*) = ^(GCController* c) {
     if (!c.extendedGamepad) return;
     printf("gamepad: %s connected\n", (c.vendorName ?: @"a controller").UTF8String);
+    // The Xbox/Home button ends the game (RequestExit) instead of opening the system's menu.
+    if (@available(iOS 14.0, *)) c.extendedGamepad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
       ReadPad(pad);
     };
@@ -910,6 +954,7 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
 // with FEX's JIT, not its image, and FEX writes every block it compiles to the game's code maps.
 @property(nonatomic) BOOL record;
 @property(nonatomic) CGSize display;  // the screen's size in points, for WinPadGameScreen
+- (void)askToExit;
 @end
 
 // The FPS overlay: the display link looks at Metal's frame count every screen
@@ -985,6 +1030,10 @@ static CFTimeInterval fps_shown;
       return;
     }
   }
+  __weak WineViewController* weak = self;
+  exit_asked = ^{
+    [weak askToExit];
+  };
   self.text.text = @"WinPad Wine: starting…";
   self.timer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer* timer) {
     [self showLog];
@@ -992,6 +1041,44 @@ static CFTimeInterval fps_shown;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     [self runWine];
   });
+}
+
+// Exit or the controller's Home button (RequestExit): asks, then ends the game and the app.
+- (void)askToExit {
+  if (exit_alert) return;
+  UIAlertController* ask = [UIAlertController
+      alertControllerWithTitle:@"Ukončit hru?"
+                       message:@"Neuložený postup se ztratí. Aplikace se zavře a po dalším otevření ukáže "
+                               @"knihovnu her.\n\nNa ovladači: A ukončit, B zpět do hry."
+                preferredStyle:UIAlertControllerStyleAlert];
+  exit_now = ^{
+    // The log ends as a finished run, not one that crashed (wine.log.crashed).
+    printf("WinPad Wine: the player ended the game (Exit)\n%s, exit 0\n", FinishedMarker.UTF8String);
+    fflush(stdout);
+    exit_alert = nil;
+    // To the home screen first, as when the player leaves the app, then gone: Wine cannot
+    // start a second game in this process.
+    UIApplication* app = UIApplication.sharedApplication;
+    const SEL suspend = NSSelectorFromString(@"suspend");
+    if ([app respondsToSelector:suspend]) ((void (*)(id, SEL))objc_msgSend)(app, suspend);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      exit(0);
+    });
+  };
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zpět do hry"
+                                          style:UIAlertActionStyleCancel
+                                        handler:^(UIAlertAction* action) {
+                                          exit_alert = nil;
+                                        }]];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Ukončit hru"
+                                          style:UIAlertActionStyleDestructive
+                                        handler:^(UIAlertAction* action) {
+                                          exit_now();
+                                        }]];
+  exit_alert = ask;
+  UIViewController* top = self;
+  while (top.presentedViewController) top = top.presentedViewController;
+  [top presentViewController:ask animated:YES completion:nil];
 }
 
 // The touch controller goes on the window, so the controllers start once it shows.
