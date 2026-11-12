@@ -59,6 +59,50 @@ NSString* WinPadMissingDLLOfLastRun(void) {
   return m ? [log substringWithRange:[m rangeAtIndex:1]].lowercaseString : nil;
 }
 
+static void AddImport(const char* dll, void* ctx) {
+  [(__bridge NSMutableSet*)ctx addObject:[NSString stringWithUTF8String:dll].lowercaseString];
+}
+
+// The lowercase names of the files in DIR (none when it is not there).
+static NSSet<NSString*>* LowercaseNames(NSString* dir) {
+  NSMutableSet* names = [NSMutableSet new];
+  for (NSString* name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:dir error:nil])
+    [names addObject:name.lowercaseString];
+  return names;
+}
+
+NSArray<NSString*>* WinPadMissingDLLsOf(NSString* exe, NSString* gameFolder) {
+  NSString* exe_dir = exe.stringByDeletingLastPathComponent;
+  NSMutableSet* have = [NSMutableSet new];
+  [have unionSet:LowercaseNames(exe_dir)];
+  if (gameFolder) [have unionSet:LowercaseNames(gameFolder)];
+  [have unionSet:LowercaseNames([NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"i386-windows"])];
+  [have unionSet:LowercaseNames(DocumentsFile(@"prefix/drive_c/windows/syswow64"))];
+  [have unionSet:LowercaseNames(WinPadDirectXDir())];
+  // The executable and the game's own modules next to it (a DLL only the game loads by name,
+  // with LoadLibrary, is not seen: the run's log still names it, WinPadMissingDLLOfLastRun).
+  NSMutableArray* files = [NSMutableArray arrayWithObject:exe];
+  for (NSString* name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:exe_dir error:nil]) {
+    NSString* ext = name.pathExtension.lowercaseString;
+    if ([ext isEqualToString:@"dll"] || [ext isEqualToString:@"asi"])
+      [files addObject:[exe_dir stringByAppendingPathComponent:name]];
+  }
+  NSMutableSet* imports = [NSMutableSet new];
+  for (NSString* file in files) {
+    char err[256];
+    if (winpad_pe_imports(file.fileSystemRepresentation, AddImport, (__bridge void*)imports, err, sizeof(err)))
+      NSLog(@"WinPad: imports of %@ not read: %s", file.lastPathComponent, err);
+  }
+  NSMutableArray* missing = [NSMutableArray new];
+  for (NSString* dll in imports) {
+    if ([dll hasPrefix:@"api-ms-win-"] || [dll hasPrefix:@"ext-ms-win-"] || [have containsObject:dll]) continue;
+    // Some import names lack the extension (KERNEL32): Windows adds .dll.
+    if (!dll.pathExtension.length && [have containsObject:[dll stringByAppendingString:@".dll"]]) continue;
+    [missing addObject:dll];
+  }
+  return [missing sortedArrayUsingSelector:@selector(compare:)];
+}
+
 NSArray<NSString*>* WinPadDirectXLink(NSString* syswow64, NSString* bundleI386) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSMutableArray* native = [NSMutableArray new];

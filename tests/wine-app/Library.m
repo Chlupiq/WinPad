@@ -1305,6 +1305,7 @@ static NSString* DirectXSummary(void) {
 @property(nonatomic) BOOL installing;
 // StikDebug was asked for the JIT before this start (WinPadJIT.m): asked once per launch.
 @property(nonatomic) BOOL jitAsked;
+@property(nonatomic) BOOL dllsChecked;
 @property(nonatomic, strong) NSMutableString* installReport;
 - (void)reload;
 - (void)showFocus;
@@ -1319,6 +1320,8 @@ static NSString* DirectXSummary(void) {
 - (void)openJITGuide;
 - (void)offerDirectX;
 - (void)downloadDirectXFor:(NSString*)dll;
+- (BOOL)checkDLLsOf:(NSString*)program game:(WinPadGame*)game;
+- (void)askToStartWithout:(NSString*)text start:(void (^)(void))start cancel:(void (^)(void))cancel;
 - (void)openSettings;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
@@ -1894,6 +1897,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game {
   if (self.started || self.installing) return;
+  // The DLLs the game imports and no one has: Microsoft's DirectX ones are downloaded first.
+  if (game && !self.dllsChecked && ![self checkDLLsOf:program game:game]) return;
   // A game without the JIT: StikDebug turns it on first (WinPadJIT.m), if it is installed and the
   // settings want it. The game starts once a debugger is attached, or without the JIT after 60 s
   // or when the user says so.
@@ -1923,6 +1928,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     return;
   }
   self.started = YES;
+  self.dllsChecked = NO;
   if (game) [NSUserDefaults.standardUserDefaults setObject:game.folder forKey:@"lastGame"];
   // The game reads the controllers itself (main.m's Gamepads).
   for (id observer in self.observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
@@ -1971,6 +1977,96 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                           style:UIAlertActionStyleDefault
                                         handler:^(UIAlertAction* action) {
                                           [weak downloadDirectXFor:dll];
+                                        }]];
+  [self presentViewController:ask animated:YES completion:nil];
+}
+
+// Before a game runs: looks for DLLs it imports that are nowhere (WinPadMissingDLLsOf). Those
+// of Microsoft's DirectX are downloaded right away and the game then starts; others are only
+// named, once per game and set of names, since a game may never load them. YES when the game
+// can start now; NO when this went on with an alert and starts it (or not) itself.
+- (BOOL)checkDLLsOf:(NSString*)program game:(WinPadGame*)game {
+  self.dllsChecked = YES;
+  NSArray<NSString*>* missing = WinPadMissingDLLsOf(program, [Documents() stringByAppendingPathComponent:game.folder]);
+  if (!missing.count) return YES;
+  NSMutableArray<NSString*>* fetch = [NSMutableArray new];
+  NSMutableArray<NSString*>* others = [NSMutableArray new];
+  // Once DirectX is downloaded, what it lacks (xinput1_4...) another download would not bring.
+  const BOOL have_directx = WinPadDirectXDLLs().count > 0;
+  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx ? fetch : others addObject:dll];
+  printf("WinPad Library: %s lacks DLLs: %s\n", game.folder.UTF8String,
+         [missing componentsJoinedByString:@", "].UTF8String);
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return YES;
+  __weak LibraryViewController* weak = self;
+  void (^start)(void) = ^{
+    [weak startProgram:program game:game];
+  };
+  void (^cancel)(void) = ^{
+    weak.dllsChecked = NO;
+    weak.jitAsked = NO;
+  };
+  if (fetch.count && !WinPadDirectXDownloading()) {
+    UIAlertController* busy = [UIAlertController
+        alertControllerWithTitle:@"Stahuji chybějící DLL"
+                         message:[NSString stringWithFormat:@"Hra potřebuje %@ z DirectX od Microsoftu. Stahuji ho "
+                                                            @"přímo od Microsoftu (asi 95 MB)…",
+                                                            [fetch componentsJoinedByString:@", "]]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    NSString* intro = busy.message;
+    [self presentViewController:busy animated:YES completion:nil];
+    WinPadDirectXDownload(
+        ^(double fraction) {
+          busy.message = fraction < 1 ? [NSString stringWithFormat:@"%@\n%d %%", intro, (int)(fraction * 100)]
+                                      : [intro stringByAppendingString:@"\nRozbaluji…"];
+        },
+        ^(NSString* error) {
+          [busy dismissViewControllerAnimated:YES completion:^{
+            LibraryViewController* me = weak;
+            if (!me) return;
+            NSMutableArray* still = [NSMutableArray new];
+            for (NSString* dll in fetch)
+              if (![WinPadDirectXDLLs() containsObject:dll]) [still addObject:dll];
+            [still addObjectsFromArray:others];
+            if (!error && !still.count) {
+              start();
+              return;
+            }
+            NSString* text = error ? [NSString stringWithFormat:@"DirectX se nestáhl: %@\n\nChybí: %@", error,
+                                                                [still componentsJoinedByString:@", "]]
+                                   : [NSString stringWithFormat:@"Tyhle DLL nemá ani DirectX od Microsoftu: %@",
+                                                                [still componentsJoinedByString:@", "]];
+            [me askToStartWithout:text start:start cancel:cancel];
+          }];
+        });
+    return NO;
+  }
+  // Only DLLs the app cannot get: said once for this game and these names.
+  NSString* key = [@"dllsMissing." stringByAppendingString:game.folder];
+  NSString* names = [missing componentsJoinedByString:@", "];
+  if ([[NSUserDefaults.standardUserDefaults stringForKey:key] isEqualToString:names]) return YES;
+  [NSUserDefaults.standardUserDefaults setObject:names forKey:key];
+  [self askToStartWithout:[NSString stringWithFormat:@"Hra importuje DLL, které WinPad nemá a neumí stáhnout: %@. "
+                                                     @"Pokud je hra opravdu načte, nespustí se. Můžeš je nakopírovat "
+                                                     @"do složky hry.",
+                                                     names]
+                    start:start
+                   cancel:cancel];
+  return NO;
+}
+
+- (void)askToStartWithout:(NSString*)text start:(void (^)(void))start cancel:(void (^)(void))cancel {
+  UIAlertController* ask = [UIAlertController alertControllerWithTitle:@"Chybí DLL"
+                                                               message:text
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit"
+                                          style:UIAlertActionStyleCancel
+                                        handler:^(UIAlertAction* action) {
+                                          cancel();
+                                        }]];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Spustit i tak"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* action) {
+                                          start();
                                         }]];
   [self presentViewController:ask animated:YES completion:nil];
 }

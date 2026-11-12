@@ -23,6 +23,13 @@ BOOL WinPadDirectXProvides(NSString* dll);
 // (which is needed by ...) not found" in wine.log or wine.log.crashed), or nil.
 NSString* _Nullable WinPadMissingDLLOfLastRun(void);
 
+// Before a game runs: the DLLs that EXE (and the DLLs and .asi plugins next to it) import that
+// no one has: not the game's (its folder or EXE's folder), not Wine's (the app's
+// i386-windows), not in the prefix's syswow64 and not downloaded from Microsoft. API sets
+// (api-ms-win-*) are left out, Wine maps them. Lowercase names, sorted, empty when all are
+// there. Reads the files, so call it off the main queue for a big game.
+NSArray<NSString*>* WinPadMissingDLLsOf(NSString* exe, NSString* _Nullable gameFolder);
+
 // Downloads the installer from Microsoft (about 95 MB), checks its SHA-256 and takes the
 // DLLs out; the installer itself is deleted. PROGRESS (0...1, then 1 while unpacking) and
 // DONE (nil, or why not) are called on the main queue. One download at a time.

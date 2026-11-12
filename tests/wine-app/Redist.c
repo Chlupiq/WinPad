@@ -195,3 +195,132 @@ int winpad_redist_extract_directx(const char* exe, const char* dest, int* count,
   }
   return ret;
 }
+
+// The import tables of a PE file (Redist.h). The whole file is read: game executables are a
+// few MB, and only the headers and the import names are looked at.
+static uint32_t le32(const unsigned char* p) {
+  return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint16_t le16(const unsigned char* p) {
+  return (uint16_t)(p[0] | p[1] << 8);
+}
+
+struct pe_file {
+  const unsigned char* data;
+  size_t size;
+  const unsigned char* sections;
+  unsigned nsections;
+};
+
+// The file offset of RVA, or 0 when no section holds it.
+static size_t pe_offset(const struct pe_file* pe, uint32_t rva) {
+  for (unsigned i = 0; i < pe->nsections; i++) {
+    const unsigned char* s = pe->sections + i * 40;
+    const uint32_t vsize = le32(s + 8), va = le32(s + 12), raw_size = le32(s + 16), raw = le32(s + 20);
+    const uint32_t span = vsize > raw_size ? vsize : raw_size;
+    if (rva >= va && rva - va < span) {
+      if (rva - va >= raw_size) return 0;
+      const size_t off = (size_t)raw + (rva - va);
+      return off < pe->size ? off : 0;
+    }
+  }
+  return 0;
+}
+
+// Calls FOUND with the name at RVA, if it is a sane DLL name.
+static void pe_name(const struct pe_file* pe, uint32_t rva, void (*found)(const char*, void*), void* ctx) {
+  const size_t off = pe_offset(pe, rva);
+  if (!off) return;
+  char name[260];
+  size_t n = 0;
+  while (off + n < pe->size && n < sizeof(name) - 1) {
+    const unsigned char c = pe->data[off + n];
+    if (!c) break;
+    if (c < 0x20 || c > 0x7e) return;
+    name[n++] = (char)c;
+  }
+  if (!n || off + n >= pe->size || n == sizeof(name) - 1) return;
+  name[n] = 0;
+  found(name, ctx);
+}
+
+int winpad_pe_imports(const char* path, void (*found)(const char* dll, void* ctx), void* ctx, char* err,
+                      size_t errlen) {
+  FILE* f = fopen(path, "rb");
+  if (!f) {
+    say(err, errlen, "%s: %s", path, strerror(errno));
+    return -1;
+  }
+  fseek(f, 0, SEEK_END);
+  const long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (size < 64 || size > 1024L * 1024 * 1024) {
+    fclose(f);
+    say(err, errlen, "%s: not a PE file", path);
+    return -1;
+  }
+  unsigned char* data = malloc((size_t)size);
+  const size_t got = data ? fread(data, 1, (size_t)size, f) : 0;
+  fclose(f);
+  int rc = -1;
+  if (got != (size_t)size) {
+    say(err, errlen, "%s: could not read it", path);
+    goto out;
+  }
+  if (data[0] != 'M' || data[1] != 'Z') {
+    say(err, errlen, "%s: not a PE file", path);
+    goto out;
+  }
+  const uint32_t nt = le32(data + 60);
+  if ((size_t)nt + 24 > (size_t)size || memcmp(data + nt, "PE\0\0", 4)) {
+    say(err, errlen, "%s: not a PE file", path);
+    goto out;
+  }
+  const unsigned char* coff = data + nt + 4;
+  const unsigned nsections = le16(coff + 2), opt_size = le16(coff + 16);
+  const unsigned char* opt = coff + 20;
+  if ((size_t)(opt - data) + opt_size + (size_t)nsections * 40 > (size_t)size || opt_size < 2) {
+    say(err, errlen, "%s: damaged PE header", path);
+    goto out;
+  }
+  const uint16_t magic = le16(opt);
+  unsigned dirs_at, count_at;
+  uint64_t image_base;
+  if (magic == 0x10b && opt_size >= 96) {
+    dirs_at = 96, count_at = 92, image_base = le32(opt + 28);
+  } else if (magic == 0x20b && opt_size >= 112) {
+    dirs_at = 112, count_at = 108, image_base = le32(opt + 24) | (uint64_t)le32(opt + 28) << 32;
+  } else {
+    say(err, errlen, "%s: unknown PE optional header", path);
+    goto out;
+  }
+  uint32_t ndirs = le32(opt + count_at);
+  if (ndirs > (opt_size - dirs_at) / 8) ndirs = (opt_size - dirs_at) / 8;
+  const struct pe_file pe = {data, (size_t)size, opt + opt_size, nsections};
+  // Normal imports: IMAGE_IMPORT_DESCRIPTOR, 20 bytes, Name at +12, ends with a zero one.
+  if (ndirs > 1 && le32(opt + dirs_at + 8)) {
+    size_t off = pe_offset(&pe, le32(opt + dirs_at + 8));
+    for (unsigned i = 0; off && i < 4096 && off + 20 <= pe.size; i++, off += 20) {
+      const unsigned char* d = data + off;
+      if (!le32(d + 12) && !le32(d + 16)) break;
+      pe_name(&pe, le32(d + 12), found, ctx);
+    }
+  }
+  // Delay-loaded: IMAGE_DELAYLOAD_DESCRIPTOR, 32 bytes, DllNameRVA at +4 (an address, not an
+  // RVA, in old files whose Attributes lack bit 0).
+  if (ndirs > 13 && le32(opt + dirs_at + 13 * 8)) {
+    size_t off = pe_offset(&pe, le32(opt + dirs_at + 13 * 8));
+    for (unsigned i = 0; off && i < 4096 && off + 32 <= pe.size; i++, off += 32) {
+      const unsigned char* d = data + off;
+      uint32_t name = le32(d + 4);
+      if (!name) break;
+      if (!(le32(d) & 1) && name >= image_base) name = (uint32_t)(name - image_base);
+      pe_name(&pe, name, found, ctx);
+    }
+  }
+  rc = 0;
+out:
+  free(data);
+  return rc;
+}
