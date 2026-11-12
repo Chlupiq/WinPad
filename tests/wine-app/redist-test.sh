@@ -20,6 +20,6 @@ rm -rf "$work/dlls"
 mkdir -p "$work/dlls"
 "$work/redist-test" "$work/directx_redist.exe" "$work/dlls"
 ls "$work/dlls" | head -100
-# The import scan the app runs before a game starts (winpad_pe_imports): D3DX9 imports D3D9.
+# The import scan the app runs before a game starts (winpad_pe_imports): D3DX9 imports kernel32 (D3D9 it loads itself).
 "$work/redist-test" --imports "$work/dlls/d3dx9_30.dll" | tee "$work/imports.txt"
-grep -qix 'd3d9.dll' "$work/imports.txt" || { echo "d3dx9_30.dll's imports lack d3d9.dll" >&2; exit 1; }
+grep -qix "kernel32.dll" "$work/imports.txt" || { echo "d3dx9_30.dll's imports lack kernel32.dll" >&2; exit 1; }
