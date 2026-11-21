@@ -1068,6 +1068,59 @@ static NSString* LoginCode(NSString* text) {
   return [text rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@" /:?&"]].location == NSNotFound ? text : nil;
 }
 
+// Sign-in in Safari: GOG's login page there, then the address it ended on pasted back here;
+// GOT runs with the login code in it.
+static void SignInViaSafari(UIViewController* host, void (^got)(NSString* code)) {
+  [UIApplication.sharedApplication openURL:LoginURL() options:@{} completionHandler:nil];
+  UIAlertController* ask = [UIAlertController
+      alertControllerWithTitle:@"Přihlášení přes Safari"
+                       message:@"V Safari se přihlas ke GOG (i přes Google). Skončíš na prázdné stránce embed.gog.com. Zkopíruj její adresu "
+                               @"(podrž adresní řádek › Kopírovat), vrať se sem a vlož ji."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [ask addTextFieldWithConfigurationHandler:^(UITextField* field) {
+    field.placeholder = @"https://embed.gog.com/on_login_success?…";
+    field.keyboardType = UIKeyboardTypeURL;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+  }];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  __weak UIViewController* weak = host;
+  __weak UIAlertController* weak_ask = ask;
+  [ask addAction:[UIAlertAction actionWithTitle:@"Přihlásit"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* a) {
+                                          NSString* text = weak_ask.textFields.firstObject.text;
+                                          if (!text.length && UIPasteboard.generalPasteboard.hasStrings) text = UIPasteboard.generalPasteboard.string;
+                                          NSString* code = LoginCode(text);
+                                          if (code) {
+                                            got(code);
+                                            return;
+                                          }
+                                          UIAlertController* bad = [UIAlertController
+                                              alertControllerWithTitle:@"V adrese není přihlašovací kód"
+                                                               message:@"Zkopíruj celou adresu stránky, na které přihlášení v Safari skončilo "
+                                                                       @"(obsahuje code=)."
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+                                          [bad addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                                          [weak presentViewController:bad animated:YES completion:nil];
+                                        }]];
+  // Back from Safari: the alert is waiting, with the copied address already in it when it is one.
+  [host presentViewController:ask
+                     animated:YES
+                   completion:^{
+                     __block id observer = [NSNotificationCenter.defaultCenter
+                         addObserverForName:UIApplicationDidBecomeActiveNotification
+                                     object:nil
+                                      queue:NSOperationQueue.mainQueue
+                                 usingBlock:^(NSNotification* note) {
+                                   [NSNotificationCenter.defaultCenter removeObserver:observer];
+                                   UITextField* field = weak_ask.textFields.firstObject;
+                                   NSString* pasted = UIPasteboard.generalPasteboard.hasStrings ? UIPasteboard.generalPasteboard.string : nil;
+                                   if (field && !field.text.length && [pasted containsString:@"on_login_success"]) field.text = pasted;
+                                 }];
+                   }];
+}
+
 @implementation WinPadGOGLoginViewController
 
 - (void)viewDidLoad {
@@ -1086,6 +1139,14 @@ static NSString* LoginCode(NSString* text) {
   config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
   self.web = [self webViewWith:config];
   [self.view addSubview:self.web];
+  self.web.translatesAutoresizingMaskIntoConstraints = NO;
+  UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
+  [NSLayoutConstraint activateConstraints:@[
+    [self.web.topAnchor constraintEqualToAnchor:safe.topAnchor],
+    [self.web.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    [self.web.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+    [self.web.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor]
+  ]];
   [self.web loadRequest:[NSURLRequest requestWithURL:LoginURL()]];
 }
 
@@ -1120,54 +1181,10 @@ static NSString* LoginCode(NSString* text) {
 }
 
 - (void)viaSafari {
-  [UIApplication.sharedApplication openURL:LoginURL() options:@{} completionHandler:nil];
-  UIAlertController* ask = [UIAlertController
-      alertControllerWithTitle:@"Přihlášení přes Safari"
-                       message:@"V Safari se přihlas ke GOG (i přes Google). Skončíš na prázdné stránce embed.gog.com. Zkopíruj její adresu "
-                               @"(podrž adresní řádek › Kopírovat), vrať se sem a vlož ji."
-                preferredStyle:UIAlertControllerStyleAlert];
-  [ask addTextFieldWithConfigurationHandler:^(UITextField* field) {
-    field.placeholder = @"https://embed.gog.com/on_login_success?…";
-    field.keyboardType = UIKeyboardTypeURL;
-    field.autocorrectionType = UITextAutocorrectionTypeNo;
-    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
-  }];
-  [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
   __weak WinPadGOGLoginViewController* weak = self;
-  __weak UIAlertController* weak_ask = ask;
-  [ask addAction:[UIAlertAction actionWithTitle:@"Přihlásit"
-                                          style:UIAlertActionStyleDefault
-                                        handler:^(UIAlertAction* a) {
-                                          NSString* text = weak_ask.textFields.firstObject.text;
-                                          if (!text.length && UIPasteboard.generalPasteboard.hasStrings) text = UIPasteboard.generalPasteboard.string;
-                                          NSString* code = LoginCode(text);
-                                          if (code) {
-                                            [weak exchange:code];
-                                            return;
-                                          }
-                                          UIAlertController* bad = [UIAlertController
-                                              alertControllerWithTitle:@"V adrese není přihlašovací kód"
-                                                               message:@"Zkopíruj celou adresu stránky, na které přihlášení v Safari skončilo "
-                                                                       @"(obsahuje code=)."
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-                                          [bad addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                                          [weak presentViewController:bad animated:YES completion:nil];
-                                        }]];
-  // Back from Safari: the alert is waiting, with the copied address already in it when it is one.
-  [self presentViewController:ask
-                     animated:YES
-                   completion:^{
-                     __block id observer = [NSNotificationCenter.defaultCenter
-                         addObserverForName:UIApplicationDidBecomeActiveNotification
-                                     object:nil
-                                      queue:NSOperationQueue.mainQueue
-                                 usingBlock:^(NSNotification* note) {
-                                   [NSNotificationCenter.defaultCenter removeObserver:observer];
-                                   UITextField* field = weak_ask.textFields.firstObject;
-                                   NSString* pasted = UIPasteboard.generalPasteboard.hasStrings ? UIPasteboard.generalPasteboard.string : nil;
-                                   if (field && !field.text.length && [pasted containsString:@"on_login_success"]) field.text = pasted;
-                                 }];
-                   }];
+  SignInViaSafari(self, ^(NSString* code) {
+    [weak exchange:code];
+  });
 }
 
 - (void)exchange:(NSString*)code {
@@ -1319,7 +1336,7 @@ static NSString* LoginCode(NSString* text) {
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
-  return WinPadGOGSignedIn() ? (NSInteger)self.shown.count : 1;
+  return WinPadGOGSignedIn() ? (NSInteger)self.shown.count : 2;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -1361,10 +1378,11 @@ static NSString* Status(WinPadGOGInstall* install, long long productId) {
   cell.detailTextLabel.numberOfLines = 2;
   cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
   if (!WinPadGOGSignedIn()) {
-    cell.textLabel.text = @"Přihlásit se ke GOG";
+    const BOOL safari = indexPath.row == 1;
+    cell.textLabel.text = safari ? @"Přihlásit se přes Safari" : @"Přihlásit se ke GOG";
     cell.textLabel.textColor = self.view.tintColor;
-    cell.detailTextLabel.text = nil;
-    cell.imageView.image = [UIImage systemImageNamed:@"person.crop.circle"];
+    cell.detailTextLabel.text = safari ? @"Pro přihlášení přes Google, když ho přihlašovací okno odmítne" : nil;
+    cell.imageView.image = [UIImage systemImageNamed:safari ? @"safari" : @"person.crop.circle"];
     return cell;
   }
   WinPadGOGProduct* game = self.shown[indexPath.row];
@@ -1438,7 +1456,19 @@ static NSString* Status(WinPadGOGInstall* install, long long productId) {
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath {
   [tableView deselectRowAtIndexPath:indexPath animated:YES];
   if (!WinPadGOGSignedIn()) {
-    [self signIn];
+    if (indexPath.row == 0) {
+      [self signIn];
+      return;
+    }
+    __weak WinPadGOGViewController* weak = self;
+    SignInViaSafari(self, ^(NSString* code) {
+      weak.message = @"Přihlašuji…";
+      [weak.tableView reloadData];
+      ExchangeCode(code, ^(NSString* token, NSString* error) {
+        weak.message = error;
+        [weak reloadGames];
+      });
+    });
     return;
   }
   WinPadGOGProduct* game = self.shown[indexPath.row];
