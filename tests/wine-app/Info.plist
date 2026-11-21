@@ -89,6 +89,13 @@
 	</array>
 	<!-- The built-in JIT helper (JITHelper/) finds the device's Remote Pairing service over
 	     LocalDevVPN, as StikJIT does. -->
+	<!-- CI's copy of GOG's servers on the Mac's own address (GOG.m, gogAPIBase); everything
+	     else stays HTTPS. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>WinPad Wine se přes LocalDevVPN připojí samo k sobě jako debugger, aby mohlo zapnout JIT.</string>
 	<key>NSBonjourServices</key>

@@ -88,7 +88,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/GOG.h" "$here/GOG.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 rm -rf "$proj/profiles"
 mkdir -p "$proj/profiles"
@@ -103,7 +103,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
     libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
-    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers NetworkExtension"
+    frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers NetworkExtension WebKit Security"
     if [ -n "$d3d9" ]; then
         libs="$libs metal-display.o libdxmt_combined.a"
         frameworks="$frameworks Metal QuartzCore IOSurface"
@@ -422,6 +422,42 @@ grep -q '^loaded: .* [1-9][0-9]*x[1-9]' "$docs/covers.txt" 2>/dev/null ||
     echo "::warning::the cover search found or loaded no cover (no internet on the runner?)"
 grep -q '^cover button: visible' "$docs/covers.txt" ||
     { echo "the library's Obal button is not on the iPad's screen" >&2; exit 1; }
+
+# GOG (GOG.m) against a local copy of its servers (gog-fixture.py): sign in with a code, the
+# account's Windows games, and a game installed from its depots' chunks into Documents: the
+# English depot and not the German one, the owned DLC and not the other, the 32-bit depot and
+# not the 64-bit one, small files out of their container, no support files; and a generation 1
+# game, whose files are ranges of one main.bin.
+gog_dir=$(mktemp -d)
+gog_port=18765
+python3 -I "$here/gog-fixture.py" "$gog_dir/www" "$gog_port" "$sim_app/i386-windows/hello.exe"
+python3 -I "$here/gog-fixture.py" --serve "$gog_dir/www" "$gog_port" >"$gog_dir/server.log" 2>&1 &
+gog_server=$!
+sleep 1
+rm -rf "$docs/gog.txt" "$docs/WinPad GOG Test" "$docs/WinPad GOG Old" "$docs/.gog"
+# The second game is GOG's generation 1 (ranges of one main.bin), fetched in parts of 1000 bytes.
+xcrun simctl launch "$udid" "$bundle" -gogTest 1207658999,1207650001 -gogV1Part 1000 \
+    -gogAPIBase "http://127.0.0.1:$gog_port" -coverAuto NO >/dev/null
+for _ in $(seq 90); do
+    grep -q '== finished' "$docs/gog.txt" 2>/dev/null && break
+    sleep 1
+done
+xcrun simctl io "$udid" screenshot "$out/library-screens/gog-installed.png" >/dev/null 2>&1 || true
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+kill "$gog_server" 2>/dev/null || true
+echo "--- GOG ---"
+cat "$docs/gog.txt" || true
+while IFS= read -r expect; do
+    grep -qF "$expect" "$docs/gog.txt" 2>/dev/null ||
+        { echo "missing in the GOG report: $expect" >&2; tail -40 "$gog_dir/server.log" >&2; exit 1; }
+done <"$gog_dir/www/expected.txt"
+while IFS= read -r unexpected; do
+    ! grep -qF "$unexpected" "$docs/gog.txt" || { echo "the GOG install has what it should not: $unexpected" >&2; exit 1; }
+done <"$gog_dir/www/unexpected.txt"
+[ ! -e "$docs/.gog/1207658999" ] && [ ! -e "$docs/.gog/1207650001" ] ||
+    { echo "the GOG install left its download folder behind" >&2; exit 1; }
+grep -q '" 206 ' "$gog_dir/server.log" || { echo "generation 1 was not fetched with Range requests" >&2; exit 1; }
+rm -rf "$docs/WinPad GOG Test" "$docs/WinPad GOG Old" "$gog_dir"
 
 # The same on an iPhone, which runs the library on its side and smaller: Obal must be on the
 # screen there too, with a game that has code maps (Obal beside the export, the tightest).
