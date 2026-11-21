@@ -28,6 +28,13 @@ Settings keys (the app's):
   folders             ["Maps", ...]: folders, relative to the game's, the app makes before the
                       game starts: empty ones a game writes into (Mafia saves a mission's
                       progress in Maps), which copying the game often leaves out
+  padKeys             {"a": 32, "r2": 1, ...}: the controller's keys for this game (input names
+                      as the app's settings, Library.m PadIds), laid over the player's; 1, 2
+                      and 4 are the mouse's left, right and middle buttons
+  padMouse            "right" or "left": that stick moves the mouse (mouse-look) instead of keys
+  touchMouse          "direct" (the default: a finger points and holds the left button),
+                      "trackpad" (a finger moves the mouse by as much, a tap clicks) or "off"
+  mouseSpeed          how far the mouse goes for a move (1 as it came, up to 10)
 """
 import json
 import os
@@ -37,8 +44,11 @@ from . import paths
 
 PROFILES_DIR = os.path.join(paths.DATA, "profiles")
 WINPAD_JSON = "winpad.json"
-SETTINGS_KEYS = ("title", "exe", "args", "dllOverrides", "env", "registry", "folders")
-DICT_KEYS = ("dllOverrides", "env", "registry")
+SETTINGS_KEYS = ("title", "exe", "args", "dllOverrides", "env", "registry", "folders",
+                 "padKeys", "padMouse", "touchMouse", "mouseSpeed")
+PAD_INPUTS = ("up", "down", "left", "right", "a", "b", "x", "y", "l1", "r1", "l2", "r2", "menu", "options",
+              "rup", "rdown", "rleft", "rright", "lup", "ldown", "lleft", "lright")
+DICT_KEYS = ("dllOverrides", "env", "registry", "padKeys")
 REGISTRY_ROOTS = ("HKLM", "HKEY_LOCAL_MACHINE", "HKCU", "HKEY_CURRENT_USER")
 
 
@@ -96,6 +106,17 @@ def check_settings(s):
             isinstance(f, str) and f and not f.startswith(("/", "\\")) and ".." not in re.split(r"[/\\]", f)
             for f in s["folders"])):
         out.append("folders must be a list of folder names inside the game's")
+    if "padKeys" in s and not (isinstance(s["padKeys"], dict) and all(
+            k in PAD_INPUTS and isinstance(v, int) and not isinstance(v, bool) and 0 < v < 256
+            for k, v in s["padKeys"].items())):
+        out.append("padKeys must map controller inputs (" + ", ".join(PAD_INPUTS) + ") to virtual keys 1-255")
+    if "padMouse" in s and s["padMouse"] not in ("left", "right"):
+        out.append("padMouse must be left or right")
+    if "touchMouse" in s and s["touchMouse"] not in ("direct", "trackpad", "off"):
+        out.append("touchMouse must be direct, trackpad or off")
+    if "mouseSpeed" in s and not (isinstance(s["mouseSpeed"], (int, float)) and not isinstance(s["mouseSpeed"], bool)
+                                  and 0 < s["mouseSpeed"] <= 10):
+        out.append("mouseSpeed must be a number above 0, at most 10")
     for key in ("dllOverrides", "env"):
         if key in s and not (isinstance(s[key], dict) and all(isinstance(v, str) for v in s[key].values())):
             out.append(f"{key} must map names to texts")

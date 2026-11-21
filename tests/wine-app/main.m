@@ -57,6 +57,7 @@
 #import "WinPadRedist.h"
 
 #include <dlfcn.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -90,6 +91,8 @@ static void StartLogClock(void) {
 }
 static BOOL gamepad_test;  // "gamepadTest": CI presses A on the touch controller (PressTestButton)
 static void PressTestButton(void);
+static BOOL mouse_test;  // "mouseTest": CI moves the mouse and clicks the window through winehost_post_mouse
+static void ClickTest(void);
 
 static NSString* DocumentsPath(NSString* name) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -145,6 +148,10 @@ static void ShowFrame(void* hwnd, int width, int height, int stride, const void*
       if (gamepad_test && !frame_view.image)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
           PressTestButton();
+        });
+      if (mouse_test && !frame_view.image)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+          ClickTest();
         });
       frame_view.image = image;
     });
@@ -244,6 +251,252 @@ static void HardwareKeyboard(void) {
                                               }];
 }
 
+// The mouse: the program gets it as a Windows mouse's input (winehost_post_mouse, looked up
+// at run time: a winehost.o built before it, as a Mac's own project may have, has none). A
+// paired mouse or trackpad (GCMouse) moves it by its own deltas, which mouse-look in a game like
+// Call of Duty 4 needs; a finger on the picture does as the game's "touchMouse" says
+// (WinPadMouseView); a controller's stick moves it with the game's "padMouse"; and a controller
+// key 1, 2 or 4 (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON) in its "padKeys" is a mouse button.
+enum {
+  MouseMove = 0x1, MouseLeftDown = 0x2, MouseLeftUp = 0x4, MouseRightDown = 0x8, MouseRightUp = 0x10,
+  MouseMiddleDown = 0x20, MouseMiddleUp = 0x40, MouseWheel = 0x800, MouseAbsolute = 0x8000
+};
+static double mouse_speed = 1;  // the game's "mouseSpeed": how far a move goes, 1 as it came
+static int pad_mouse_stick = -1;  // the game's "padMouse": PadLUp or PadRUp, the stick that moves the mouse
+static CGPoint pad_stick[2];      // that stick's tilt on the controller and on the touch controller, up +y
+
+static void PostMouse(float x, float y, unsigned flags, int data) {
+  static void (*post)(float, float, unsigned, int);
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    post = (void (*)(float, float, unsigned, int))dlsym(RTLD_DEFAULT, "winehost_post_mouse");
+    if (!post) printf("mouse: this winehost has no winehost_post_mouse, so the program gets no mouse\n");
+  });
+  if (post) post(x, y, flags, data);
+}
+
+// A relative move by DX, DY pixels (right, down); what is less than a pixel adds up.
+static void MoveMouse(double dx, double dy) {
+  static double rest_x, rest_y;
+  rest_x += dx * mouse_speed;
+  rest_y += dy * mouse_speed;
+  const double x = trunc(rest_x), y = trunc(rest_y);
+  if (!x && !y) return;
+  rest_x -= x;
+  rest_y -= y;
+  PostMouse((float)x, (float)y, MouseMove, 0);
+}
+
+// Button 0 is the left one, 1 the right, 2 the middle.
+static void MouseButton(int button, BOOL down) {
+  static const unsigned flags[3][2] = {{MouseLeftUp, MouseLeftDown}, {MouseRightUp, MouseRightDown},
+                                       {MouseMiddleUp, MouseMiddleDown}};
+  if (button >= 0 && button < 3) PostMouse(0, 0, flags[button][down ? 1 : 0], 0);
+}
+
+// The mouse button a controller key is (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON), or -1.
+static int MouseButtonOfKey(unsigned short vk) {
+  return vk == 0x01 ? 0 : vk == 0x02 ? 1 : vk == 0x04 ? 2 : -1;
+}
+
+static void HardwareMouse(void) {
+  void (^attach)(GCMouse*) = ^(GCMouse* mouse) {
+    GCMouseInput* input = mouse.mouseInput;
+    printf("mouse: %s connected\n", (mouse.vendorName ?: @"a mouse").UTF8String);
+    // GameController's y goes up, Windows' down.
+    input.mouseMovedHandler = ^(GCMouseInput* in, float dx, float dy) {
+      MoveMouse(dx, -dy);
+    };
+    input.leftButton.pressedChangedHandler = ^(GCControllerButtonInput* b, float v, BOOL pressed) {
+      MouseButton(0, pressed);
+    };
+    input.rightButton.pressedChangedHandler = ^(GCControllerButtonInput* b, float v, BOOL pressed) {
+      MouseButton(1, pressed);
+    };
+    input.middleButton.pressedChangedHandler = ^(GCControllerButtonInput* b, float v, BOOL pressed) {
+      MouseButton(2, pressed);
+    };
+    // A notch of the wheel each time the scroll moves; up is away from the player in both.
+    input.scroll.yAxis.valueChangedHandler = ^(GCControllerAxisInput* axis, float v) {
+      if (v) PostMouse(0, 0, MouseWheel, v > 0 ? 120 : -120);
+    };
+    // With a mouse the game keeps the pointer (WineViewController prefersPointerLocked).
+    [metal_view.window.rootViewController setNeedsUpdateOfPrefersPointerLocked];
+  };
+  for (GCMouse* mouse in GCMouse.mice) attach(mouse);
+  [NSNotificationCenter.defaultCenter addObserverForName:GCMouseDidConnectNotification
+                                                  object:nil
+                                                   queue:NSOperationQueue.mainQueue
+                                              usingBlock:^(NSNotification* note) {
+                                                attach(note.object);
+                                              }];
+}
+
+// A finger on the game's picture (beneath the touch controller, which takes the fingers on its
+// own parts), as the game's "touchMouse" says: "direct" (the default) points where the finger
+// is and holds the left button while it is down, as a touch screen does on Windows; "trackpad"
+// is a laptop's touchpad for games that hide the cursor and turn the view with the mouse
+// (Call of Duty 4): a finger moving moves the mouse by as much, a tap is a left click and a tap
+// of two fingers a right one; "off" gives the program nothing.
+@interface WinPadMouseView : UIView
+@property(nonatomic) BOOL trackpad;
+@end
+
+@implementation WinPadMouseView {
+  UITouch* _finger;  // the finger that points or moves
+  CGPoint _last, _start;
+  CFTimeInterval _began;
+  BOOL _moved, _two;  // it went further than a tap; a second finger came down with it
+}
+
+// Where on the picture POINT is, as fractions of it (the program's main window), or NO if
+// there is no picture yet.
+static BOOL PictureFraction(UIView* view, CGPoint point, CGPoint* out) {
+  CGRect frame, picture;
+  CGSize content;
+  if (game_has_layer && game_layer) {
+    frame = game_layer.frame;
+    content = [game_layer isKindOfClass:CAMetalLayer.class] ? ((CAMetalLayer*)game_layer).drawableSize : frame.size;
+    NSString* gravity = game_layer.contentsGravity;
+    if ([gravity isEqualToString:kCAGravityResize] || content.width <= 0 || content.height <= 0) {
+      picture = frame;
+    } else {
+      const CGFloat fit = MIN(frame.size.width / content.width, frame.size.height / content.height),
+                    fill = MAX(frame.size.width / content.width, frame.size.height / content.height);
+      const CGFloat k = [gravity isEqualToString:kCAGravityResizeAspectFill] ? fill : fit;
+      const CGSize size = CGSizeMake(content.width * k, content.height * k);
+      picture = CGRectMake(CGRectGetMidX(frame) - size.width / 2, CGRectGetMidY(frame) - size.height / 2, size.width, size.height);
+    }
+  } else if (frame_view.image && !frame_view.hidden) {
+    frame = frame_view.frame;
+    content = frame_view.image.size;
+    const CGFloat k = MIN(frame.size.width / content.width, frame.size.height / content.height);
+    const CGSize size = CGSizeMake(content.width * k, content.height * k);
+    picture = CGRectMake(CGRectGetMidX(frame) - size.width / 2, CGRectGetMidY(frame) - size.height / 2, size.width, size.height);
+  } else {
+    return NO;
+  }
+  if (picture.size.width <= 0 || picture.size.height <= 0) return NO;
+  const CGPoint p = [view convertPoint:point toView:metal_view];
+  *out = CGPointMake((p.x - picture.origin.x) / picture.size.width, (p.y - picture.origin.y) / picture.size.height);
+  return YES;
+}
+
+// How many of the program's pixels a point of the screen is: the monitor Wine reports over the
+// picture's width, so a finger across the picture moves the mouse across the screen.
+static double PixelsPerPoint(UIView* view) {
+  const char* w = getenv("MADEIRA_SCREEN_W");
+  const double screen = w && atoi(w) > 0 ? atoi(w) : 1024;
+  const CGFloat width = game_has_layer && game_layer ? game_layer.frame.size.width : view.bounds.size.width;
+  return width > 0 ? screen / width : 1;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+  if (!(self = [super initWithFrame:frame])) return nil;
+  self.multipleTouchEnabled = YES;
+  self.backgroundColor = UIColor.clearColor;
+  return self;
+}
+
+// Only the picture takes fingers: before the game shows, the log beneath still scrolls.
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent*)event {
+  if (game_has_layer) return [super pointInside:point withEvent:event];
+  return frame_view.image && !frame_view.hidden && CGRectContainsPoint([self convertRect:frame_view.frame fromView:metal_view], point);
+}
+
+// A paired mouse's clicks come as GCMouse's (HardwareMouse), not as touches too.
+static BOOL IsFinger(UITouch* touch) {
+  return touch.type == UITouchTypeDirect || touch.type == UITouchTypePencil;
+}
+
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  for (UITouch* touch in touches) {
+    if (!IsFinger(touch)) continue;
+    if (_finger) {
+      _two = YES;
+      continue;
+    }
+    _finger = touch;
+    _start = _last = [touch locationInView:self];
+    _began = touch.timestamp;
+    _moved = _two = NO;
+    CGPoint at;
+    if (!self.trackpad && PictureFraction(self, _start, &at)) {
+      PostMouse(at.x, at.y, MouseMove | MouseAbsolute, 0);
+      PostMouse(at.x, at.y, MouseMove | MouseLeftDown | MouseAbsolute, 0);
+    }
+  }
+}
+
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  if (![touches containsObject:_finger]) return;
+  const CGPoint p = [_finger locationInView:self];
+  if (hypot(p.x - _start.x, p.y - _start.y) > 8) _moved = YES;
+  if (self.trackpad) {
+    if (_moved) {
+      const double k = PixelsPerPoint(self);
+      MoveMouse((p.x - _last.x) * k, (p.y - _last.y) * k);
+    }
+  } else {
+    CGPoint at;
+    if (PictureFraction(self, p, &at)) PostMouse(at.x, at.y, MouseMove | MouseAbsolute, 0);
+  }
+  _last = p;
+}
+
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  if (![touches containsObject:_finger]) return;
+  const CGPoint p = [_finger locationInView:self];
+  if (self.trackpad) {
+    // A tap: short, and the finger stayed where it was.
+    if (!_moved && _finger.timestamp - _began < 0.35) {
+      MouseButton(_two ? 1 : 0, YES);
+      MouseButton(_two ? 1 : 0, NO);
+    }
+  } else {
+    CGPoint at;
+    if (PictureFraction(self, p, &at)) PostMouse(at.x, at.y, MouseLeftUp | MouseAbsolute, 0);
+    else MouseButton(0, NO);
+  }
+  _finger = nil;
+}
+
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  if (![touches containsObject:_finger]) return;
+  if (!self.trackpad) MouseButton(0, NO);
+  _finger = nil;
+}
+@end
+
+// The stick that moves the mouse ("padMouse"), 60 times a second: as far as it is tilted, up to
+// 1200 pixels a second, slow near the middle for aiming.
+@interface WinPadStickMouse : NSObject
+@end
+@implementation WinPadStickMouse
+- (void)tick:(CADisplayLink*)link {
+  static CFTimeInterval last;
+  const CFTimeInterval now = link.timestamp, dt = last ? MIN(now - last, 0.1) : 0;
+  last = now;
+  const CGPoint a = pad_stick[0], b = pad_stick[1];
+  const CGPoint v = hypot(a.x, a.y) >= hypot(b.x, b.y) ? a : b;
+  const double r = MIN(1.0, hypot(v.x, v.y)), dead = 0.12;
+  if (r <= dead || dt <= 0) return;
+  const double speed = 1200 * pow((r - dead) / (1 - dead), 2) / r;
+  MoveMouse(v.x * speed * dt, -v.y * speed * dt);
+}
+@end
+static WinPadStickMouse* stick_mouse;
+
+// CI's check of the mouse, once the window shows: a move by 12,8 pixels (mouse-look's kind),
+// then a click in the middle of the window, which closes it.
+static void ClickTest(void) {
+  printf("mouse: moving the mouse by 12,8 and clicking the middle of the window\n");
+  MoveMouse(12, 8);
+  PostMouse(0.5f, 0.5f, MouseMove | MouseAbsolute, 0);
+  PostMouse(0.5f, 0.5f, MouseMove | MouseLeftDown | MouseAbsolute, 0);
+  PostMouse(0.5f, 0.5f, MouseLeftUp | MouseAbsolute, 0);
+}
+
 // Game controllers: a Bluetooth or MFi one and, while the "touchControls"
 // setting is on, one drawn on the screen (WinPadTouchPad), shown even with
 // another one paired, which the player may not be holding. Their buttons and
@@ -262,13 +515,17 @@ static BOOL pad_sent;             // a controller has sent a key
 static void ApplyPad(int from, const BOOL in[PadCount]) {
   memcpy(pad_in[from], in, sizeof pad_in[from]);
   BOOL want[256] = {NO};
-  for (int i = 0; i < PadCount; i++)
+  for (int i = 0; i < PadCount; i++) {
+    // The stick that moves the mouse is no keys.
+    if (pad_mouse_stick >= 0 && i >= pad_mouse_stick && i < pad_mouse_stick + 4) continue;
     if ((pad_in[PadFromController][i] || pad_in[PadFromTouch][i]) && pad_keys[i]) want[pad_keys[i]] = YES;
+  }
   for (int vk = 0; vk < 256; vk++)
     if (want[vk] != pad_down[vk]) {
       pad_down[vk] = want[vk];
       pad_sent = YES;
-      winehost_post_key(vk, want[vk]);
+      if (MouseButtonOfKey(vk) >= 0) MouseButton(MouseButtonOfKey(vk), want[vk]);
+      else winehost_post_key(vk, want[vk]);
     }
 }
 
@@ -332,6 +589,8 @@ static void ReadPad(GCExtendedGamepad* pad) {
       [PadRLeft] = right.xAxis.value < -tilt,
       [PadRRight] = right.xAxis.value > tilt,
   };
+  GCControllerDirectionPad* mouse_stick = pad_mouse_stick == PadLUp ? stick : right;
+  pad_stick[0] = CGPointMake(mouse_stick.xAxis.value, mouse_stick.yAxis.value);
   ApplyPad(PadFromController, in);
 }
 
@@ -554,6 +813,7 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
 - (void)update {
   BOOL in[PadCount];
   memcpy(in, _pressed, sizeof in);
+  CGPoint touch_stick = CGPointZero;
   NSMutableSet* held = [NSMutableSet new];
   NSMapTable* knobs = [NSMapTable strongToStrongObjectsMapTable];
   for (UITouch* touch in _touches) {
@@ -576,7 +836,9 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
     in[part.input + 2] |= dx < -dead && -dx >= fabs(dy) * slant;
     in[part.input + 3] |= dx > dead && dx >= fabs(dy) * slant;
     if (part.kind == TouchStick) [knobs setObject:[NSValue valueWithCGPoint:CGPointMake(dx, dy)] forKey:part];
+    if (part.kind == TouchStick && part.input == pad_mouse_stick) touch_stick = CGPointMake(dx, -dy);
   }
+  pad_stick[1] = touch_stick;
   for (WinPadTouchPart* part in _parts) {
     const BOOL down = [held containsObject:part] || (part.kind == TouchButton && part.input < PadCount && _pressed[part.input]);
     if (part.input == PadExit && part.kind == TouchButton) {
@@ -602,8 +864,15 @@ static UIView* TouchCircle(NSString* text, UIColor* color) {
 static WinPadTouchPad* touch_pad;
 
 // Starts the controllers; the touch controller goes on view (nil: none).
-static void Gamepads(UIView* view) {
+static void Gamepads(UIView* view, NSDictionary* settings) {
   WinPadPadKeys(pad_keys);
+  // The game's own keys (its winpad.json or profile "padKeys": input name -> virtual key).
+  if ([settings[@"padKeys"] isKindOfClass:NSDictionary.class])
+    for (NSString* name in settings[@"padKeys"]) {
+      const int input = WinPadPadInput(name);
+      id key = settings[@"padKeys"][name];
+      if (input >= 0 && [key isKindOfClass:NSNumber.class]) pad_keys[input] = (unsigned short)([key intValue] & 0xff);
+    }
   void (^attach)(GCController*) = ^(GCController* c) {
     if (!c.extendedGamepad) return;
     printf("gamepad: %s connected\n", (c.vendorName ?: @"a controller").UTF8String);
@@ -957,6 +1226,7 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
 // with FEX's JIT, not its image, and FEX writes every block it compiles to the game's code maps.
 @property(nonatomic) BOOL record;
 @property(nonatomic) CGSize display;  // the screen's size in points, for WinPadGameScreen
+@property(nonatomic, strong) WinPadMouseView* mouse;  // a finger on the picture as the mouse
 - (void)askToExit;
 @end
 
@@ -1017,8 +1287,19 @@ static CFTimeInterval fps_shown;
       self.display = ((UIWindowScene*)scene).screen.bounds.size;
       break;
     }
-  if (metal_fill) HardwareKeyboard();
+  if (metal_fill) {
+    HardwareKeyboard();
+    // The game's mouse settings (WinPadMouseView, WinPadStickMouse).
+    NSDictionary* settings = self.game.settings;
+    id speed = settings[@"mouseSpeed"];
+    if ([speed isKindOfClass:NSNumber.class] && [speed doubleValue] > 0 && [speed doubleValue] <= 10) mouse_speed = [speed doubleValue];
+    id stick = settings[@"padMouse"];
+    pad_mouse_stick = [stick isEqual:@"right"] ? PadRUp : [stick isEqual:@"left"] ? PadLUp : -1;
+    HardwareMouse();
+  }
   gamepad_test = [self.program isEqualToString:@"window"] && [NSUserDefaults.standardUserDefaults boolForKey:@"gamepadTest"];
+  mouse_test = [self.program isEqualToString:@"window"] && !gamepad_test &&
+               [NSUserDefaults.standardUserDefaults boolForKey:@"mouseTest"];
 
   NSString* previous = ReadLog();
   if (previous.length && ![previous containsString:FinishedMarker]) {
@@ -1091,13 +1372,39 @@ static CFTimeInterval fps_shown;
   if (started || !([self.program isEqualToString:@"game"] || gamepad_test)) return;
   started = YES;
   id touch = [NSUserDefaults.standardUserDefaults objectForKey:@"touchControls"];
-  Gamepads(gamepad_test || !touch || [touch boolValue] ? self.view : nil);
+  // A finger on the picture is the mouse (beneath the touch controller), unless the game's
+  // "touchMouse" is "off".
+  NSString* touch_mouse = [self.game.settings[@"touchMouse"] isKindOfClass:NSString.class] ? self.game.settings[@"touchMouse"] : @"direct";
+  if (![touch_mouse isEqualToString:@"off"] && !gamepad_test) {
+    WinPadMouseView* mouse = [[WinPadMouseView alloc] initWithFrame:self.view.bounds];
+    mouse.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    mouse.trackpad = [touch_mouse isEqualToString:@"trackpad"];
+    [self.view addSubview:mouse];
+    self.mouse = mouse;
+  }
+  printf("mouse: a finger on the picture is %s; %s moves the mouse; speed %.2f\n",
+         [touch_mouse isEqualToString:@"off"] ? "nothing" : touch_mouse.UTF8String,
+         pad_mouse_stick == PadRUp ? "the right stick" : pad_mouse_stick == PadLUp ? "the left stick" : "no stick", mouse_speed);
+  Gamepads(gamepad_test || !touch || [touch boolValue] ? self.view : nil, self.game.settings);
+  if (pad_mouse_stick >= 0) {
+    stick_mouse = [WinPadStickMouse new];
+    [[CADisplayLink displayLinkWithTarget:stick_mouse selector:@selector(tick:)] addToRunLoop:NSRunLoop.mainRunLoop
+                                                                                  forMode:NSRunLoopCommonModes];
+  }
+  [self setNeedsUpdateOfPrefersPointerLocked];
+}
+
+// A paired mouse stays with the game, as a game on a PC keeps it in its window: iPadOS hides
+// its pointer and GCMouse gets every move (HardwareMouse).
+- (BOOL)prefersPointerLocked {
+  return metal_fill && GCMouse.mice.count > 0;
 }
 
 - (void)viewDidLayoutSubviews {
   [super viewDidLayoutSubviews];
   if (!frame_view) return;
   CGRect b = self.view.bounds;
+  if (self.mouse) [self.view bringSubviewToFront:self.mouse];
   [self.view bringSubviewToFront:touch_pad];
   if (self.fps) [self.view bringSubviewToFront:self.fps];
   if (self.status && game_has_layer) {
@@ -1367,8 +1674,9 @@ static CFTimeInterval fps_shown;
     // in the middle of the window 2 s after it shows, then it exits. Its newest
     // frame also goes to Documents/frames as a BMP.
     setenv("WINEHOST_WINDOW", "1", 1);
-    // With gamepadTest the touch controller's A (Enter) closes it instead.
-    if (!gamepad_test) setenv("WINEHOST_CLICK", "50,50", 1);
+    // With gamepadTest the touch controller's A (Enter) closes it instead, with mouseTest the
+    // app's own click (ClickTest).
+    if (!gamepad_test && !mouse_test) setenv("WINEHOST_CLICK", "50,50", 1);
     setenv("WINEHOST_WAIT_EXIT", "1", 1);
     setenv("WINEHOST_FRAMES", DocumentsPath(@"frames").fileSystemRepresentation, 1);
     [NSFileManager.defaultManager removeItemAtPath:DocumentsPath(@"frames") error:nil];
@@ -1411,6 +1719,7 @@ static CFTimeInterval fps_shown;
                   : game ? [log containsString:@"winehost: Wine process exited with code 0"]
                          : status == 0 && [log containsString:@"winehost: Wine process exited with code 0"] &&
                                (window && gamepad_test ? [log containsString:[NSString stringWithFormat:@"winehost: key %#x down", pad_keys[PadA]]]
+                                : window && mouse_test ? [log containsString:@"winehost: mouse flags 0x8003"]
                                 : window ? [log containsString:@"winehost: window content changed after the click"]
                                        : [log containsString:@"Hello from x86"]);
   printf("%s, exit %d\n", FinishedMarker.UTF8String, ok ? 0 : 1);

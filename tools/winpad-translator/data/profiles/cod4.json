@@ -1,0 +1,69 @@
+{
+  "id": "cod4",
+  "version": 1,
+  "title": "Call of Duty 4: Modern Warfare",
+  "match": [
+    {
+      "steamAppId": 7940,
+      "exe": "iw3sp.exe"
+    },
+    {
+      "exe": "iw3sp.exe",
+      "files": [
+        "main/iw_00.iwd"
+      ]
+    }
+  ],
+  "settings": {
+    "exe": "iw3sp.exe",
+    "args": [
+      "+set", "com_recommendedSet", "1",
+      "+set", "sm_enable", "0",
+      "+set", "r_aaSamples", "1",
+      "+set", "r_glow", "0",
+      "+set", "r_dof_enable", "0",
+      "+set", "r_distortion", "0",
+      "+set", "r_zfeather", "0",
+      "+set", "r_specular", "0",
+      "+set", "cg_brass", "0",
+      "+set", "com_maxfps", "60"
+    ],
+    "touchMouse": "trackpad",
+    "padMouse": "right",
+    "mouseSpeed": 1,
+    "padKeys": {
+      "lup": 87,
+      "ldown": 83,
+      "lleft": 65,
+      "lright": 68,
+      "r2": 1,
+      "l2": 2,
+      "a": 32,
+      "b": 67,
+      "x": 82,
+      "y": 70,
+      "r1": 71,
+      "l1": 52,
+      "up": 49,
+      "down": 50,
+      "left": 86,
+      "right": 160,
+      "menu": 27,
+      "options": 9
+    }
+  },
+  "notes": [
+    "Spouští se kampaň (iw3sp.exe). Multiplayer (iw3mp.exe) potřebuje PunkBuster a servery, na iPadu ho nezkoušej.",
+    "Výkon: profil při startu vypíná stíny (sm_enable), antialiasing, glow, hloubku ostrosti, zkreslení vzduchu, měkký kouř, odlesky a nábojnice a drží 60 FPS. Ve hře je můžeš zapnout, ale při dalším spuštění je profil zase vypne; když je chceš nechat, smaž v winpad.json klíč args.",
+    "com_recommendedSet 1 přeskočí automatické 'optimální nastavení', které by na neznámé grafice zapnulo vysoké detaily.",
+    "Ovládání: levá páčka chůze (WASD), pravá páčka míří (myš), RT střelba, LT míření, A skok, B přikrčení, X přebíjení, Y použít, RB granát, LB speciální granát, křížový ovladač nahoru/dolů zbraně 1/2, doleva nůž, doprava sprint, Menu Esc, View cíle mise.",
+    "Prst na obraze je touchpad: tah otáčí pohledem, ťuknutí je levé tlačítko, ťuknutí dvěma prsty pravé. Myš nebo trackpad Magic Keyboard fungují přímo, ukazatel zůstane ve hře.",
+    "Steam verze může chtít běžící Steam (jako Call of Duty 2: 'Failed to find Steam.'); ten na iPadu nepoběží. Původní disková verze kontroluje disk. Bez úprav ochrany funguje kopie, která sama běží bez Steamu a bez disku.",
+    "Když hra minule spadla, zeptá se oknem Windows na bezpečný režim. Odpověz na klávesnici (šipky a Enter); bezpečný režim jen vrátí grafiku na základní nastavení."
+  ],
+  "sources": [
+    "https://www.pcgamingwiki.com/wiki/Call_of_Duty_4:_Modern_Warfare",
+    "https://store.steampowered.com/app/7940",
+    "https://www.protondb.com/app/7940"
+  ]
+}

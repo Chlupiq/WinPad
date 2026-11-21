@@ -28,6 +28,7 @@ class ShippedProfilesTest(unittest.TestCase):
         shipped = profiles.load_all()
         self.assertIn("nfsu2", shipped)
         self.assertIn("mafia", shipped)
+        self.assertIn("cod4", shipped)
         for prof in shipped.values():
             self.assertEqual(profiles.check(prof), [], prof["id"])
             self.assertTrue(prof.get("sources"), f"{prof['id']} names no sources")
@@ -49,6 +50,22 @@ class DetectTest(unittest.TestCase):
         prof, exe = profiles.detect(g)
         self.assertEqual(prof["id"], "nfsu2")
         self.assertEqual(exe, "speed2.exe")
+
+    def test_cod4_campaign(self):
+        g = self.game("iw3sp.exe", "iw3mp.exe", "Main/IW_00.IWD", name="CoD4")
+        prof, exe = profiles.detect(g)
+        self.assertEqual(prof["id"], "cod4")
+        self.assertEqual(exe, "iw3sp.exe")
+        s = prof["settings"]
+        self.assertEqual((s["padMouse"], s["touchMouse"], s["padKeys"]["r2"]), ("right", "trackpad", 1))
+        self.assertIsNone(profiles.detect(self.game("iw3sp.exe", name="NoData"))[0])
+
+    def test_mouse_settings_checked(self):
+        bad = {"padKeys": {"a": 0, "trigger": 32}, "padMouse": "middle", "touchMouse": "swipe", "mouseSpeed": 0}
+        problems = profiles.check_settings(bad)
+        for key in ("padKeys", "padMouse", "touchMouse", "mouseSpeed"):
+            self.assertTrue(any(p.startswith(key) for p in problems), key)
+        self.assertEqual(profiles.check_settings({"padKeys": {"r2": 1}, "padMouse": "left", "mouseSpeed": 1.5}), [])
 
     def test_nfsu2_needs_its_data(self):
         self.assertEqual(profiles.detect(self.game("SPEED2.EXE"))[0], None)
