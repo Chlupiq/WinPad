@@ -304,6 +304,13 @@ cat >"$docs/Test Game/winpad.json" <<'JSON'
 JSON
 perl -pi -e "s/RUNID/$run_id/g" "$docs/Test Game/winpad.json"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
+# Plain's own settings, made with a long press on its tile (Documents/.winpad-games): its program
+# is GAME.EXE although a larger launcher is there (the library's own pick), with a resolution
+# and a picture; a program in a subfolder is offered too.
+mkdir -p "$docs/Plain/Bin" "$docs/.winpad-games"
+cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Plain/Launcher.exe"
+cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/Bin/Tool.exe"
+printf '{"exe": "GAME.EXE", "screen": "800x600", "scaling": "stretch"}\n' >"$docs/.winpad-games/Plain.json"
 echo notes >"$docs/Empty/readme.txt"
 # A Mafia folder whose winpad.json has profile v1 (no registry): the app's newer one wins.
 for f in Game.exe Setup.exe LS3DF.dll; do cp "$sim_app/i386-windows/hello.exe" "$docs/Mafia/$f"; done
@@ -353,7 +360,9 @@ for expect in 'library: 4 games' 'library: Mafia | Mafia/Game.exe | 32bit | imag
     "settings: registry: \"Mode\"=\"fullscreen\" in user.reg [Software\\WinPad\\$run_id]" \
     'export: Test Game | 1 maps, 1 new | WinPad-mapy-test-game-' 'export: Test Game after it, 0 new' \
     'package: Zed Game.winpad -> Zed Game' 'package: broken.winpad -> Není to balíček WinPad' \
-    'library: WinPad Packed | Zed Game/PACKED.EXE | 32bit | image none'; do
+    'library: WinPad Packed | Zed Game/PACKED.EXE | 32bit | image none' \
+    'own: Plain | exe Plain/GAME.EXE (auto Launcher.exe) | screen 800x600 | scaling stretch | programs GAME.EXE, Launcher.exe, Bin/Tool.exe' \
+    'own: Plain saved | exe scaling screen'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
 [ -f "$docs/Zed Game/DATA/level1.dat" ] && [ ! -e "$docs/Inbox/Zed Game.winpad" ] ||
@@ -363,6 +372,11 @@ grep -qiF "[Software\\\\Wow6432Node\\\\WinPad\\\\$run_id]" "$docs/prefix/system.
     grep -qF '"Resolution"=dword:00000002' "$docs/prefix/system.reg" &&
     grep -qF '"Mode"="fullscreen"' "$docs/prefix/user.reg" ||
     { echo "the game profile's registry values are not in the prefix" >&2; exit 1; }
+# A game's own settings as a long press opens them (CI artifact wine-app-window).
+xcrun simctl launch "$udid" "$bundle" -gameSettingsTest Plain -coverAuto NO >/dev/null
+sleep 6
+xcrun simctl io "$udid" screenshot "$out/library-screens/game-settings.png" >/dev/null 2>&1 || true
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 # Covers from the internet (Covers.m): what Steam, Wikipedia (and SteamGridDB, with a key) find
 # for a title, and the first one loaded. The sources are outside CI's control, so nothing found
 # is only a warning.
@@ -465,8 +479,9 @@ xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 cp "$log" "$out/wine-record.log" 2>/dev/null || true
 echo "--- the app's log, recording Plain ---"
 tail -n 40 "$log" || true
+# Plain's own settings, as the library's test saved them: its program, resolution and picture.
 for expect in 'WinPad Wine: recording the game'"'"'s code maps with the JIT' 'AOT image none (JIT)' 'Hello from x86' \
-    '== finished, exit 0'; do
+    '== finished, exit 0' 'WinPad Wine: monitor 1280x720 for the program' 'WinPad Wine: picture fill'; do
     grep -qF "$expect" "$log" || { echo "missing in the app's log (recording): $expect" >&2; exit 1; }
 done
 [ ! -e "$rec_maps/hostprobe.txt" ] || { echo "the recording wrote the Mac's CPU features" >&2; exit 1; }
@@ -481,7 +496,7 @@ assert codemaps.ipad_folders(names.values()) == ["Plain"], names
 assert main_id in names and names[main_id].upper().endswith("\\PLAIN\\GAME.EXE"), names
 print(f"recorded {len(maps)} code maps, {sum(len(b) for b in blocks.values())} blocks:", sorted(set(names.values()))[:8])
 PY
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/broken.winpad" "$packed" \
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/broken.winpad" "$docs/.winpad-games" "$packed" \
     "$docs/fexcache/Test Game" "$docs/fexcache/Plain" "$docs/export-Test Game.zip" "$out/export-check"
 echo "The game library found the games in Documents, unpacked a .winpad package, applied a game profile, exported a game's code maps for WinPad Translator and started the one picked with the controller's buttons"
 [ -n "$sim_window_aot" ] || exit 0

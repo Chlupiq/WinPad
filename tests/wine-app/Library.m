@@ -424,6 +424,54 @@ NSDictionary* WinPadGameSettings(NSDictionary* info) {
   return out;
 }
 
+// The user's own settings of a game (Nastavení hry): Documents/.winpad-games/FOLDER.json, out of
+// the game's folder, which may be read-only (copied off a disc) and which WinPad Translator and
+// packages write winpad.json into.
+static NSString* OwnSettingsPath(NSString* folder) {
+  return [[Documents() stringByAppendingPathComponent:@".winpad-games"]
+      stringByAppendingPathComponent:[folder stringByAppendingPathExtension:@"json"]];
+}
+
+NSDictionary* WinPadOwnGameSettings(NSString* folder) {
+  NSData* json = [NSData dataWithContentsOfFile:OwnSettingsPath(folder)];
+  id obj = json ? [NSJSONSerialization JSONObjectWithData:json options:0 error:nil] : nil;
+  return [obj isKindOfClass:NSDictionary.class] ? obj : @{};
+}
+
+BOOL WinPadSetOwnGameSetting(NSString* folder, NSString* key, id value) {
+  NSMutableDictionary* own = [WinPadOwnGameSettings(folder) mutableCopy];
+  if (key) own[key] = value;
+  else [own removeAllObjects];
+  NSString* path = OwnSettingsPath(folder);
+  NSFileManager* fm = NSFileManager.defaultManager;
+  if (!own.count) return [fm removeItemAtPath:path error:nil] || ![fm fileExistsAtPath:path];
+  [fm createDirectoryAtPath:path.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+  NSData* json = [NSJSONSerialization dataWithJSONObject:own options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+  return [json writeToFile:path atomically:YES];
+}
+
+NSArray<NSString*>* WinPadGamePrograms(NSString* folder) {
+  NSString* dir = [Documents() stringByAppendingPathComponent:folder];
+  NSDirectoryEnumerator* walk = [NSFileManager.defaultManager enumeratorAtPath:dir];
+  NSMutableArray<NSString*>* found = [NSMutableArray new];
+  for (NSString* path; (path = walk.nextObject) && found.count < 300;) {
+    if ([path.lastPathComponent hasPrefix:@"."] || walk.level > 3) {
+      if ([walk.fileAttributes.fileType isEqualToString:NSFileTypeDirectory]) [walk skipDescendants];
+      continue;
+    }
+    if ([path.pathExtension.lowercaseString isEqualToString:@"exe"] &&
+        ![walk.fileAttributes.fileType isEqualToString:NSFileTypeDirectory])
+      [found addObject:path];
+  }
+  // The folder's own programs first, then those in its subfolders, by name.
+  [found sortUsingComparator:^NSComparisonResult(NSString* a, NSString* b) {
+    const NSUInteger da = a.pathComponents.count, db = b.pathComponents.count;
+    if (da != db) return da < db ? NSOrderedAscending : NSOrderedDescending;
+    return [a localizedCaseInsensitiveCompare:b];
+  }];
+  return found;
+}
+
 NSArray<WinPadGame*>* WinPadFindGames(void) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* docs = Documents();
@@ -446,6 +494,7 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     BOOL profile_from_app = NO;
     info = WithAppProfile(dir, info, &profile_from_app);
     NSDictionary* settings = WinPadGameSettings(info);
+    NSDictionary* own = WinPadOwnGameSettings(folder);
     NSString* exe = [settings[@"exe"] isKindOfClass:NSString.class] ? settings[@"exe"] : nil;
     if (exe && ([exe containsString:@".."] || ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:exe]])) exe = nil;
     if (!exe) {
@@ -462,10 +511,25 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
         }
       }
     }
+    // The program the user picked (Nastavení hry, a long press on its tile) wins, while it is there.
+    NSString* auto_exe = exe;
+    NSString* own_exe = [own[@"exe"] isKindOfClass:NSString.class] ? own[@"exe"] : nil;
+    if (own_exe.length && ![own_exe containsString:@".."] && ![own_exe hasPrefix:@"/"] &&
+        [fm fileExistsAtPath:[dir stringByAppendingPathComponent:own_exe]])
+      exe = own_exe;
     if (!exe) continue;
+    // So do its resolution and picture: main.m reads them from the settings as winpad.json's.
+    if (own.count) {
+      NSMutableDictionary* mine = [settings mutableCopy];
+      for (NSString* key in @[ @"screen", @"scaling" ])
+        if ([own[key] isKindOfClass:NSString.class]) mine[key] = own[key];
+      settings = mine;
+    }
     WinPadGame* game = [WinPadGame new];
     game.folder = folder;
     game.exe = [folder stringByAppendingPathComponent:exe];
+    game.autoExe = auto_exe;
+    game.own = own;
     NSString* title = [settings[@"title"] isKindOfClass:NSString.class] ? settings[@"title"] : nil;
     game.settings = settings;
     NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
@@ -1748,6 +1812,279 @@ static NSString* DirectXSummary(void) {
 }
 @end
 
+// One choice out of a list (a game's program, resolution, picture): a tick by the chosen one;
+// picking one calls PICKED and goes back.
+@interface WinPadChoiceViewController : UITableViewController
+@property(nonatomic, copy) NSArray<NSArray*>* choices;  // @[title, detail or @"", value or NSNull]
+@property(nonatomic, strong) id chosen;                // a value, or nil for NSNull's row
+@property(nonatomic, copy) NSString* footer;
+@property(nonatomic, copy) void (^picked)(id value);
+@end
+
+@implementation WinPadChoiceViewController
+- (instancetype)init {
+  return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  return (NSInteger)self.choices.count;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
+  return self.footer;
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
+  UITableViewCell* cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:nil];
+  NSArray* choice = self.choices[(NSUInteger)path.row];
+  cell.textLabel.text = choice[0];
+  cell.textLabel.numberOfLines = 0;
+  cell.detailTextLabel.text = [choice[1] length] ? choice[1] : nil;
+  cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
+  id value = choice[2] == NSNull.null ? nil : choice[2];
+  cell.accessoryType = (value == self.chosen || [value isEqual:self.chosen]) ? UITableViewCellAccessoryCheckmark
+                                                                              : UITableViewCellAccessoryNone;
+  return cell;
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
+  id value = self.choices[(NSUInteger)path.row][2];
+  self.chosen = value == NSNull.null ? nil : value;
+  [tableView reloadData];
+  if (self.picked) self.picked(self.chosen);
+  [self.navigationController popViewControllerAnimated:YES];
+}
+@end
+
+// The resolutions a game can be given: the monitor Wine tells it it has (MADEIRA_SCREEN_W/H,
+// WinPadGameScreen), so the largest mode it can pick. @[title, value].
+static NSArray<NSArray<NSString*>*>* ScreenChoices(void) {
+  return @[
+    @[ @"4:3 · 1024 × 768 (jako dosud)", @"4:3" ], @[ @"Širokoúhlý (podle displeje)", @"wide" ],
+    @[ @"640 × 480", @"640x480" ], @[ @"800 × 600", @"800x600" ], @[ @"1280 × 960", @"1280x960" ],
+    @[ @"1600 × 1200", @"1600x1200" ], @[ @"1280 × 720 (16:9)", @"1280x720" ], @[ @"1366 × 768 (16:9)", @"1366x768" ],
+    @[ @"1600 × 900 (16:9)", @"1600x900" ], @[ @"1920 × 1080 (16:9)", @"1920x1080" ],
+    @[ @"1280 × 800 (16:10)", @"1280x800" ], @[ @"1680 × 1050 (16:10)", @"1680x1050" ]
+  ];
+}
+
+static NSString* ScreenName(NSString* screen) {
+  for (NSArray<NSString*>* choice in ScreenChoices())
+    if ([choice[1] caseInsensitiveCompare:screen] == NSOrderedSame) return choice[0];
+  return [screen stringByReplacingOccurrencesOfString:@"x" withString:@" × "];
+}
+
+static NSString* ProgramDetail(NSString* folder, NSString* exe) {
+  NSString* path = [[Documents() stringByAppendingPathComponent:folder] stringByAppendingPathComponent:exe];
+  const unsigned long long size = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil].fileSize;
+  NSMutableArray* parts = [NSMutableArray arrayWithObject:[NSByteCountFormatter stringFromByteCount:(long long)size
+                                                                                         countStyle:NSByteCountFormatterCountStyleFile]];
+  NSString* arch = ProgramArch(path);
+  if (arch) [parts addObject:[arch isEqualToString:@"32bit"] ? @"32bitový" : @"64bitový"];
+  if (HelperProgram(exe.lastPathComponent)) [parts addObject:@"spíš instalátor nebo nastavení"];
+  return [parts componentsJoinedByString:@" · "];
+}
+
+// A game's own settings, opened by a long press on its tile: its cover, the program that
+// starts it (a game may start through a launcher or have a multiplayer program larger than
+// itself, which the library would pick), its resolution and how its picture fills the screen.
+// They are saved as they are changed (WinPadSetOwnGameSetting); CHANGED runs after each.
+@interface WinPadGameSettingsViewController : UITableViewController
+- (instancetype)initWithGame:(WinPadGame*)game;
+@property(nonatomic, strong) WinPadGame* game;
+@property(nonatomic, copy) void (^changed)(void);
+@property(nonatomic, copy) void (^coverChanged)(void);
+@end
+
+enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSection, GameSections };
+
+@implementation WinPadGameSettingsViewController
+- (instancetype)initWithGame:(WinPadGame*)game {
+  if (!(self = [super initWithStyle:UITableViewStyleInsetGrouped])) return nil;
+  self.game = game;
+  return self;
+}
+
+- (void)viewDidLoad {
+  [super viewDidLoad];
+  self.title = self.game.title;
+  self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                                                         target:self
+                                                                                         action:@selector(done)];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+  [super viewWillAppear:animated];
+  [self.tableView reloadData];
+}
+
+- (void)done {
+  [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (NSString*)own:(NSString*)key {
+  id value = WinPadOwnGameSettings(self.game.folder)[key];
+  return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+- (void)set:(NSString*)key to:(id)value {
+  WinPadSetOwnGameSetting(self.game.folder, key, value);
+  // The game as the library sees it now (its program, settings), for the rows and the start.
+  for (WinPadGame* game in WinPadFindGames()) {
+    if (![game.folder isEqualToString:self.game.folder]) continue;
+    self.game.exe = game.exe;
+    self.game.settings = game.settings;
+    self.game.own = game.own;
+    self.game.arch = game.arch;
+  }
+  [self.tableView reloadData];
+  if (self.changed) self.changed();
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
+  return GameSections;
+}
+
+- (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
+  return section == GamePictureSection ? 2 : 1;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
+  return @[ @"Obal", @"Spouštěcí program", @"Obraz", @"" ][(NSUInteger)section];
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
+  if (section == GameProgramSection)
+    return @"Program, který se spustí po ťuknutí na Spustit. Vyber jiný, když se hra spouští přes launcher, nebo když "
+           @"aplikace vybrala multiplayer či jiný program než samotnou hru.";
+  if (section == GamePictureSection)
+    return @"Rozlišení je monitor, který hra uvidí: nabídne režimy až do této velikosti. Konkrétní režim pak vybereš "
+           @"v nastavení hry, pokud ho hra nemá pevný.";
+  if (section == GameResetSection) return @"Nastavení se ukládají jen pro tuto hru a platí od příštího spuštění.";
+  return nil;
+}
+
+- (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)path {
+  UITableViewCell* cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+  cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+  cell.detailTextLabel.numberOfLines = 2;
+  switch (path.section) {
+    case GameCoverSection: {
+      cell.textLabel.text = @"Vybrat obal";
+      cell.detailTextLabel.text = self.game.cover ? @"Má obal" : @"Bez obalu";
+      if (self.game.cover) {
+        UIImageView* thumb = [[UIImageView alloc] initWithImage:self.game.cover];
+        thumb.frame = CGRectMake(0, 0, 40, 60);
+        thumb.contentMode = UIViewContentModeScaleAspectFill;
+        thumb.clipsToBounds = YES;
+        thumb.layer.cornerRadius = 4;
+        cell.accessoryView = thumb;
+      }
+      break;
+    }
+    case GameProgramSection: {
+      NSString* own = [self own:@"exe"];
+      NSString* exe = [self.game.exe substringFromIndex:MIN(self.game.exe.length, self.game.folder.length + 1)];
+      cell.textLabel.text = exe;
+      cell.detailTextLabel.text = own && [own isEqualToString:exe] ? @"Vlastní" : @"Automaticky";
+      break;
+    }
+    case GamePictureSection:
+      if (path.row == 0) {
+        NSString* own = [self own:@"screen"];
+        cell.textLabel.text = @"Rozlišení";
+        cell.detailTextLabel.text = own ? ScreenName(own) : @"Výchozí";
+      } else {
+        NSString* own = [self own:@"scaling"];
+        cell.textLabel.text = @"Obraz na displeji";
+        cell.detailTextLabel.text = own ? PictureScalingName(own) ?: own : @"Výchozí";
+      }
+      break;
+    default:
+      cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+      cell.textLabel.text = @"Obnovit výchozí nastavení hry";
+      cell.textLabel.textColor = UIColor.systemRedColor;
+      cell.textLabel.textAlignment = NSTextAlignmentCenter;
+      break;
+  }
+  return cell;
+}
+
+- (void)pickCover {
+  WinPadCoverPickerViewController* picker = [[WinPadCoverPickerViewController alloc] initWithGame:self.game];
+  __weak WinPadGameSettingsViewController* weak = self;
+  picker.saved = ^{
+    [weak.tableView reloadData];
+    if (weak.coverChanged) weak.coverChanged();
+  };
+  UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:picker];
+  nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  nav.modalPresentationStyle = UIModalPresentationFormSheet;
+  [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)pickProgram {
+  NSMutableArray* choices = [NSMutableArray new];
+  NSString* auto_exe = self.game.autoExe;
+  if (auto_exe)
+    [choices addObject:@[ [@"Automaticky: " stringByAppendingString:auto_exe], ProgramDetail(self.game.folder, auto_exe), NSNull.null ]];
+  for (NSString* exe in WinPadGamePrograms(self.game.folder))
+    [choices addObject:@[ exe, ProgramDetail(self.game.folder, exe), exe ]];
+  WinPadChoiceViewController* list = [WinPadChoiceViewController new];
+  list.title = @"Spouštěcí program";
+  list.choices = choices;
+  list.chosen = [self own:@"exe"];
+  list.footer = @"Programy (.exe) ve složce hry a jejích podsložkách.";
+  __weak WinPadGameSettingsViewController* weak = self;
+  list.picked = ^(id value) {
+    [weak set:@"exe" to:value];
+  };
+  [self.navigationController pushViewController:list animated:YES];
+}
+
+- (void)pickScreen {
+  NSMutableArray* choices = [NSMutableArray arrayWithObject:@[ @"Výchozí", @"Podle nastavení aplikace a profilu hry", NSNull.null ]];
+  for (NSArray<NSString*>* choice in ScreenChoices()) [choices addObject:@[ choice[0], @"", choice[1] ]];
+  WinPadChoiceViewController* list = [WinPadChoiceViewController new];
+  list.title = @"Rozlišení";
+  list.choices = choices;
+  list.chosen = [self own:@"screen"];
+  list.footer = @"Nejvyšší rozlišení, které hra může vybrat. Vyšší je ostřejší, ale hra může běžet pomaleji.";
+  __weak WinPadGameSettingsViewController* weak = self;
+  list.picked = ^(id value) {
+    [weak set:@"screen" to:value];
+  };
+  [self.navigationController pushViewController:list animated:YES];
+}
+
+- (void)pickScaling {
+  NSMutableArray* choices = [NSMutableArray arrayWithObject:@[ @"Výchozí", @"Podle Nastavení › Obraz hry", NSNull.null ]];
+  for (NSString* scaling in PictureScalings()) [choices addObject:@[ PictureScalingName(scaling), @"", scaling ]];
+  WinPadChoiceViewController* list = [WinPadChoiceViewController new];
+  list.title = @"Obraz na displeji";
+  list.choices = choices;
+  list.chosen = [self own:@"scaling"];
+  __weak WinPadGameSettingsViewController* weak = self;
+  list.picked = ^(id value) {
+    [weak set:@"scaling" to:value];
+  };
+  [self.navigationController pushViewController:list animated:YES];
+}
+
+- (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)path {
+  [tableView deselectRowAtIndexPath:path animated:YES];
+  switch (path.section) {
+    case GameCoverSection: [self pickCover]; break;
+    case GameProgramSection: [self pickProgram]; break;
+    case GamePictureSection:
+      if (path.row == 0) [self pickScreen];
+      else [self pickScaling];
+      break;
+    default: [self set:nil to:nil]; break;
+  }
+}
+@end
+
 @interface LibraryViewController ()
 @property(nonatomic, strong) NSArray<WinPadGame*>* games;
 @property(nonatomic) NSInteger focus;
@@ -1790,6 +2127,8 @@ static NSString* DirectXSummary(void) {
 - (void)startFocused;
 - (void)exportFocused;
 - (void)pickCoverFor:(WinPadGame*)game;
+- (void)openGameSettingsFor:(WinPadGame*)game;
+- (void)holdCard:(UILongPressGestureRecognizer*)hold;
 - (void)coverChanged:(WinPadGame*)game;
 - (void)coverFocused;
 - (void)titleExport:(BOOL)compact;
@@ -1946,7 +2285,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self.view addSubview:self.empty];
 
   self.hints = [UILabel new];
-  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓧ Export map     Ⓨ Nastavení     Ťuknutím vybereš, druhým spustíš, podržením změníš obal";
+  self.hints.text = @"Ⓐ Spustit     ◀ ▶ Vybrat     Ⓧ Export map     Ⓨ Nastavení     Ťuknutím vybereš, druhým spustíš, podržením otevřeš nastavení hry";
   self.hints.font = [UIFont systemFontOfSize:16];
   self.hints.textColor = Hex(0xDCE8FF);
   self.hints.textAlignment = NSTextAlignmentRight;
@@ -2061,6 +2400,10 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [self openJITGuide];
   }
 #endif
+  // CI (build-xcode.sh): a game's settings open, as a long press opens them, for a screenshot.
+  NSString* settings_test = [NSUserDefaults.standardUserDefaults stringForKey:@"gameSettingsTest"];
+  for (WinPadGame* game in settings_test ? self.games : @[])
+    if ([game.folder isEqualToString:settings_test]) [self openGameSettingsFor:game];
   [self offerDirectX];
   static BOOL tested;
   if (tested || ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
@@ -2071,6 +2414,21 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [report appendFormat:@"library: %@ | %@ | %@ | image %@%@%@\n", game.title, game.exe, game.arch ?: @"?",
                          game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @"",
                          game.profile ? [@" | profile " stringByAppendingString:game.profile] : @""];
+  // The games' own settings (a long press on a tile): the program picked instead of the
+  // library's, the resolution and picture as main.m gets them, and the programs to pick from.
+  for (WinPadGame* game in self.games) {
+    if (!game.own.count) continue;
+    [report appendFormat:@"own: %@ | exe %@ (auto %@) | screen %@ | scaling %@ | programs %@\n", game.folder, game.exe,
+                         game.autoExe, game.settings[@"screen"] ?: @"-", game.settings[@"scaling"] ?: @"-",
+                         [WinPadGamePrograms(game.folder) componentsJoinedByString:@", "]];
+    WinPadSetOwnGameSetting(game.folder, @"scaling", @"fill");
+    WinPadSetOwnGameSetting(game.folder, @"screen", @"1280x720");
+    WinPadSetOwnGameSetting(game.folder, @"stale", @"x");
+    WinPadSetOwnGameSetting(game.folder, @"stale", nil);
+    NSDictionary* own = WinPadOwnGameSettings(game.folder);
+    [report appendFormat:@"own: %@ saved | %@\n", game.folder,
+                         [[own.allKeys sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@" "]];
+  }
   // What "Exportovat pro převodník" shares, without the share sheet: Documents/export-FOLDER.zip.
   for (WinPadGame* game in self.games) {
     if (!game.maps) continue;
@@ -2136,18 +2494,11 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     ShowCover(cover, placeholder, self.games[i]);
     [card addSubview:cover];
     [card addTarget:self action:@selector(tapCard:) forControlEvents:UIControlEventTouchUpInside];
-    // A long press: the game's cover (a button's own menu; it opens on a long press).
-    __weak LibraryViewController* weak_menu = self;
-    WinPadGame* menu_game = self.games[i];
-    card.menu = [UIMenu menuWithTitle:menu_game.title
-                             children:@[ [UIAction actionWithTitle:@"Najít obal"
-                                                             image:[UIImage systemImageNamed:@"photo"]
-                                                        identifier:nil
-                                                           handler:^(UIAction* action) {
-                                                             [weak_menu pickCoverFor:menu_game];
-                                                           }] ]];
-    card.showsMenuAsPrimaryAction = NO;
-    [self.row addSubview:card];
+    // A long press: the game's own settings (cover, program, resolution).
+    UILongPressGestureRecognizer* hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self
+                                                                                       action:@selector(holdCard:)];
+    hold.minimumPressDuration = 0.45;
+    [card addGestureRecognizer:hold];    [self.row addSubview:card];
     [self.cards addObject:card];
   }
   const BOOL none = self.games.count == 0;
@@ -2335,6 +2686,30 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   if (!self.games.count) return;
   self.focus = MAX(0, MIN((NSInteger)self.games.count - 1, self.focus + by));
   [self showFocus];
+}
+
+- (void)holdCard:(UILongPressGestureRecognizer*)hold {
+  if (hold.state != UIGestureRecognizerStateBegan || hold.view.tag >= (NSInteger)self.games.count) return;
+  self.focus = hold.view.tag;
+  [self showFocus];
+  [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium] impactOccurred];
+  [self openGameSettingsFor:self.games[self.focus]];
+}
+
+- (void)openGameSettingsFor:(WinPadGame*)game {
+  if (self.presentedViewController || self.started) return;
+  WinPadGameSettingsViewController* settings = [[WinPadGameSettingsViewController alloc] initWithGame:game];
+  __weak LibraryViewController* weak = self;
+  settings.changed = ^{
+    [weak reload];
+  };
+  settings.coverChanged = ^{
+    [weak reload];
+  };
+  UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:settings];
+  nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  nav.modalPresentationStyle = UIModalPresentationFormSheet;
+  [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)tapCard:(UIButton*)card {

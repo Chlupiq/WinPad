@@ -25,7 +25,21 @@
 @property(nonatomic, copy) NSDictionary* settings;
 // The game profile WinPad Translator put into winpad.json ("nfsu2 v1"), or nil.
 @property(nonatomic, copy) NSString* profile;
+// The program the library picks by itself (winpad.json's "exe", else the largest that is not
+// an installer), relative to the folder; exe is the user's own choice where they made one.
+@property(nonatomic, copy) NSString* autoExe;
+// What the user set for this game with a long press on its tile (WinPadOwnGameSettings).
+@property(nonatomic, copy) NSDictionary* own;
 @end
+
+// A game's own settings, made in the app (Nastavení hry: a long press on the game's tile), kept
+// in Documents/.winpad-games/FOLDER.json: "exe" (the program to start, relative to the folder),
+// "screen" and "scaling" (as winpad.json's). They win over winpad.json and its profile.
+NSDictionary* WinPadOwnGameSettings(NSString* folder);
+// Sets KEY to VALUE (nil removes it; a nil KEY removes them all). Returns whether it was saved.
+BOOL WinPadSetOwnGameSetting(NSString* folder, NSString* key, id value);
+// The Windows programs (.exe) in a game's folder and its subfolders (3 deep), relative to it.
+NSArray<NSString*>* WinPadGamePrograms(NSString* folder);
 
 NSArray<WinPadGame*>* WinPadFindGames(void);
 
