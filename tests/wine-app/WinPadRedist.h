@@ -22,6 +22,10 @@ BOOL WinPadDirectXProvides(NSString* dll);
 // The DLL the last game run stopped on because no file of it was there (Wine's "Library X
 // (which is needed by ...) not found" in wine.log or wine.log.crashed), or nil.
 NSString* _Nullable WinPadMissingDLLOfLastRun(void);
+// The program the last game run tried to start as a second process that could not start
+// (a 32-bit child on iPad: "[Wine child] BOOT FAILED at stage 'guest-window-reserve'"), the
+// file name from its NtCreateUserProcess line (Setup.exe, SafeDisc's ~e5.0001...), or nil.
+NSString* _Nullable WinPadFailedChildOfLastRun(void);
 
 // Before a game runs: the DLLs that EXE (and the DLLs and .asi plugins next to it) import that
 // no one has: not the game's (its folder or EXE's folder), not Wine's (the app's

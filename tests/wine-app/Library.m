@@ -3053,10 +3053,33 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] || self.presentedViewController ||
       self.installing || WinPadDirectXDownloading())
     return;
-  NSString* dll = WinPadMissingDLLOfLastRun();
-  if (!dll || [WinPadDirectXDLLs() containsObject:dll]) return;
   NSString* log = [Documents() stringByAppendingPathComponent:@"wine.log"];
   NSDate* date = [NSFileManager.defaultManager attributesOfItemAtPath:log error:nil].fileModificationDate;
+  // A second program the game started, which cannot start on iPad (only one 32-bit program
+  // runs): SafeDisc's helper (~e5.0001, ~df*.tmp) means a copy protection Wine cannot run.
+  NSString* child = WinPadFailedChildOfLastRun();
+  NSString* child_key = [NSString stringWithFormat:@"child %@ %.0f", child, date.timeIntervalSince1970];
+  if (child && ![[NSUserDefaults.standardUserDefaults stringForKey:@"childOffered"] isEqualToString:child_key]) {
+    [NSUserDefaults.standardUserDefaults setObject:child_key forKey:@"childOffered"];
+    NSString* lower = child.lowercaseString;
+    const BOOL safedisc = [lower hasPrefix:@"~e5"] || [lower hasPrefix:@"~df"] || [lower hasSuffix:@".icd"];
+    NSString* text =
+        safedisc ? @"Hra je chráněná proti kopírování (SafeDisc): spustila jeho pomocný program, který ve Wine "
+                   @"nefunguje. Použij verzi hry bez téhle ochrany, třeba ze Steamu nebo GOG."
+                 : [NSString stringWithFormat:@"Hra spustila další program%@, ale na iPadu běží jen jeden. Pokud "
+                                              @"je to spouštěč nebo nastavení, podrž dlaždici hry a vyber v Programu "
+                                              @"přímo herní .exe.",
+                                              child.length ? [NSString stringWithFormat:@" (%@)", child] : @""];
+    UIAlertController* said = [UIAlertController alertControllerWithTitle:safedisc ? @"Ochrana proti kopírování"
+                                                                                   : @"Hra spouští další program"
+                                                                  message:text
+                                                           preferredStyle:UIAlertControllerStyleAlert];
+    [said addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:said animated:YES completion:nil];
+    return;
+  }
+  NSString* dll = WinPadMissingDLLOfLastRun();
+  if (!dll || [WinPadDirectXDLLs() containsObject:dll]) return;
   NSString* key = [NSString stringWithFormat:@"%@ %.0f", dll, date.timeIntervalSince1970];
   if ([[NSUserDefaults.standardUserDefaults stringForKey:@"directXOffered"] isEqualToString:key]) return;
   [NSUserDefaults.standardUserDefaults setObject:key forKey:@"directXOffered"];

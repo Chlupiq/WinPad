@@ -37,6 +37,36 @@ BOOL WinPadDirectXProvides(NSString* dll) {
   return NO;
 }
 
+static NSString* LastRunLog(void) {
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSString* newest = nil;
+  NSDate* newest_date = nil;
+  for (NSString* name in @[ @"wine.log", @"wine.log.crashed" ]) {
+    NSString* path = DocumentsFile(name);
+    NSDate* date = [fm attributesOfItemAtPath:path error:nil].fileModificationDate;
+    if (date && (!newest_date || [date compare:newest_date] == NSOrderedDescending)) {
+      newest = path;
+      newest_date = date;
+    }
+  }
+  return newest ? [NSString stringWithContentsOfFile:newest encoding:NSUTF8StringEncoding error:nil] : nil;
+}
+
+NSString* WinPadFailedChildOfLastRun(void) {
+  NSString* log = LastRunLog();
+  const NSRange failed = log ? [log rangeOfString:@"BOOT FAILED at stage 'guest-window-reserve'"] : NSMakeRange(NSNotFound, 0);
+  if (failed.location == NSNotFound) return nil;
+  // NtCreateUserProcess: image=L"C:\\windows\\~e5.0001" cmdline=...: the last one before it.
+  NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"NtCreateUserProcess: image=L\"([^\"]*)\""
+                                                                      options:0
+                                                                        error:nil];
+  NSArray<NSTextCheckingResult*>* found = [re matchesInString:log options:0 range:NSMakeRange(0, failed.location)];
+  if (!found.count) return @"";
+  NSString* image = [log substringWithRange:[found.lastObject rangeAtIndex:1]];
+  image = [image stringByReplacingOccurrencesOfString:@"\\\\" withString:@"\\"];
+  return [image componentsSeparatedByString:@"\\"].lastObject;
+}
+
 NSString* WinPadMissingDLLOfLastRun(void) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* newest = nil;
