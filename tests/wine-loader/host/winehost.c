@@ -717,6 +717,10 @@ int winehost_main(int argc, char* argv[]) {
     // the JIT pool like Madeira loads them, so this needs a JIT: no AOT image yet.
     publish_host_probe();
     if (publish_jit_pool(512 << 20)) return 1;
+    // Every image through the JIT pool and its x18 patcher, as on an iPad with TXM, also
+    // where mprotect could make a file view executable (a simulator):
+    // patches/madeira/0012-exec-via-jit-pool.
+    setenv("WINE_IOS_EXEC_VIA_POOL", "1", 0);
     printf("winehost: 64-bit x86 program, running it through ARM64EC and FEX\n");
   }
   else if (getenv("WINEHOST_JIT") && !strcmp(getenv("WINEHOST_JIT"), "1")) {
