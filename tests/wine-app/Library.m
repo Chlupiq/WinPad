@@ -494,7 +494,7 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     BOOL profile_from_app = NO;
     info = WithAppProfile(dir, info, &profile_from_app);
     NSDictionary* settings = WinPadGameSettings(info);
-    NSDictionary* own = WinPadOwnGameSettings(folder);
+    NSDictionary* own_settings = WinPadOwnGameSettings(folder);
     NSString* exe = [settings[@"exe"] isKindOfClass:NSString.class] ? settings[@"exe"] : nil;
     if (exe && ([exe containsString:@".."] || ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:exe]])) exe = nil;
     if (!exe) {
@@ -513,23 +513,23 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     }
     // The program the user picked (Nastavení hry, a long press on its tile) wins, while it is there.
     NSString* auto_exe = exe;
-    NSString* own_exe = [own[@"exe"] isKindOfClass:NSString.class] ? own[@"exe"] : nil;
+    NSString* own_exe = [own_settings[@"exe"] isKindOfClass:NSString.class] ? own_settings[@"exe"] : nil;
     if (own_exe.length && ![own_exe containsString:@".."] && ![own_exe hasPrefix:@"/"] &&
         [fm fileExistsAtPath:[dir stringByAppendingPathComponent:own_exe]])
       exe = own_exe;
     if (!exe) continue;
     // So do its resolution and picture: main.m reads them from the settings as winpad.json's.
-    if (own.count) {
+    if (own_settings.count) {
       NSMutableDictionary* mine = [settings mutableCopy];
       for (NSString* key in @[ @"screen", @"scaling" ])
-        if ([own[key] isKindOfClass:NSString.class]) mine[key] = own[key];
+        if ([own_settings[key] isKindOfClass:NSString.class]) mine[key] = own_settings[key];
       settings = mine;
     }
     WinPadGame* game = [WinPadGame new];
     game.folder = folder;
     game.exe = [folder stringByAppendingPathComponent:exe];
     game.autoExe = auto_exe;
-    game.own = own;
+    game.own = own_settings;
     NSString* title = [settings[@"title"] isKindOfClass:NSString.class] ? settings[@"title"] : nil;
     game.settings = settings;
     NSDictionary* profile = [info[@"profile"] isKindOfClass:NSDictionary.class] ? info[@"profile"] : nil;
