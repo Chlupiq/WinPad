@@ -547,3 +547,13 @@ else
     echo "::warning::Wine's log has no '[display] virtual monitor 1670x768': $(grep -F '[display]' "$log" | head -3)"
 fi
 echo "A game controller's A reached the x86 program with a window as Enter in the app on the iPad simulator"
+
+# The same window, closed by the app's own mouse (winehost_post_mouse): a relative move, as a
+# paired mouse, a finger used as a touchpad or a stick in mouse-look give, then a click in the
+# middle of the main window's client area, which closes it.
+run_app window-mouse -program window -mouseTest YES
+for expect in 'mouse: moving the mouse by 12,8' 'winehost: mouse flags 0x1 at 12,8' 'winehost: mouse flags 0x8003' \
+    'winehost: Wine process exited with code 0'; do
+    grep -qF "$expect" "$log" || { echo "missing in the app's log (window-mouse): $expect" >&2; exit 1; }
+done
+echo "The app's mouse (a move and a click) reached the x86 program with a window on the iPad simulator"

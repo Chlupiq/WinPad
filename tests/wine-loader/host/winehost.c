@@ -11,7 +11,8 @@
 // types its text and WINEHOST_CLICK_MENU=1 clicks the first menu of the
 // first window, 2 s after that window first showed (see winios_pProcessEvents);
 // WINEHOST_CLICK=X,Y clicks at X %, Y % of its client area instead. An app
-// hands in keys of its own with winehost_post_key.
+// hands in keys and mouse input of its own with winehost_post_key and
+// winehost_post_mouse.
 // WINEHOST_VA_HOLES holds address ranges an iPad cannot map (hold_va_holes).
 // WINEHOST_AOT_IMAGE names a dylib with FEX AOT code caches linked in
 // (tools/cache2macho); its index goes to FEX as WINE_IOS_AOT_INDEX.
@@ -27,6 +28,7 @@
 #include <libkern/OSCacheControl.h>
 #include <errno.h>
 #include <mach/mach.h>
+#include <math.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -223,6 +225,9 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
 // The program's main window: the largest visible one at least 320x200, as
 // Madeira's driver picks it (ios_main_window in driver_ios.c).
 static void* main_window;
+// The main window's client area on the screen (winios_window_frame), which an
+// absolute winehost_post_mouse is a fraction of.
+static int main_cx, main_cy, main_cw, main_ch;
 static long main_area;
 
 void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, int cx, int cy,
@@ -232,6 +237,12 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
   if (visible && w >= 320 && h >= 200 && (hwnd == main_window || (long)w * h > main_area)) {
     main_area = (long)w * h;
     __atomic_store_n(&main_window, hwnd, __ATOMIC_RELEASE);
+  }
+  if (hwnd == main_window && cw > 0 && ch > 0) {
+    main_cx = cx;
+    main_cy = cy;
+    main_cw = cw;
+    main_ch = ch;
   }
   // The first visible window with a menu bar (which sits right above the
   // client area, its first item at the left) gets the scripted input.
@@ -280,43 +291,80 @@ static int advance(int from, int to) {
                                      __ATOMIC_ACQUIRE);
 }
 
-// Keys an app around the host (tests/wine-app) hands in with
-// winehost_post_key, from its own threads; Wine threads send them on from
-// winios_pProcessEvents, as Madeira's Winios.m does with its ring.
+// Keys and mouse input an app around the host (tests/wine-app) hands in with
+// winehost_post_key and winehost_post_mouse, from its own threads; Wine
+// threads send them on from winios_pProcessEvents, as Madeira's Winios.m does
+// with its ring.
+enum { EV_KEY, EV_MOUSE, EV_MOUSE_AT };
 static struct {
-  unsigned short vk[256];
-  unsigned char up[256];
+  struct {
+    unsigned char type, up;
+    unsigned short vk;
+    float x, y;
+    unsigned flags;
+    int data;
+  } ev[256];
   unsigned head, tail;
   pthread_mutex_t lock;
-} keys = {.lock = PTHREAD_MUTEX_INITIALIZER};
+} input = {.lock = PTHREAD_MUTEX_INITIALIZER};
 
-__attribute__((visibility("default"))) void winehost_post_key(unsigned short vk, int down) {
-  pthread_mutex_lock(&keys.lock);
-  unsigned next = (keys.head + 1) % 256;
-  if (next != keys.tail) {  // full: the key is dropped rather than block the app
-    keys.vk[keys.head] = vk;
-    keys.up[keys.head] = !down;
-    keys.head = next;
+static void post_event(int type, unsigned short vk, int up, float x, float y, unsigned flags, int data) {
+  pthread_mutex_lock(&input.lock);
+  unsigned next = (input.head + 1) % 256;
+  if (next != input.tail) {  // full: the event is dropped rather than block the app
+    input.ev[input.head].type = type;
+    input.ev[input.head].vk = vk;
+    input.ev[input.head].up = up;
+    input.ev[input.head].x = x;
+    input.ev[input.head].y = y;
+    input.ev[input.head].flags = flags;
+    input.ev[input.head].data = data;
+    input.head = next;
   }
-  pthread_mutex_unlock(&keys.lock);
+  pthread_mutex_unlock(&input.lock);
 }
 
-static int send_posted_keys(void) {
+__attribute__((visibility("default"))) void winehost_post_key(unsigned short vk, int down) {
+  post_event(EV_KEY, vk, !down, 0, 0, 0, 0);
+}
+
+// One mouse event, FLAGS as SendInput's MOUSEEVENTF_*. Without ABSOLUTE, X and
+// Y are a move by that many pixels (mouse-look: a game that hides the cursor
+// reads these deltas); with ABSOLUTE they are where in the program's main
+// window, as fractions (0-1) of its client area. DATA is the wheel's delta
+// (120 a notch) with WHEEL.
+__attribute__((visibility("default"))) void winehost_post_mouse(float x, float y, unsigned flags, int data) {
+  post_event((flags & ABSOLUTE) ? EV_MOUSE_AT : EV_MOUSE, 0, 0, x, y, flags, data);
+}
+
+static int send_posted_input(void) {
   int sent = 0;
   for (;;) {
-    pthread_mutex_lock(&keys.lock);
-    if (keys.tail == keys.head) {
-      pthread_mutex_unlock(&keys.lock);
+    pthread_mutex_lock(&input.lock);
+    if (input.tail == input.head) {
+      pthread_mutex_unlock(&input.lock);
       return sent;
     }
-    unsigned short vk = keys.vk[keys.tail];
-    int up = keys.up[keys.tail];
-    keys.tail = (keys.tail + 1) % 256;
-    pthread_mutex_unlock(&keys.lock);
-    winios_drv_post_key(vk, up ? KEYUP : 0);
-    static int logged;
-    if (logged++ < 8) fprintf(stderr, "winehost: key 0x%x %s\n", vk, up ? "up" : "down");
+    __typeof__(input.ev[0]) e = input.ev[input.tail];
+    input.tail = (input.tail + 1) % 256;
+    pthread_mutex_unlock(&input.lock);
     sent = 1;
+    if (e.type == EV_KEY) {
+      winios_drv_post_key(e.vk, e.up ? KEYUP : 0);
+      static int logged;
+      if (logged++ < 8) fprintf(stderr, "winehost: key 0x%x %s\n", e.vk, e.up ? "up" : "down");
+      continue;
+    }
+    int x = (int)lroundf(e.x), y = (int)lroundf(e.y);
+    if (e.type == EV_MOUSE_AT) {
+      if (main_cw <= 0 || main_ch <= 0) continue;  // no window to point into yet
+      const float fx = e.x < 0 ? 0 : e.x > 1 ? 1 : e.x, fy = e.y < 0 ? 0 : e.y > 1 ? 1 : e.y;
+      x = main_cx + (int)(fx * (main_cw - 1) + 0.5f);
+      y = main_cy + (int)(fy * (main_ch - 1) + 0.5f);
+    }
+    winios_drv_post_mouse(x, y, e.flags, (unsigned)e.data, NULL);
+    static int logged;
+    if (logged++ < 8) fprintf(stderr, "winehost: mouse flags 0x%x at %d,%d\n", e.flags, x, y);
   }
 }
 
@@ -354,7 +402,7 @@ static void keep_foreground(void) {
 int winios_pProcessEvents(unsigned int mask) {
   (void)mask;
   keep_foreground();
-  if (send_posted_keys()) return 1;
+  if (send_posted_input()) return 1;
   int state = __atomic_load_n(&input_state, __ATOMIC_ACQUIRE);
   if ((state != 1 && state != 3) || now() < state_time + 2) return 0;
   if (state == 1 && advance(1, 2)) {

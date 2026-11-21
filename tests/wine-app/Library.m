@@ -403,7 +403,7 @@ NSDictionary* WinPadGameSettings(NSDictionary* info) {
   for (NSString* key in info) {
     if ([key isEqualToString:@"profile"]) continue;
     id mine = info[key], theirs = out[key];
-    if ([@[ @"dllOverrides", @"env", @"registry" ] containsObject:key] && [mine isKindOfClass:NSDictionary.class] &&
+    if ([@[ @"dllOverrides", @"env", @"registry", @"padKeys" ] containsObject:key] && [mine isKindOfClass:NSDictionary.class] &&
         [theirs isKindOfClass:NSDictionary.class]) {
       NSMutableDictionary* merged = [theirs mutableCopy];
       for (NSString* k in mine) {
@@ -688,6 +688,12 @@ void WinPadPadKeys(unsigned short keys[PadCount]) {
   // The left stick was the d-pad until it had keys of its own: one not set yet is still the d-pad's.
   for (int d = 0; d < 4; d++)
     if (![saved[PadIds[PadLUp + d]] respondsToSelector:@selector(intValue)]) keys[PadLUp + d] = keys[PadUp + d];
+}
+
+int WinPadPadInput(NSString* name) {
+  for (int i = 0; i < PadCount; i++)
+    if ([name isKindOfClass:NSString.class] && [PadIds[i] isEqualToString:name]) return i;
+  return -1;
 }
 
 NSString* WinPadPadStyle(void) {

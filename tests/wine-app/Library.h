@@ -58,7 +58,7 @@ NSArray<NSURL*>* WinPadWaitingPackages(void);
 // The settings of a game folder's winpad.json INFO: those of the game profile WinPad
 // Translator put there ("profile": {"settings": ...}, tools/winpad-translator/winpad_translator/
 // profiles.py), with the user's own top-level keys over them; dllOverrides, env and registry
-// key by key (registry values by name).
+// and padKeys key by key (registry values by name).
 NSDictionary* WinPadGameSettings(NSDictionary* info);
 
 // How a game's picture fills the screen once it draws through Metal (main.m): "fit" (all of
@@ -88,6 +88,10 @@ enum { PadUp, PadDown, PadLeft, PadRight, PadA, PadB, PadX, PadY, PadL1, PadR1, 
 // The Windows virtual key of each input (0: none): the defaults, made for a racing game, with the
 // changes made in the settings (the "padKeys" setting: input name → key, e.g. {a = 32;}).
 void WinPadPadKeys(unsigned short keys[PadCount]);
+// The input a name of the "padKeys" setting is ("a", "rup"...), or -1. A game's winpad.json (or its
+// profile) can have "padKeys" of its own, laid over the settings' for that game (main.m); there
+// the keys 1, 2 and 4 (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON) are the mouse's buttons.
+int WinPadPadInput(NSString* name);
 // The controller's look: "xbox" (A B X Y, LB RB LT RT, View Menu), "playstation" (✕ ○ □ △, L1 R1
 // L2 R2, Create Options, the d-pad above the left stick) or "nintendo" (B A Y X by place, L R ZL
 // ZR, − +). The "padStyle" setting, or with "auto" (the default) the connected controller's.
