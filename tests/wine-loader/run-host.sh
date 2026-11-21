@@ -16,7 +16,7 @@
 # window shows. WINEHOST_WINEDEBUG replaces
 # WINEDEBUG=+loaddll. A console program has to exit with
 # WINEHOST_EXPECT_EXIT (default 0), or with WINEHOST_EXPECT_EXIT=running
-# still run when the host stops; WINEHOST_SECONDS (default 30) is how
+# still run when the host stops (=running,N: either of the two); WINEHOST_SECONDS (default 30) is how
 # long the host waits for the program.
 set -eu
 
@@ -199,6 +199,9 @@ if [ -n "$default_program" ]; then
 elif [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ]; then
     if [ "${WINEHOST_EXPECT_EXIT:-0}" = running ]; then
         grep -q '^winehost: [0-9]* s passed, exiting$' "$out/run.log"
+    elif expect_exit=${WINEHOST_EXPECT_EXIT:-0} && [ "${expect_exit#running,}" != "$expect_exit" ]; then
+        # running,N: still running when the host stops, or exited with N.
+        grep -qE "^winehost: ([0-9]* s passed, exiting|Wine process exited with code ${expect_exit#running,})\$" "$out/run.log"
     else
         grep -q "^winehost: Wine process exited with code ${WINEHOST_EXPECT_EXIT:-0}\$" "$out/run.log"
     fi

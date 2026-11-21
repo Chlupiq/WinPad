@@ -19,8 +19,9 @@
 # build then runs once with each, and the window has to show and take the tap.
 # When DXMT's unix side was built for both (WORK_DIR/dxmt-SDK) and the i386
 # set has the D3D9 cube (tests/wine-i386/build-d3d9.sh), the app links DXMT
-# and host/metal-display.m too, with a scheme "WinPadWine D3D9" for the cube
-# and one, "WinPadWine Game", for a game copied into the app's Documents
+# and host/metal-display.m too, with a scheme "WinPadWine D3D9" for the cube,
+# "WinPadWine D3D11" and "WinPadWine D3D10" for the D3D11 and D3D10 tests
+# (tests/wine-i386/d3d11-triangle.c), and one, "WinPadWine Game", for a game copied into the app's Documents
 # (main.m). Neither runs here.
 #
 # Usage: build-xcode.sh WORK_DIR SIM_AOT_DYLIB DEVICE_AOT_DYLIB OUT_DIR [SIM_WINDOW_AOT DEVICE_WINDOW_AOT]
@@ -118,7 +119,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
     # Every scheme runs the same app; all but the first pick a program.
     schemes="WinPadWine:"
     [ -z "$sim_window_aot" ] || schemes="$schemes WinPadWine_Window:window"
-    [ -z "$d3d9" ] || schemes="$schemes WinPadWine_D3D9:d3d9-cube WinPadWine_Game:game"
+    [ -z "$d3d9" ] || schemes="$schemes WinPadWine_D3D9:d3d9-cube WinPadWine_D3D11:d3d11-triangle WinPadWine_D3D10:d3d10-triangle WinPadWine_Game:game"
     if [ "$schemes" != "WinPadWine:" ]; then
         echo 'schemes:'
         for s in $schemes; do
@@ -130,7 +131,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
             echo '      config: Debug'
             # The JIT programs run under Xcode's debugger, which would stop on
             # every signal Wine uses (thread suspend, faults it handles).
-            case ${s#*:} in d3d9-cube|game)
+            case ${s#*:} in d3d9-cube|d3d1?-triangle|game)
                 echo '      customLLDBInit: $(SRCROOT)/lldbinit' ;;
             esac
             [ -z "${s#*:}" ] || {
@@ -181,6 +182,9 @@ build() {
         { echo "the $1 build did not link the Wine host" >&2; exit 1; }
     if [ -n "$d3d9" ]; then
         test -f "$product/i386-windows/d3d9-cube.exe" || { echo "the $1 build lacks the D3D9 cube" >&2; exit 1; }
+        for f in d3d11-triangle.exe d3d10-triangle.exe d3d11.dll dxgi.dll d3d10core.dll d3d10.dll; do
+            test -f "$product/i386-windows/$f" || { echo "the $1 build lacks i386-windows/$f" >&2; exit 1; }
+        done
         for sym in _macdrv_functions _winehost_show_metal_layer _dxmt_winemetal_unix_call_wow64_funcs; do
             nm "$product/WinPadWine" | grep -q " [TDS] $sym\$" ||
                 { echo "the $1 build lacks $sym" >&2; exit 1; }

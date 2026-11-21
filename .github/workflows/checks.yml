@@ -878,6 +878,45 @@ jobs:
         run: |
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d8-cube.exe"
           echo "::notice::D3D8 cube on the simulator: Direct3DCreate8, the device and Presents through d3d8to9 checked"
+      # Direct3D 11 through DXMT's i386 d3d11.dll and dxgi.dll (the same winemetal and
+      # Metal as D3D9): a swap chain on the window, shaders from Wine's d3dcompiler_47,
+      # a triangle from a dynamic buffer. As for the cube, the simulator's GPU cannot
+      # finish DXMT's frames, so this checks the device, the swap chain and the Presents.
+      - name: A 32-bit Direct3D 11 program creates its device and swap chain and presents through DXMT and Metal, on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "WINPAD-D3D11: present 3 hr=0x00000000"
+          WINEHOST_EXPECT_EXIT: "running,43"
+          WINEHOST_SECONDS: 25
+          WINEHOST_EXPECT_LOG: |
+            WINPAD-D3D11: device created
+            WINPAD-D3D11: render target view created
+            WINPAD-D3D11: dynamic vertex buffer created
+            WINPAD-D3D11: present 1 hr=0x00000000
+            winehost: Metal layer
+            winehost: drawable 1 of Metal layer
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d11-triangle.exe" || status=$?
+          grep -E 'WINPAD-D3D11|err:|D3D11CoreCreateDevice' "$RUNNER_TEMP/wine-loader/host-d3d11-triangle/run.log" | head -60 || true
+          exit $status
+      # Direct3D 10: Wine's d3d10.dll hands the device to DXMT's d3d10core.dll.
+      - name: A 32-bit Direct3D 10 program creates its device and presents through Wine's d3d10, DXMT and Metal, on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "WINPAD-D3D10: present 3 hr=0x00000000"
+          WINEHOST_EXPECT_EXIT: "running,43"
+          WINEHOST_SECONDS: 25
+          WINEHOST_EXPECT_LOG: |
+            WINPAD-D3D10: device created
+            WINPAD-D3D10: render target view created
+            WINPAD-D3D10: present 1 hr=0x00000000
+            winehost: Metal layer
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d10-triangle.exe" || status=$?
+          grep -E 'WINPAD-D3D10|err:' "$RUNNER_TEMP/wine-loader/host-d3d10-triangle/run.log" | head -60 || true
+          exit $status
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
