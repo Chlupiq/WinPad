@@ -2968,7 +2968,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   NSMutableArray<NSString*>* others = [NSMutableArray new];
   // Once DirectX is downloaded, what it lacks (xinput1_4...) another download would not bring.
   const BOOL have_directx = WinPadDirectXDLLs().count > 0;
-  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx ? fetch : others addObject:dll];
+  // The download holds the 32-bit DirectX DLLs only: a 64-bit game gets none from it.
+  const BOOL x64 = [game.arch isEqualToString:@"64bit"];
+  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx && !x64 ? fetch : others addObject:dll];
   printf("WinPad Library: %s lacks DLLs: %s\n", game.folder.UTF8String,
          [missing componentsJoinedByString:@", "].UTF8String);
   if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return YES;

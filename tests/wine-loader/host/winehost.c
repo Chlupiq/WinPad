@@ -709,6 +709,16 @@ int winehost_main(int argc, char* argv[]) {
     if (aot && *aot && publish_aot_image(aot)) return 1;
     printf("winehost: 32-bit x86 program, running it through WoW64\n");
   }
+  else if (pe_machine(argv[2]) == 0x8664) {
+    // A 64-bit x86 program runs in an ARM64EC session (Madeira's main mode): the unix
+    // side sees an AMD64 main image on an ARM64 core, takes ntdll and every system DLL
+    // from arm64ec-windows (get_pe_dir in loader_ios.c), and ntdll hands the x86-64 code
+    // to FEX's ARM64EC module (xtajit64.dll). Those DLLs are plain PE files, loaded into
+    // the JIT pool like Madeira loads them, so this needs a JIT: no AOT image yet.
+    publish_host_probe();
+    if (publish_jit_pool(512 << 20)) return 1;
+    printf("winehost: 64-bit x86 program, running it through ARM64EC and FEX\n");
+  }
   else if (getenv("WINEHOST_JIT") && !strcmp(getenv("WINEHOST_JIT"), "1")) {
     /* A 64-bit program that generates code itself (FEX's offline compiler). */
     publish_host_probe();

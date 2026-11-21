@@ -22,9 +22,12 @@ mkdir -p "$work"
 # madeira/wine may already be there (restored from a cache), so no git clone.
 if [ ! -d "$work/madeira/.git" ]; then
     git init -q "$work/madeira"
-    git -C "$work/madeira" sparse-checkout set --no-cone /build/ /app/Madeira/Winios/ /app/Madeira/aarch64-windows/
     git -C "$work/madeira" fetch -q --depth 1 --filter=blob:none "$MADEIRA_REPO" "$MADEIRA_COMMIT"
 fi
+# arm64ec-windows: Madeira's ARM64EC Wine modules (ntdll, the system DLLs, DXMT's
+# d3d11/dxgi/winemetal and FEX's xtajit64.dll), for 64-bit x86 programs.
+git -C "$work/madeira" sparse-checkout set --no-cone /build/ /app/Madeira/Winios/ \
+    /app/Madeira/aarch64-windows/ /app/Madeira/arm64ec-windows/
 git -C "$work/madeira" checkout -q -f "$MADEIRA_COMMIT"
 
 wine="$work/madeira/wine"

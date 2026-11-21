@@ -65,6 +65,28 @@ pe_machine() {  # FILE: the Machine field of its PE header, as 4 hex digits
 x86_32=
 [ "$(pe_machine "$1")" = 014c ] && x86_32=1
 [ -n "$x86_32" ] && wow64=1
+# A 64-bit x86 program (Machine 0x8664) runs in an ARM64EC session: ntdll and
+# the system DLLs come from Madeira's arm64ec-windows set (plain PE files),
+# found as <exe dir>/arm64ec-windows and WINEDLLPATH/arm64ec-windows.
+x86_64=
+[ "$(pe_machine "$1")" = 8664 ] && x86_64=1
+dllpath="$work/modules-iphonesimulator"
+if [ -n "$x86_64" ]; then
+    ec="$work/madeira/app/Madeira/arm64ec-windows"
+    [ -f "$ec/ntdll.dll" ] || { echo "no ARM64EC modules in $ec" >&2; exit 1; }
+    ln -s "$ec" "$out/arm64ec-windows"
+    dllpath="$out/dllpath"
+    mkdir -p "$dllpath"
+    ln -s "$work/modules-iphonesimulator/aarch64-windows" "$dllpath/aarch64-windows"
+    ln -s "$ec" "$dllpath/arm64ec-windows"
+    # system32 of an x64 session is the ARM64EC set, and sysx64 too (Madeira's
+    # WineProcessBridge.m links both).
+    for d in system32 sysx64; do
+        mkdir -p "$out/prefix/drive_c/windows/$d"
+        for f in "$ec"/*; do ln -s "$f" "$out/prefix/drive_c/windows/$d/"; done
+    done
+    cp "$here/prefix/system.reg" "$out/prefix/system.reg"
+fi
 if [ "$wow64" = 1 ]; then
     # A 32-bit process's system32 is C:\windows\syswow64; Madeira's app links
     # the i386 set there (madeira_link_syswow64 in WineProcessBridge.m).
@@ -116,7 +138,7 @@ echo "iPad simulator $udid"
 xcrun simctl boot "$udid" 2>/dev/null || true
 xcrun simctl bootstatus "$udid" -b >/dev/null
 seconds=${WINEHOST_SECONDS:-30}
-SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$work/modules-iphonesimulator" \
+SIMCTL_CHILD_WINEPREFIX="$out/prefix" SIMCTL_CHILD_WINEDLLPATH="$dllpath" \
     SIMCTL_CHILD_WINEHOST_NLS="$work/madeira/wine/nls" SIMCTL_CHILD_WINEDEBUG="${WINEHOST_WINEDEBUG:-+loaddll}" \
     SIMCTL_CHILD_MADEIRA_WIN32U=1 SIMCTL_CHILD_MADEIRA_DESKTOP=1 \
     SIMCTL_CHILD_WINEHOST_FRAMES="$out/frames" \
@@ -189,7 +211,7 @@ done
 grep -q '^winehost: wineserver ready' "$out/run.log"
 # The Wine process loads the program from its dylib (patches/madeira/0001);
 # an x86 program stays a PE file.
-[ -n "$x86_32" ] || [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log"
+[ -n "$x86_32" ] || [ -n "$x86_64" ] || [ -n "${WINEHOST_EXPECT_OUTPUT:-}" ] || grep -q 'load_main_exe = 0x0' "$out/run.log"
 # Every DLL comes from its dylib too (load_builtin). cmd.exe runs to its end:
 # it prints the line and exits with 0. Any other program draws a window
 # through win32u's winios driver.
