@@ -187,11 +187,13 @@ merge the same way. The settings:
 | `dllOverrides` | `WINEDLLOVERRIDES`, after the app's own `dinput8=n,b` |
 | `env` | environment variables, except the ones the app sets (`WINE*`, `FEX_*`, `DYLD_*`...) |
 | `registry` | values (text, a number = DWORD, `{"hex": "00ff"}` = binary) put into the prefix's `system.reg` (HKLM) or `user.reg` (HKCU) when the key does not have them yet, so a game that changes one keeps its own; a 32-bit game's `HKLM\Software` goes to `Wow6432Node` |
+| `nativeDirectX` | Microsoft's DirectX DLLs (winetricks verbs as Proton's: `d3dx9`, `d3dx9_43`, `xact`, `d3dcompiler_43`, `xinput`, or DLL names): the library downloads DirectX before the game starts, and the app links them into the prefix and loads them native first, even where Wine has its own |
+| `windowsVersion` | `winxp`, `win7`, `win10`...: the Windows version Wine reports to the game's program (`HKCU\Software\Wine\AppDefaults\PROGRAM.exe\Version`) |
 
 A profile matches a game by any of its `match` rules: an `exe` in the folder
 (any case) with all of the rule's `files`, or the folder's Steam app
 (`steamAppId`: `steam_appid.txt` in the folder, or the `appmanifest_<id>.acf`
-of the `steamapps` folder it is in). `--profile ID` forces one, `--profile
+of the `steamapps` folder it is in), or its GOG game (`gogId`: `goggame-<id>.info`). `--profile ID` forces one, `--profile
 none` takes it out of `winpad.json`, `--list-profiles` lists them, and
 `--profile-only --game FOLDER` only writes `winpad.json`.
 
@@ -200,10 +202,28 @@ none` takes it out of `winpad.json`, `--list-profiles` lists them, and
 | `nfsu2` Need for Speed Underground 2 | `SPEED2.EXE` + `GLOBAL/GLOBALA.BUN` | `dinput8=n,b` (Ultimate ASI Loader), race resolution 1024×768 (`g_RacingResolution` 2) |
 | `mafia` Mafia (2002) | Steam 40990, `GameV12.exe`, or `Game.exe` + `Setup.exe` + `LS3DF.dll` | `d3d8=n,b`: a `d3d8.dll` in the game folder (Mafia Widescreen Fix's d3d8to9) first, else the app's d3d8to9 |
 
-Each profile names its sources (PCGamingWiki, forums). Proton's game fixes
-(umu-protonfixes) have nothing for either game; take settings from them when a
-game has one. A new profile is one JSON file; `tests/test_profiles.py` checks
-the shipped ones.
+Each profile names its sources (PCGamingWiki, forums). A new profile is one
+JSON file; `tests/test_profiles.py` checks the shipped ones.
+
+### Profiles from Proton (umu-protonfixes)
+
+`data/protonfixes.json` holds profiles made from Proton's per-game fixes,
+[umu-protonfixes](https://github.com/Open-Wine-Components/umu-protonfixes)
+(BSD 2-Clause), by `import-protonfixes.py`. It reads each fix without running
+it and keeps what WinPad Wine does the same way: DLL overrides, environment
+(not Proton's, DXVK's or Linux's), arguments, registry values, the game's
+program in place of its launcher (`replace_command`), Microsoft's DirectX DLLs
+(`protontricks d3dx9_43`...) and the Windows version. Fonts, Visual C++, .NET,
+ini edits and code with conditions are left out and named in the notes. They
+match by Steam id, or by GOG id (`gogId`: a `goggame-<id>.info` in the folder,
+mapped through [umu-database](https://github.com/Open-Wine-Components/umu-database)).
+The app reads them after the profiles in `data/profiles`, which win. To refresh:
+
+```
+git clone --depth 1 https://github.com/Open-Wine-Components/umu-protonfixes
+curl -LO https://raw.githubusercontent.com/Open-Wine-Components/umu-database/main/umu-database.csv
+python3 import-protonfixes.py umu-protonfixes umu-database.csv
+```
 
 ## Several games in one app
 

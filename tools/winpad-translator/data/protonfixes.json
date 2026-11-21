@@ -1,0 +1,3079 @@
+{
+ "about": {
+  "license": "BSD-2-Clause, Copyright (c) 2018, Chris Simons",
+  "made by": "tools/winpad-translator/import-protonfixes.py",
+  "source": "https://github.com/Open-Wine-Components/umu-protonfixes"
+ },
+ "profiles": [
+  {
+   "id": "pf-1017900",
+   "match": [
+    {
+     "steamAppId": 1017900
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-NoStartup"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1017900"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1041720",
+   "match": [
+    {
+     "steamAppId": 1041720
+    },
+    {
+     "gogId": 1077045575
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1041720"
+   ],
+   "title": "Kingdoms of Amalur: Re-Reckoning",
+   "version": 1
+  },
+  {
+   "id": "pf-105450",
+   "match": [
+    {
+     "steamAppId": 105450
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): windowsVersion",
+    "Vynecháno (WinPad to neumí stejně): winetricks corefonts, winetricks l3codecx, winetricks mfc42"
+   ],
+   "settings": {
+    "windowsVersion": "winxp"
+   },
+   "sources": [
+    "umu-protonfixes umu-105450"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1062040",
+   "match": [
+    {
+     "steamAppId": 1062040
+    },
+    {
+     "gogId": 1579883472
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "xactengine3_7": "n"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1062040"
+   ],
+   "title": "Dragon Star Varnir",
+   "version": 1
+  },
+  {
+   "id": "pf-1097150",
+   "match": [
+    {
+     "steamAppId": 1097150
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "DOTNET_BUNDLE_EXTRACT_BASE_DIR": ""
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1097150"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-110800",
+   "match": [
+    {
+     "steamAppId": 110800
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "args": [
+     "-dx11"
+    ],
+    "nativeDirectX": [
+     "d3dx9_43",
+     "d3dcompiler_43",
+     "d3dx11_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-110800"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1112400",
+   "match": [
+    {
+     "steamAppId": 1112400
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): windowsVersion",
+    "Vynecháno (WinPad to neumí stejně): winetricks dotnet35sp1, winetricks dotnet40"
+   ],
+   "settings": {
+    "windowsVersion": "win10"
+   },
+   "sources": [
+    "umu-protonfixes umu-1112400"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1141086411",
+   "match": [
+    {
+     "gogId": 1141086411
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "d3d8": "n,b",
+     "dsound": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1141086411"
+   ],
+   "title": "Silent Hill 4: The Room",
+   "version": 1
+  },
+  {
+   "id": "pf-1144400",
+   "match": [
+    {
+     "steamAppId": 1144400
+    },
+    {
+     "gogId": 1453911006
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-vomstyle=layer"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1144400"
+   ],
+   "title": "Senren * Banka",
+   "version": 1
+  },
+  {
+   "id": "pf-1174180",
+   "match": [
+    {
+     "steamAppId": 1174180
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-fullscreen",
+     "-vulkan"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1174180"
+   ],
+   "title": "Red Dead Redemption 2",
+   "version": 1
+  },
+  {
+   "id": "pf-1207658752",
+   "match": [
+    {
+     "gogId": 1207658752
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides, registry"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "winmm": "n,b"
+    },
+    "registry": {
+     "HKCU\\Software\\Wine": {
+      "Version": "win98"
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1207658752"
+   ],
+   "title": "Tom Clancy's Rainbow Six",
+   "version": 1
+  },
+  {
+   "id": "pf-1207658861",
+   "match": [
+    {
+     "gogId": 1207658861
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "xact"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1207658861"
+   ],
+   "title": "Two Worlds Epic Edition",
+   "version": 1
+  },
+  {
+   "id": "pf-1222370",
+   "match": [
+    {
+     "steamAppId": 1222370
+    },
+    {
+     "gogId": 1618128477
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe"
+   ],
+   "settings": {
+    "exe": "Necromunda/Binaries/Win64/Necromunda-Win64-Shipping.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-1222370"
+   ],
+   "title": "Necromunda: Hired Gun",
+   "version": 1
+  },
+  {
+   "id": "pf-1222700",
+   "match": [
+    {
+     "steamAppId": 1222700
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "OPENSSL_ia32cap": ":~0x20000000"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1222700"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1250410",
+   "match": [
+    {
+     "steamAppId": 1250410
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-FastLaunch"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1250410"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1286880",
+   "match": [
+    {
+     "steamAppId": 1286880
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "vulkan-1": "b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1286880"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1361210",
+   "match": [
+    {
+     "steamAppId": 1361210
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, exe"
+   ],
+   "settings": {
+    "args": [
+     "-eac-untrusted",
+     "--bundle-dir",
+     "../bundle",
+     "--ini",
+     "settings"
+    ],
+    "exe": "binaries/Darktide.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-1361210"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1392960",
+   "match": [
+    {
+     "steamAppId": 1392960
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1392960"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1434950",
+   "match": [
+    {
+     "steamAppId": 1434950
+    },
+    {
+     "gogId": 1589167087
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx11_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1434950"
+   ],
+   "title": "HighFleet",
+   "version": 1
+  },
+  {
+   "id": "pf-1467450",
+   "match": [
+    {
+     "steamAppId": 1467450
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): util.set_resolution, util.winedll_override, winetricks directmusic"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1467450"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1500540",
+   "match": [
+    {
+     "steamAppId": 1500540
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "dinput": "n,b",
+     "winmm": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1500540"
+   ],
+   "title": "Hardwar",
+   "version": 1
+  },
+  {
+   "id": "pf-15130",
+   "match": [
+    {
+     "steamAppId": 15130
+    },
+    {
+     "gogId": 1207658746
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX, registry",
+    "Vynecháno (WinPad to neumí stejně): winetricks arial, winetricks d3dcompiler_47, winetricks dsound"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9"
+    ],
+    "registry": {
+     "HKLM\\Software\\Wow6432Node\\Ubisoft\\Beyond Good & Evil": {
+      "InstallLanguage": 1
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-15130"
+   ],
+   "title": "Beyond Good & Evil™",
+   "version": 1
+  },
+  {
+   "id": "pf-1580232252",
+   "match": [
+    {
+     "gogId": 1580232252
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1580232252"
+   ],
+   "title": "Resident Evil",
+   "version": 1
+  },
+  {
+   "id": "pf-1584652180",
+   "match": [
+    {
+     "gogId": 1584652180
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1584652180"
+   ],
+   "title": "The Wheel of Time",
+   "version": 1
+  },
+  {
+   "id": "pf-1587885678",
+   "match": [
+    {
+     "gogId": 1587885678
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1587885678"
+   ],
+   "title": "Breath of Fire IV",
+   "version": 1
+  },
+  {
+   "id": "pf-1597741823",
+   "match": [
+    {
+     "gogId": 1597741823
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1597741823"
+   ],
+   "title": "Dino Crisis 2",
+   "version": 1
+  },
+  {
+   "id": "pf-1661434114",
+   "match": [
+    {
+     "gogId": 1661434114
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1661434114"
+   ],
+   "title": "Dino Crisis",
+   "version": 1
+  },
+  {
+   "id": "pf-1662840",
+   "match": [
+    {
+     "steamAppId": 1662840
+    },
+    {
+     "gogId": 2042701637
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-vomstyle=layer"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1662840"
+   ],
+   "title": "Parquet",
+   "version": 1
+  },
+  {
+   "id": "pf-1664350",
+   "match": [
+    {
+     "steamAppId": 1664350
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "vulkan-1": "b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1664350"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-16730",
+   "match": [
+    {
+     "steamAppId": 16730
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): windowsVersion"
+   ],
+   "settings": {
+    "windowsVersion": "winxp"
+   },
+   "sources": [
+    "umu-protonfixes umu-16730"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1715130",
+   "match": [
+    {
+     "steamAppId": 1715130
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks vcrun2019"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1715130"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1771973390",
+   "match": [
+    {
+     "gogId": 1771973390
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1771973390"
+   ],
+   "title": "METAL GEAR SOLID",
+   "version": 1
+  },
+  {
+   "id": "pf-1795390",
+   "match": [
+    {
+     "steamAppId": 1795390
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe"
+   ],
+   "settings": {
+    "exe": "CarnageCross/CarnageCross/Binaries/Win64/CarnageCross-Win64-Shipping.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-1795390"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1873170",
+   "match": [
+    {
+     "steamAppId": 1873170
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system, util.call"
+   ],
+   "settings": {
+    "exe": "nw.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-1873170"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-1930",
+   "match": [
+    {
+     "steamAppId": 1930
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "xact",
+     "d3dx9"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-1930"
+   ],
+   "title": "Two Worlds",
+   "version": 1
+  },
+  {
+   "id": "pf-1971870",
+   "match": [
+    {
+     "steamAppId": 1971870
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-1971870"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-200940",
+   "match": [
+    {
+     "steamAppId": 200940
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks mdx"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43",
+     "d3dx9_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-200940"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-201480",
+   "match": [
+    {
+     "steamAppId": 201480
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): winetricks directplay, winetricks dmband, winetricks dmime, winetricks dmloader, winetricks dmstyle, winetricks dmsynth, winetricks dmusic, winetricks dsound, winetricks dswave"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "streamci": "n"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-201480"
+   ],
+   "title": "Serious Sam: The Random Encounter",
+   "version": 1
+  },
+  {
+   "id": "pf-206480",
+   "match": [
+    {
+     "steamAppId": 206480
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "libglesv2": ""
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-206480"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-206500",
+   "match": [
+    {
+     "steamAppId": 206500
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "/dx11"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-206500"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2111630",
+   "match": [
+    {
+     "steamAppId": 2111630
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks vcrun2008"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-2111630"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-212500",
+   "match": [
+    {
+     "steamAppId": 212500
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "libglesv2": ""
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-212500"
+   ],
+   "title": "The Lord of the Rings Online™",
+   "version": 1
+  },
+  {
+   "id": "pf-213330",
+   "match": [
+    {
+     "steamAppId": 213330
+    },
+    {
+     "gogId": 1193585573
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9_41"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-213330"
+   ],
+   "title": "LEGO® Batman 2 DC Super Heroes™",
+   "version": 1
+  },
+  {
+   "id": "pf-2135150",
+   "match": [
+    {
+     "steamAppId": 2135150
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "winhttp": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2135150"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-214510",
+   "match": [
+    {
+     "steamAppId": 214510
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9_41"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-214510"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-214950",
+   "match": [
+    {
+     "steamAppId": 214950
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks directplay"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_42"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-214950"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-215280",
+   "match": [
+    {
+     "steamAppId": 215280
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9_43",
+     "d3dx11_43",
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-215280"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2167580",
+   "match": [
+    {
+     "steamAppId": 2167580
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2167580"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2167850",
+   "match": [
+    {
+     "steamAppId": 2167850
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2167850"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-219990",
+   "match": [
+    {
+     "steamAppId": 219990
+    },
+    {
+     "gogId": 1449651388
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-219990"
+   ],
+   "title": "Grim Dawn",
+   "version": 1
+  },
+  {
+   "id": "pf-223710",
+   "match": [
+    {
+     "steamAppId": 223710
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "opengl32": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-223710"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-223750",
+   "match": [
+    {
+     "steamAppId": 223750
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides, nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "wbemprox": "n"
+    },
+    "nativeDirectX": [
+     "d3dx11_43",
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-223750"
+   ],
+   "title": "DCS World",
+   "version": 1
+  },
+  {
+   "id": "pf-224960",
+   "match": [
+    {
+     "steamAppId": 224960
+    },
+    {
+     "gogId": 1207663463
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system, util.create_dosbox_conf"
+   ],
+   "settings": {
+    "args": [
+     "-conf",
+     "glide_fix.conf"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-224960"
+   ],
+   "title": "Tomb Raider 1",
+   "version": 1
+  },
+  {
+   "id": "pf-228260",
+   "match": [
+    {
+     "steamAppId": 228260
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides, nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47, winetricks usp10, winetricks vcrun2008, winetricks vcrun2015"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "sdnxlfonts": ""
+    },
+    "nativeDirectX": [
+     "d3dx9",
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-228260"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-230410",
+   "match": [
+    {
+     "steamAppId": 230410
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env",
+    "Vynecháno (WinPad to neumí stejně): winetricks hidewineexports=enable"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-230410"
+   ],
+   "title": "Warframe",
+   "version": 1
+  },
+  {
+   "id": "pf-2310",
+   "match": [
+    {
+     "gogId": 1435828198
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "winmm": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2310"
+   ],
+   "title": "Quake",
+   "version": 1
+  },
+  {
+   "id": "pf-231990",
+   "match": [
+    {
+     "steamAppId": 231990
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9_43",
+     "xact"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-231990"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2320",
+   "match": [
+    {
+     "gogId": 1441704824
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "winmm": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2320"
+   ],
+   "title": "Quake II (Original)",
+   "version": 1
+  },
+  {
+   "id": "pf-2322010",
+   "match": [
+    {
+     "steamAppId": 2322010
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "1"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2322010"
+   ],
+   "title": "God of War Ragnarök",
+   "version": 1
+  },
+  {
+   "id": "pf-23300",
+   "match": [
+    {
+     "steamAppId": 23300
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-23300"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2399420",
+   "match": [
+    {
+     "steamAppId": 2399420
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "d3dx11_43": "b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2399420"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-240600",
+   "match": [
+    {
+     "steamAppId": 240600
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43",
+     "d3dx9_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-240600"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-241990",
+   "match": [
+    {
+     "steamAppId": 241990
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides, nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47, winetricks usp10, winetricks vcrun2008, winetricks vcrun2015"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "sdnxlfonts": ""
+    },
+    "nativeDirectX": [
+     "d3dx9",
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-241990"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2426960",
+   "match": [
+    {
+     "steamAppId": 2426960
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2426960"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2437170",
+   "match": [
+    {
+     "steamAppId": 2437170
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2437170"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-244210",
+   "match": [
+    {
+     "steamAppId": 244210
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides, nativeDirectX, windowsVersion",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47, winetricks dotnet48"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "dwrite": "n,b"
+    },
+    "nativeDirectX": [
+     "d3dx11_43"
+    ],
+    "windowsVersion": "win10"
+   },
+   "sources": [
+    "umu-protonfixes umu-244210"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-2552430",
+   "match": [
+    {
+     "steamAppId": 2552430
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SteamDeck": "1"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-2552430"
+   ],
+   "title": "KINGDOM HEARTS HD 1.5+2.5 ReMIX",
+   "version": 1
+  },
+  {
+   "id": "pf-256330",
+   "match": [
+    {
+     "steamAppId": 256330
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9_42",
+     "d3dx9_43",
+     "xact"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-256330"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-261640",
+   "match": [
+    {
+     "steamAppId": 261640
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, exe",
+    "Vynecháno (WinPad to neumí stejně): winetricks physx"
+   ],
+   "settings": {
+    "args": [
+     "-NoSplash"
+    ],
+    "exe": "BorderlandsPreSequel.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-261640"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-266840",
+   "match": [
+    {
+     "steamAppId": 266840
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe"
+   ],
+   "settings": {
+    "exe": "aomx.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-266840"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-268050",
+   "match": [
+    {
+     "steamAppId": 268050
+    },
+    {
+     "gogId": 1171957437
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): windowsVersion"
+   ],
+   "settings": {
+    "windowsVersion": "win7"
+   },
+   "sources": [
+    "umu-protonfixes umu-268050"
+   ],
+   "title": "The Evil Within",
+   "version": 1
+  },
+  {
+   "id": "pf-271590",
+   "match": [
+    {
+     "steamAppId": 271590
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system"
+   ],
+   "settings": {
+    "registry": {
+     "HKLM\\System\\CurrentControlSet\\Services\\winebus": {
+      "DisableHidraw": 1,
+      "Enable SDL": 1
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-271590"
+   ],
+   "title": "Grand Theft Auto V",
+   "version": 1
+  },
+  {
+   "id": "pf-281280",
+   "match": [
+    {
+     "steamAppId": 281280
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, windowsVersion"
+   ],
+   "settings": {
+    "args": [
+     "-VS0",
+     "-CS0"
+    ],
+    "windowsVersion": "winxp"
+   },
+   "sources": [
+    "umu-protonfixes umu-281280"
+   ],
+   "title": "Mashed",
+   "version": 1
+  },
+  {
+   "id": "pf-282900",
+   "match": [
+    {
+     "steamAppId": 282900
+    },
+    {
+     "gogId": 1445338941
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "AMD_DEBUG": "nowc",
+     "radeonsi_disable_sam": "true"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-282900"
+   ],
+   "title": "Hyperdimension Neptunia Re;Birth1",
+   "version": 1
+  },
+  {
+   "id": "pf-284160",
+   "match": [
+    {
+     "steamAppId": 284160
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9_43",
+     "d3dcompiler_43",
+     "d3dx11_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-284160"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-286360",
+   "match": [
+    {
+     "steamAppId": 286360
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe",
+    "Vynecháno (WinPad to neumí stejně): util.chdir"
+   ],
+   "settings": {
+    "exe": "hd/SotV1.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-286360"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-287310",
+   "match": [
+    {
+     "steamAppId": 287310
+    },
+    {
+     "gogId": 1207659863
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n",
+     "dinput": "n"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-287310"
+   ],
+   "title": "Re-Volt",
+   "version": 1
+  },
+  {
+   "id": "pf-287450",
+   "match": [
+    {
+     "steamAppId": 287450
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe",
+    "Vynecháno (WinPad to neumí stejně): winetricks crypt32, winetricks directmusic, winetricks directplay, winetricks sound=alsa"
+   ],
+   "settings": {
+    "exe": "riseofnations.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-287450"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-289130",
+   "match": [
+    {
+     "steamAppId": 289130
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-useembedded"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-289130"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-292820",
+   "match": [
+    {
+     "steamAppId": 292820
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry",
+    "Vynecháno (WinPad to neumí stejně): util.create_dos_device"
+   ],
+   "settings": {
+    "registry": {
+     "HKLM\\System\\MountedDevices": {
+      "\\??\\Volume{00000000-0000-0000-0000-000000000052}": {
+       "hex": "2f746d7000"
+      },
+      "\\DosDevices\\R:": {
+       "hex": "5c005c002e005c0064003a000000"
+      }
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-292820"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-294700",
+   "match": [
+    {
+     "steamAppId": 294700
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry",
+    "Vynecháno (WinPad to neumí stejně): util.create_dos_device"
+   ],
+   "settings": {
+    "registry": {
+     "HKLM\\System\\MountedDevices": {
+      "\\??\\Volume{00000000-0000-0000-0000-000000000052}": {
+       "hex": "2f746d7000"
+      },
+      "\\DosDevices\\R:": {
+       "hex": "5c005c002e005c0064003a000000"
+      }
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-294700"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-298110",
+   "match": [
+    {
+     "steamAppId": 298110
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-298110"
+   ],
+   "title": "Far Cry 4",
+   "version": 1
+  },
+  {
+   "id": "pf-307780",
+   "match": [
+    {
+     "steamAppId": 307780
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "xact_x64"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-307780"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-311240",
+   "match": [
+    {
+     "steamAppId": 311240
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "libglesv2": ""
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-311240"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-312670",
+   "match": [
+    {
+     "steamAppId": 312670
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, exe"
+   ],
+   "settings": {
+    "args": [
+     "-skipdrivercheck",
+     "-noHDR"
+    ],
+    "exe": "StrangeBrigade_Vulkan.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-312670"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-34330",
+   "match": [
+    {
+     "steamAppId": 34330
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-34330"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-345610",
+   "match": [
+    {
+     "steamAppId": 345610
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system"
+   ],
+   "settings": {
+    "env": {
+     "ENABLE_GAMESCOPE_WSI": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-345610"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-351710",
+   "match": [
+    {
+     "steamAppId": 351710
+    },
+    {
+     "gogId": 1863533702
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "AMD_DEBUG": "nowc",
+     "radeonsi_disable_sam": "true"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-351710"
+   ],
+   "title": "Hyperdimension Neptunia Re;Birth2: Sisters Generation",
+   "version": 1
+  },
+  {
+   "id": "pf-3590",
+   "match": [
+    {
+     "steamAppId": 3590
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system"
+   ],
+   "settings": {
+    "args": [
+     "-changedir"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-3590"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-359550",
+   "match": [
+    {
+     "steamAppId": 359550
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env",
+    "Vynecháno (WinPad to neumí stejně): winetricks ubisoftconnect"
+   ],
+   "settings": {
+    "env": {
+     "vk_x11_override_min_image_count": "2"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-359550"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-367500",
+   "match": [
+    {
+     "steamAppId": 367500
+    },
+    {
+     "gogId": 1242384383
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "SDL_JOYSTICK_HIDAPI": "0"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-367500"
+   ],
+   "title": "Dragon's Dogma: Dark Arisen",
+   "version": 1
+  },
+  {
+   "id": "pf-3681810",
+   "match": [
+    {
+     "steamAppId": 3681810
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): windowsVersion"
+   ],
+   "settings": {
+    "windowsVersion": "win7"
+   },
+   "sources": [
+    "umu-protonfixes umu-3681810"
+   ],
+   "title": "Blue Protocol: Star Resonance",
+   "version": 1
+  },
+  {
+   "id": "pf-378630",
+   "match": [
+    {
+     "steamAppId": 378630
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe",
+    "Vynecháno (WinPad to neumí stejně): util.chdir"
+   ],
+   "settings": {
+    "exe": "hd/SotV2.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-378630"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-379720",
+   "match": [
+    {
+     "steamAppId": 379720
+    },
+    {
+     "gogId": 1390579243
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system, winetricks mfc140"
+   ],
+   "settings": {
+    "args": [
+     "+r_renderAPI",
+     "1"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-379720"
+   ],
+   "title": "DOOM (2016)",
+   "version": 1
+  },
+  {
+   "id": "pf-39190",
+   "match": [
+    {
+     "steamAppId": 39190
+    },
+    {
+     "gogId": 1185868626
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args",
+    "Vynecháno (WinPad to neumí stejně): winetricks directplay"
+   ],
+   "settings": {
+    "args": [
+     "Zonematch=true"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-39190"
+   ],
+   "title": "Dungeon Siege",
+   "version": 1
+  },
+  {
+   "id": "pf-3932890",
+   "match": [
+    {
+     "steamAppId": 3932890
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system, winetricks dotnet48"
+   ],
+   "settings": {
+    "args": [
+     "--disable-software-rasterizer"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-3932890"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-3950020",
+   "match": [
+    {
+     "steamAppId": 3950020
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "dcomp": ""
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-3950020"
+   ],
+   "title": "Duet Night Abyss",
+   "version": 1
+  },
+  {
+   "id": "pf-39510",
+   "match": [
+    {
+     "steamAppId": 39510
+    },
+    {
+     "gogId": 1207658718
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): util.set_resolution, util.winedll_override, winetricks directmusic"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-39510"
+   ],
+   "title": "Gothic 2 Gold Edition",
+   "version": 1
+  },
+  {
+   "id": "pf-40800",
+   "match": [
+    {
+     "steamAppId": 40800
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "xact"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-40800"
+   ],
+   "title": "Super Meat Boy",
+   "version": 1
+  },
+  {
+   "id": "pf-409710",
+   "match": [
+    {
+     "steamAppId": 409710
+    },
+    {
+     "gogId": 1439656515
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry"
+   ],
+   "settings": {
+    "registry": {
+     "HKLM\\System\\CurrentControlSet\\Services\\winebus": {
+      "DisableHidraw": 1
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-409710"
+   ],
+   "title": "BioShock Remastered",
+   "version": 1
+  },
+  {
+   "id": "pf-409720",
+   "match": [
+    {
+     "steamAppId": 409720
+    },
+    {
+     "gogId": 1482265668
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry"
+   ],
+   "settings": {
+    "registry": {
+     "HKLM\\System\\CurrentControlSet\\Services\\winebus": {
+      "DisableHidraw": 1
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-409720"
+   ],
+   "title": "BioShock 2 Remastered",
+   "version": 1
+  },
+  {
+   "id": "pf-424840",
+   "match": [
+    {
+     "steamAppId": 424840
+    },
+    {
+     "gogId": 1433377508
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-onethread"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-424840"
+   ],
+   "title": "Little Nightmares",
+   "version": 1
+  },
+  {
+   "id": "pf-428660",
+   "match": [
+    {
+     "steamAppId": 428660
+    },
+    {
+     "gogId": 1395742506
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe"
+   ],
+   "settings": {
+    "exe": "MoonMan/Binaries/Win64/MoonMan-Win64-Shipping.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-428660"
+   ],
+   "title": "Deliver Us The Moon",
+   "version": 1
+  },
+  {
+   "id": "pf-42890",
+   "match": [
+    {
+     "steamAppId": 42890
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_42",
+     "d3dx9_31",
+     "d3dx9_42"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-42890"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-43110",
+   "match": [
+    {
+     "steamAppId": 43110
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_42"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-43110"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-431930",
+   "match": [
+    {
+     "steamAppId": 431930
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env"
+   ],
+   "settings": {
+    "env": {
+     "OPENSSL_ia32cap": ":~0x20000000"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-431930"
+   ],
+   "title": "Kabounce",
+   "version": 1
+  },
+  {
+   "id": "pf-440900",
+   "match": [
+    {
+     "steamAppId": 440900
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args",
+    "Vynecháno (WinPad to neumí stejně): util.replace_command"
+   ],
+   "settings": {
+    "args": [
+     "-BattlEye"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-440900"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-447040",
+   "match": [
+    {
+     "steamAppId": 447040
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-eac_launcher",
+     "-nosplash"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-447040"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-465280",
+   "match": [
+    {
+     "steamAppId": 465280
+    },
+    {
+     "gogId": 1576683029
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): windowsVersion"
+   ],
+   "settings": {
+    "windowsVersion": "win7"
+   },
+   "sources": [
+    "umu-protonfixes umu-465280"
+   ],
+   "title": "Yesterday Origins",
+   "version": 1
+  },
+  {
+   "id": "pf-4730",
+   "match": [
+    {
+     "steamAppId": 4730
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dx9"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-4730"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-48190",
+   "match": [
+    {
+     "steamAppId": 48190
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "-playoffline"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-48190"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-49520",
+   "match": [
+    {
+     "steamAppId": 49520
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, exe",
+    "Vynecháno (WinPad to neumí stejně): winetricks physx"
+   ],
+   "settings": {
+    "args": [
+     "-NoSplash"
+    ],
+    "exe": "Borderlands2.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-49520"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-495420",
+   "match": [
+    {
+     "steamAppId": 495420
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): windowsVersion",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "windowsVersion": "win7"
+   },
+   "sources": [
+    "umu-protonfixes umu-495420"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-497360",
+   "match": [
+    {
+     "steamAppId": 497360
+    },
+    {
+     "gogId": 1207658843
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry",
+    "Vynecháno (WinPad to neumí stejně): code that depends on the game's files or the system, util.create_dos_device, util.regedit_add"
+   ],
+   "settings": {
+    "registry": {
+     "HKCU\\Software\\Sierra On-Line\\Gabriel Knight 3\\App": {
+      "Run Count": 1
+     },
+     "HKCU\\Software\\Sierra On-Line\\Gabriel Knight 3\\Engine": {
+      "Full Screen": 1,
+      "Monitor": 0,
+      "Rasterizer": "detect",
+      "Rasterizer GUID": "{00000000-0000-0000-0000-000000000000}",
+      "Screen Height": 768
+     },
+     "HKCU\\Software\\Sierra On-Line\\Gabriel Knight 3\\Engine\\Hardware": {
+      "Gamma": "1.5",
+      "Surface Quality": "High"
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-497360"
+   ],
+   "title": "Gabriel Knight 3: Blood of the Sacred, Blood of the Damned",
+   "version": 1
+  },
+  {
+   "id": "pf-50620",
+   "match": [
+    {
+     "steamAppId": 50620
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_46, winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_42",
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-50620"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-506510",
+   "match": [
+    {
+     "steamAppId": 506510
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "dcomp": ""
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-506510"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-559620",
+   "match": [
+    {
+     "steamAppId": 559620
+    },
+    {
+     "gogId": 1425302464
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "winmm": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-559620"
+   ],
+   "title": "Outlaws + A Handful of Missions",
+   "version": 1
+  },
+  {
+   "id": "pf-593600",
+   "match": [
+    {
+     "steamAppId": 593600
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "mprapi": "n"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-593600"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-63110",
+   "match": [
+    {
+     "steamAppId": 63110
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, env, exe"
+   ],
+   "settings": {
+    "args": [
+     "AlterEgo.ebr"
+    ],
+    "env": {
+     "SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS": "0"
+    },
+    "exe": "./RunDev.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-63110"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-633230",
+   "match": [
+    {
+     "steamAppId": 633230
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, exe",
+    "Vynecháno (WinPad to neumí stejně): winetricks hidewineexports=enable"
+   ],
+   "settings": {
+    "args": [
+     "-eac-nop-loaded"
+    ],
+    "exe": "NARUTO/Binaries/Win64/NARUTO-Win64-Shipping.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-633230"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-63700",
+   "match": [
+    {
+     "steamAppId": 63700
+    },
+    {
+     "gogId": 1460735408
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43",
+     "d3dx9_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-63700"
+   ],
+   "title": "BIT.TRIP BEAT",
+   "version": 1
+  },
+  {
+   "id": "pf-63710",
+   "match": [
+    {
+     "steamAppId": 63710
+    },
+    {
+     "gogId": 1460734409
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides, nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks openal"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "d3dcompiler_43": "n",
+     "d3dx9_43": "n"
+    },
+    "nativeDirectX": [
+     "d3dcompiler_43",
+     "d3dx9_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-63710"
+   ],
+   "title": "BIT.TRIP Runner",
+   "version": 1
+  },
+  {
+   "id": "pf-65540",
+   "match": [
+    {
+     "steamAppId": 65540
+    },
+    {
+     "gogId": 1207658682
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): util.set_resolution, util.winedll_override, winetricks directmusic"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "ddraw": "n,b",
+     "dinput": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-65540"
+   ],
+   "title": "Gothic",
+   "version": 1
+  },
+  {
+   "id": "pf-658150",
+   "match": [
+    {
+     "steamAppId": 658150
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-658150"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-678950",
+   "match": [
+    {
+     "steamAppId": 678950
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, exe",
+    "Vynecháno (WinPad to neumí stejně): winetricks hidewineexports=enable"
+   ],
+   "settings": {
+    "args": [
+     "-eac-nop-loaded"
+    ],
+    "exe": "RED/Binaries/Win64/RED-Win64-Shipping.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-678950"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-70400",
+   "match": [
+    {
+     "steamAppId": 70400
+    },
+    {
+     "gogId": 1441875624
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): winetricks dmime, winetricks dmloader, winetricks dmsynth, winetricks dmusic, winetricks dsound, winetricks dswave, winetricks sound=alsa"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "streamci": "n"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-70400"
+   ],
+   "title": "Recettear: An Item Shop's Tale",
+   "version": 1
+  },
+  {
+   "id": "pf-70420",
+   "match": [
+    {
+     "steamAppId": 70420
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): winetricks dmime, winetricks dmloader, winetricks dmsynth, winetricks dmusic, winetricks dsound, winetricks dswave, winetricks sound=alsa"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "streamci": "n"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-70420"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-729040",
+   "match": [
+    {
+     "steamAppId": 729040
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe"
+   ],
+   "settings": {
+    "exe": "BorderlandsGOTY.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-729040"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-7510",
+   "match": [
+    {
+     "steamAppId": 7510
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): exe"
+   ],
+   "settings": {
+    "exe": "xblades.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-7510"
+   ],
+   "title": "X-Blades",
+   "version": 1
+  },
+  {
+   "id": "pf-7670",
+   "match": [
+    {
+     "steamAppId": 7670
+    },
+    {
+     "gogId": 2022341186
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry"
+   ],
+   "settings": {
+    "registry": {
+     "HKLM\\System\\CurrentControlSet\\Services\\winebus": {
+      "DisableHidraw": 1
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-7670"
+   ],
+   "title": "BioShock",
+   "version": 1
+  },
+  {
+   "id": "pf-782330",
+   "match": [
+    {
+     "steamAppId": 782330
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args"
+   ],
+   "settings": {
+    "args": [
+     "+com_skipSignInManager",
+     "1"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-782330"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-816020",
+   "match": [
+    {
+     "steamAppId": 816020
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, exe",
+    "Vynecháno (WinPad to neumí stejně): winetricks hidewineexports=enable"
+   ],
+   "settings": {
+    "args": [
+     "-eac-nop-loaded"
+    ],
+    "exe": "JUMP_FORCE/Binaries/Win64/JUMP_FORCE-Win64-Shipping.exe"
+   },
+   "sources": [
+    "umu-protonfixes umu-816020"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-8190",
+   "match": [
+    {
+     "steamAppId": 8190
+    },
+    {
+     "gogId": 1833855510
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): args, nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "args": [
+     "-borderless"
+    ],
+    "nativeDirectX": [
+     "d3dcompiler_43",
+     "d3dx10"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-8190"
+   ],
+   "title": "Just Cause 2 - Complete Edition",
+   "version": 1
+  },
+  {
+   "id": "pf-8850",
+   "match": [
+    {
+     "steamAppId": 8850
+    },
+    {
+     "gogId": 1806891286
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): registry"
+   ],
+   "settings": {
+    "registry": {
+     "HKLM\\System\\CurrentControlSet\\Services\\winebus": {
+      "DisableHidraw": 1
+     }
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-8850"
+   ],
+   "title": "BioShock 2",
+   "version": 1
+  },
+  {
+   "id": "pf-893180",
+   "match": [
+    {
+     "steamAppId": 893180
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): nativeDirectX",
+    "Vynecháno (WinPad to neumí stejně): winetricks d3dcompiler_47"
+   ],
+   "settings": {
+    "nativeDirectX": [
+     "d3dcompiler_43"
+    ]
+   },
+   "sources": [
+    "umu-protonfixes umu-893180"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-9060",
+   "match": [
+    {
+     "gogId": 1798886022
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "winmm": "n,b"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-9060"
+   ],
+   "title": "Hexen II",
+   "version": 1
+  },
+  {
+   "id": "pf-959880",
+   "match": [
+    {
+     "steamAppId": 959880
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): env",
+    "Vynecháno (WinPad to neumí stejně): util.regedit_add"
+   ],
+   "settings": {
+    "env": {
+     "LC_ALL": "C.UTF-8"
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-959880"
+   ],
+   "version": 1
+  },
+  {
+   "id": "pf-968370",
+   "match": [
+    {
+     "steamAppId": 968370
+    },
+    {
+     "gogId": 1726178326
+    }
+   ],
+   "notes": [
+    "Z umu-protonfixes (Proton): dllOverrides",
+    "Vynecháno (WinPad to neumí stejně): winetricks segoe_script"
+   ],
+   "settings": {
+    "dllOverrides": {
+     "d3d9": ""
+    }
+   },
+   "sources": [
+    "umu-protonfixes umu-968370"
+   ],
+   "title": "The Blind Prophet",
+   "version": 1
+  }
+ ]
+}

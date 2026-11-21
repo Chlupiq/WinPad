@@ -93,6 +93,52 @@ class DetectTest(unittest.TestCase):
             f.write("40990\n")
         self.assertEqual(profiles.detect(g)[0]["id"], "mafia")
 
+    def test_protonfixes_by_gog_id(self):
+        # Kingdoms of Amalur: Re-Reckoning, Steam 1041720, GOG 1077045575 (umu-database).
+        g = self.game("Amalur.exe")
+        with open(os.path.join(g, "goggame-1077045575.info"), "w") as f:
+            json.dump({"gameId": "1077045575"}, f)
+        prof = profiles.detect(g)[0]
+        self.assertEqual(prof["id"], "pf-1041720")
+        self.assertIn("d3dcompiler_43", prof["settings"]["nativeDirectX"])
+
+    def test_own_profile_wins_over_protonfixes(self):
+        g = self.game("whatever.exe")
+        with open(os.path.join(g, "steam_appid.txt"), "w") as f:
+            f.write("40990\n")
+        self.assertEqual(profiles.detect(g)[0]["id"], "mafia")
+
+
+class ImportProtonfixesTest(unittest.TestCase):
+    def test_converts_what_winpad_can_do(self):
+        spec = __import__("importlib.util").util.spec_from_file_location(
+            "import_protonfixes", os.path.join(here, "..", "import-protonfixes.py"))
+        mod = __import__("importlib.util").util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        s, left = mod.convert(r'''
+from protonfixes import util
+def main() -> None:
+    """A game."""
+    util.protontricks('d3dx9_43')
+    util.protontricks('win7')
+    util.protontricks('vcrun2019')
+    util.winedll_override('xaudio2_7', util.OverrideOrder.NATIVE_BUILTIN)
+    util.set_environment('DXVK_ASYNC', '1')
+    util.set_environment('GAME_MODE', 'x')
+    util.append_argument('-nointro -windowed')
+    util.replace_command('Launcher.exe', 'Bin/Game.exe')
+    util.regedit_add('HKCU\\Software\\Game', 'Res', 'REG_DWORD', '0x10')
+    util.disable_esync()
+    if util.get_game_install_path():
+        util.append_argument('-x')
+''')
+        self.assertEqual(s, {"nativeDirectX": ["d3dx9_43"], "windowsVersion": "win7",
+                             "dllOverrides": {"xaudio2_7": "n,b"}, "env": {"GAME_MODE": "x"},
+                             "args": ["-nointro", "-windowed"], "exe": "Bin/Game.exe",
+                             "registry": {"HKCU\\Software\\Game": {"Res": 16}}})
+        self.assertIn("winetricks vcrun2019", left)
+        self.assertEqual(profiles.check({"id": "pf-1", "version": 1, "match": [{"steamAppId": 1}], "settings": s}), [])
+
 
 class ApplyTest(unittest.TestCase):
     def setUp(self):

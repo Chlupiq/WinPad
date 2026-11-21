@@ -22,6 +22,10 @@ BOOL WinPadDirectXProvides(NSString* dll);
 // The DLL the last game run stopped on because no file of it was there (Wine's "Library X
 // (which is needed by ...) not found" in wine.log or wine.log.crashed), or nil.
 NSString* _Nullable WinPadMissingDLLOfLastRun(void);
+// The program the last game run tried to start as a second process that could not start
+// (a 32-bit child on iPad: "[Wine child] BOOT FAILED at stage 'guest-window-reserve'"), the
+// file name from its NtCreateUserProcess line (Setup.exe, SafeDisc's ~e5.0001...), or nil.
+NSString* _Nullable WinPadFailedChildOfLastRun(void);
 
 // Before a game runs: the DLLs that EXE (and the DLLs and .asi plugins next to it) import that
 // no one has: not the game's (its folder or EXE's folder), not Wine's (the app's
@@ -40,5 +44,13 @@ void WinPadDirectXDownload(void (^progress)(double fraction), void (^done)(NSStr
 // (BUNDLE_I386 is the app's i386-windows) and returns the module names to load native
 // first (d3dx9_30...) for WINEDLLOVERRIDES.
 NSArray<NSString*>* WinPadDirectXLink(NSString* syswow64, NSString* bundleI386);
+
+// A game profile's "nativeDirectX" (Proton's winetricks verbs: d3dx9, d3dx9_43, xact,
+// d3dcompiler_43, xinput, or DLL names): the downloaded DLLs they stand for, lowercase
+// names (d3dx9_43.dll...), empty when DirectX is not downloaded or has none of them.
+NSArray<NSString*>* WinPadDirectXDLLsForVerbs(NSArray* verbs);
+// For main.m, a game that wants DLLS (WinPadDirectXDLLsForVerbs) of Microsoft even where Wine
+// has its own: links them into SYSWOW64 and returns their module names, to load native first.
+NSArray<NSString*>* WinPadDirectXLinkNative(NSString* syswow64, NSArray<NSString*>* dlls);
 
 NS_ASSUME_NONNULL_END

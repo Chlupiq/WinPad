@@ -10,7 +10,11 @@ A profile (data/profiles/<id>.json) says how to recognise the game and what it n
 A game matches when any of its "match" rules does: "exe" is a file of the game folder
 (any case, may have a folder in it), every one of "files" is there too, and "steamAppId"
 is the folder's Steam app (steam_appid.txt in it, or the steamapps/appmanifest_<id>.acf
-whose installdir it is). The rule's exe becomes the game's program.
+whose installdir it is), and "gogId" its GOG game (a goggame-<id>.info in it). The rule's exe
+becomes the game's program.
+
+data/protonfixes.json ({"profiles": [...]}, made by import-protonfixes.py from Proton's
+umu-protonfixes) has more, matched by Steam or GOG id only; the ones in data/profiles win.
 
 The profile goes into winpad.json under the one key "profile", which this tool alone
 writes: {"id", "version", "title", "notes", "settings"}. Everything else in winpad.json is
@@ -35,6 +39,11 @@ Settings keys (the app's):
   touchMouse          "direct" (the default: a finger points and holds the left button),
                       "trackpad" (a finger moves the mouse by as much, a tap clicks) or "off"
   mouseSpeed          how far the mouse goes for a move (1 as it came, up to 10)
+  nativeDirectX       ["d3dx9_43", "xact", ...]: Microsoft's DirectX DLLs (Proton's winetricks
+                      verbs, or DLL names) the app downloads and loads native first, even where
+                      Wine has its own
+  windowsVersion      "winxp", "win7", "win10" ...: the Windows version Wine reports to the
+                      game's program (AppDefaults\\PROGRAM.exe\\Version)
 """
 import json
 import os
@@ -43,9 +52,11 @@ import re
 from . import paths
 
 PROFILES_DIR = os.path.join(paths.DATA, "profiles")
+PROTONFIXES = os.path.join(paths.DATA, "protonfixes.json")
+WINDOWS_VERSIONS = ("win95", "win98", "win2k", "winxp", "vista", "win7", "win8", "win81", "win10", "win11")
 WINPAD_JSON = "winpad.json"
 SETTINGS_KEYS = ("title", "exe", "args", "dllOverrides", "env", "registry", "folders",
-                 "padKeys", "padMouse", "touchMouse", "mouseSpeed")
+                 "padKeys", "padMouse", "touchMouse", "mouseSpeed", "nativeDirectX", "windowsVersion")
 PAD_INPUTS = ("up", "down", "left", "right", "a", "b", "x", "y", "l1", "r1", "l2", "r2", "menu", "options",
               "rup", "rdown", "rleft", "rright", "lup", "ldown", "lleft", "lright")
 DICT_KEYS = ("dllOverrides", "env", "registry", "padKeys")
@@ -56,8 +67,8 @@ class ProfileError(Exception):
     pass
 
 
-def load_all(folder=PROFILES_DIR):
-    """The profiles, by id."""
+def load_all(folder=PROFILES_DIR, extra=PROTONFIXES):
+    """The profiles, by id: FOLDER's, then EXTRA's (a {"profiles": [...]} file) after them."""
     profiles = {}
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
         if not name.endswith(".json"):
@@ -68,6 +79,13 @@ def load_all(folder=PROFILES_DIR):
         if problems:
             raise ProfileError(f"{name}: " + "; ".join(problems))
         profiles[prof["id"]] = prof
+    if extra and os.path.exists(extra):
+        with open(extra, encoding="utf-8") as f:
+            for prof in json.load(f).get("profiles", []):
+                problems = check(prof)
+                if problems:
+                    raise ProfileError(f"{os.path.basename(extra)} {prof.get('id')}: " + "; ".join(problems))
+                profiles.setdefault(prof["id"], prof)
     return profiles
 
 
@@ -83,9 +101,9 @@ def check(prof):
         out.append("match must be a list of rules")
     else:
         for rule in rules:
-            if not isinstance(rule, dict) or not ({"exe", "steamAppId"} & set(rule)):
-                out.append(f"match rule {rule!r} needs exe or steamAppId")
-            elif set(rule) - {"exe", "files", "steamAppId"}:
+            if not isinstance(rule, dict) or not ({"exe", "steamAppId", "gogId"} & set(rule)):
+                out.append(f"match rule {rule!r} needs exe, steamAppId or gogId")
+            elif set(rule) - {"exe", "files", "steamAppId", "gogId"}:
                 out.append(f"match rule {rule!r} has unknown keys")
     out += check_settings(prof.get("settings", {}))
     return out
@@ -117,6 +135,11 @@ def check_settings(s):
     if "mouseSpeed" in s and not (isinstance(s["mouseSpeed"], (int, float)) and not isinstance(s["mouseSpeed"], bool)
                                   and 0 < s["mouseSpeed"] <= 10):
         out.append("mouseSpeed must be a number above 0, at most 10")
+    if "nativeDirectX" in s and not (isinstance(s["nativeDirectX"], list) and all(
+            isinstance(v, str) and re.fullmatch(r"[a-z0-9_.]+", v) for v in s["nativeDirectX"])):
+        out.append("nativeDirectX must be a list of lower-case DLL names or winetricks verbs")
+    if "windowsVersion" in s and s["windowsVersion"] not in WINDOWS_VERSIONS:
+        out.append("windowsVersion must be one of " + ", ".join(WINDOWS_VERSIONS))
     for key in ("dllOverrides", "env"):
         if key in s and not (isinstance(s[key], dict) and all(isinstance(v, str) for v in s[key].values())):
             out.append(f"{key} must map names to texts")
@@ -176,12 +199,31 @@ def steam_app_ids(game_dir):
     return ids
 
 
-def match(prof, game_dir, files=None, steam_ids=None):
+def gog_ids(game_dir):
+    """The GOG game ids GAME_DIR is: its goggame-<id>.info files (the name's number, and gameId)."""
+    ids = set()
+    for name in os.listdir(game_dir) if os.path.isdir(game_dir) else []:
+        m = re.fullmatch(r"goggame-(\d+)\.info", name, re.IGNORECASE)
+        if not m:
+            continue
+        ids.add(int(m.group(1)))
+        try:
+            with open(os.path.join(game_dir, name), encoding="utf-8-sig", errors="replace") as f:
+                ids.add(int(json.load(f).get("gameId")))
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    return ids
+
+
+def match(prof, game_dir, files=None, steam_ids=None, gogs=None):
     """(True, program relative to GAME_DIR or None) when PROF is the game in GAME_DIR."""
     files = _files_ci(game_dir) if files is None else files
     steam_ids = steam_app_ids(game_dir) if steam_ids is None else steam_ids
+    gogs = gog_ids(game_dir) if gogs is None else gogs
     for rule in prof["match"]:
         if "steamAppId" in rule and rule["steamAppId"] not in steam_ids:
+            continue
+        if "gogId" in rule and rule["gogId"] not in gogs:
             continue
         exe = None
         if "exe" in rule:
@@ -207,9 +249,9 @@ def rule_exe(prof, files):
 def detect(game_dir, profiles=None):
     """The profile of the game in GAME_DIR and its program: (profile, exe) or (None, None)."""
     profiles = load_all() if profiles is None else profiles
-    files, steam_ids = _files_ci(game_dir), steam_app_ids(game_dir)
+    files, steam_ids, gogs = _files_ci(game_dir), steam_app_ids(game_dir), gog_ids(game_dir)
     for prof in profiles.values():
-        ok, exe = match(prof, game_dir, files, steam_ids)
+        ok, exe = match(prof, game_dir, files, steam_ids, gogs)
         if ok:
             return prof, exe or rule_exe(prof, files)
     return None, None
