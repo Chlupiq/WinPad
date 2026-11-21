@@ -1037,11 +1037,36 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
 #pragma mark - Signing in
 
 // GOG's login page; DONE with nil once signed in, else why not (nil, nil: closed).
-@interface WinPadGOGLoginViewController : UIViewController <WKNavigationDelegate>
+// Google's and Facebook's sign-in open as pop-ups (window.open), shown over the page; Google
+// refuses a page that says it is an embedded web view, so it says it is Safari. Where it still
+// refuses, "Přes Safari" signs in in Safari and takes the address GOG ends on, pasted back.
+@interface WinPadGOGLoginViewController : UIViewController <WKNavigationDelegate, WKUIDelegate>
 @property(nonatomic, copy) void (^done)(NSString* error);
 @property(nonatomic, strong) WKWebView* web;
+@property(nonatomic, strong) NSMutableArray<WKWebView*>* popups;
 @property(nonatomic) BOOL exchanging;
 @end
+
+static NSString* const SafariAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                                     @"Version/18.0 Safari/605.1.15";
+
+static NSURL* LoginURL(void) {
+  return [NSURL URLWithString:[NSString stringWithFormat:@"https://auth.gog.com/auth?client_id=%@&redirect_uri=%@&response_type=code&layout=client2",
+                                                         ClientId, Escaped(RedirectURI)]];
+}
+
+// The login code in TEXT: an on_login_success address (?code=...), or the code itself.
+static NSString* LoginCode(NSString* text) {
+  text = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (!text.length) return nil;
+  NSURLComponents* c = [NSURLComponents componentsWithString:text];
+  if (c.queryItems) {
+    for (NSURLQueryItem* item in c.queryItems)
+      if ([item.name isEqualToString:@"code"] && item.value.length) return item.value;
+    return nil;
+  }
+  return [text rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@" /:?&"]].location == NSNotFound ? text : nil;
+}
 
 @implementation WinPadGOGLoginViewController
 
@@ -1049,35 +1074,104 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
   [super viewDidLoad];
   self.title = @"Přihlášení ke GOG";
   self.view.backgroundColor = UIColor.systemBackgroundColor;
+  self.popups = [NSMutableArray new];
   self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemCancel
                                                                                         target:self
                                                                                         action:@selector(close)];
-  self.web = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:[WKWebViewConfiguration new]];
-  self.web.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-  self.web.navigationDelegate = self;
+  self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Přes Safari"
+                                                                            style:UIBarButtonItemStylePlain
+                                                                           target:self
+                                                                           action:@selector(viaSafari)];
+  WKWebViewConfiguration* config = [WKWebViewConfiguration new];
+  config.preferences.javaScriptCanOpenWindowsAutomatically = YES;
+  self.web = [self webViewWith:config];
   [self.view addSubview:self.web];
-  NSString* url = [NSString stringWithFormat:@"https://auth.gog.com/auth?client_id=%@&redirect_uri=%@&response_type=code&layout=client2",
-                                             ClientId, Escaped(RedirectURI)];
-  [self.web loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:url]]];
+  [self.web loadRequest:[NSURLRequest requestWithURL:LoginURL()]];
+}
+
+- (WKWebView*)webViewWith:(WKWebViewConfiguration*)config {
+  WKWebView* web = [[WKWebView alloc] initWithFrame:self.view.bounds configuration:config];
+  web.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  web.customUserAgent = SafariAgent;
+  web.navigationDelegate = self;
+  web.UIDelegate = self;
+  return web;
 }
 
 - (void)close {
   [self dismissViewControllerAnimated:YES completion:nil];
 }
 
-- (void)webView:(WKWebView*)webView
-    decidePolicyForNavigationAction:(WKNavigationAction*)action
-                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
-  NSURLComponents* c = [NSURLComponents componentsWithURL:action.request.URL resolvingAgainstBaseURL:NO];
-  if (![c.host isEqualToString:@"embed.gog.com"] || ![c.path isEqualToString:@"/on_login_success"]) {
-    decisionHandler(WKNavigationActionPolicyAllow);
-    return;
-  }
-  decisionHandler(WKNavigationActionPolicyCancel);
-  NSString* code = nil;
-  for (NSURLQueryItem* item in c.queryItems)
-    if ([item.name isEqualToString:@"code"]) code = item.value;
-  if (!code.length || self.exchanging) return;
+// A pop-up the page opens (Google's sign-in): over the page until it closes itself.
+- (WKWebView*)webView:(WKWebView*)webView
+    createWebViewWithConfiguration:(WKWebViewConfiguration*)configuration
+               forNavigationAction:(WKNavigationAction*)action
+                    windowFeatures:(WKWindowFeatures*)features {
+  WKWebView* popup = [self webViewWith:configuration];
+  [self.view addSubview:popup];
+  [self.popups addObject:popup];
+  return popup;
+}
+
+- (void)webViewDidClose:(WKWebView*)webView {
+  if (webView == self.web) return;
+  [webView removeFromSuperview];
+  [self.popups removeObject:webView];
+}
+
+- (void)viaSafari {
+  [UIApplication.sharedApplication openURL:LoginURL() options:@{} completionHandler:nil];
+  UIAlertController* ask = [UIAlertController
+      alertControllerWithTitle:@"Přihlášení přes Safari"
+                       message:@"V Safari se přihlas ke GOG (i přes Google). Skončíš na prázdné stránce embed.gog.com. Zkopíruj její adresu "
+                               @"(podrž adresní řádek › Kopírovat), vrať se sem a vlož ji."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [ask addTextFieldWithConfigurationHandler:^(UITextField* field) {
+    field.placeholder = @"https://embed.gog.com/on_login_success?…";
+    field.keyboardType = UIKeyboardTypeURL;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+  }];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  __weak WinPadGOGLoginViewController* weak = self;
+  __weak UIAlertController* weak_ask = ask;
+  [ask addAction:[UIAlertAction actionWithTitle:@"Přihlásit"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* a) {
+                                          NSString* text = weak_ask.textFields.firstObject.text;
+                                          if (!text.length && UIPasteboard.generalPasteboard.hasStrings) text = UIPasteboard.generalPasteboard.string;
+                                          NSString* code = LoginCode(text);
+                                          if (code) {
+                                            [weak exchange:code];
+                                            return;
+                                          }
+                                          UIAlertController* bad = [UIAlertController
+                                              alertControllerWithTitle:@"V adrese není přihlašovací kód"
+                                                               message:@"Zkopíruj celou adresu stránky, na které přihlášení v Safari skončilo "
+                                                                       @"(obsahuje code=)."
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+                                          [bad addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                                          [weak presentViewController:bad animated:YES completion:nil];
+                                        }]];
+  // Back from Safari: the alert is waiting, with the copied address already in it when it is one.
+  [self presentViewController:ask
+                     animated:YES
+                   completion:^{
+                     __block id observer = [NSNotificationCenter.defaultCenter
+                         addObserverForName:UIApplicationDidBecomeActiveNotification
+                                     object:nil
+                                      queue:NSOperationQueue.mainQueue
+                                 usingBlock:^(NSNotification* note) {
+                                   [NSNotificationCenter.defaultCenter removeObserver:observer];
+                                   UITextField* field = weak_ask.textFields.firstObject;
+                                   NSString* pasted = UIPasteboard.generalPasteboard.hasStrings ? UIPasteboard.generalPasteboard.string : nil;
+                                   if (field && !field.text.length && [pasted containsString:@"on_login_success"]) field.text = pasted;
+                                 }];
+                   }];
+}
+
+- (void)exchange:(NSString*)code {
+  if (self.exchanging) return;
   self.exchanging = YES;
   __weak WinPadGOGLoginViewController* weak = self;
   ExchangeCode(code, ^(NSString* token, NSString* error) {
@@ -1089,6 +1183,19 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
                              if (done) done(error);
                            }];
   });
+}
+
+- (void)webView:(WKWebView*)webView
+    decidePolicyForNavigationAction:(WKNavigationAction*)action
+                    decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
+  NSURLComponents* c = [NSURLComponents componentsWithURL:action.request.URL resolvingAgainstBaseURL:NO];
+  if (![c.host isEqualToString:@"embed.gog.com"] || ![c.path isEqualToString:@"/on_login_success"]) {
+    decisionHandler(WKNavigationActionPolicyAllow);
+    return;
+  }
+  decisionHandler(WKNavigationActionPolicyCancel);
+  NSString* code = LoginCode(action.request.URL.absoluteString);
+  if (code) [self exchange:code];
 }
 
 @end
