@@ -19,6 +19,9 @@
 # still run when the host stops (=running,N: either of the two); WINEHOST_SECONDS (default 30) is how
 # long the host waits for the program.
 set -eu
+# The log holds raw bytes (an ARM64EC module's section names in Madeira's ntdll
+# messages): sed, grep and awk must read it as bytes, not as UTF-8.
+export LC_ALL=C
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
