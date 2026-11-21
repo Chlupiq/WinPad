@@ -137,6 +137,19 @@ a jen mění barvu okna. Obě běží s JITem (z Xcode / se StikDebugem).
 Hry s DirectX 10/11 z knihovny používají tytéž DLL, není potřeba nic
 zapínat.
 
+## OpenGL (schéma „WinPadWine OpenGL“)
+
+`gl-triangle.exe` je 32bitový OpenGL program jako hry s enginem Quake III:
+vybere pixel format, vytvoří kontext přes `wglCreateContext` a kreslí
+texturovaný čtverec z pole vrcholů a trojúhelník přes `glBegin`/`glEnd`.
+Cesta: Wine `opengl32.dll` → jeho unixová strana → win32u přes EGL →
+EGL od WinPadu (`tests/opengl/winpad_egl.m`) → gl4es (desktopové OpenGL
+1.x/2.x na OpenGL ES) → OpenGL ES od Applu. Snímek se po každém
+`SwapBuffers` přečte zpět a do okna jde jako obyčejná GDI kresba, takže je
+to zatím pomalejší cesta než DXMT. Hry s OpenGL z knihovny používají totéž,
+není potřeba nic zapínat. Zatím jen OpenGL do verze 2.1 (bez core profilu)
+a bez `glMapBuffer` pro 32bitové programy.
+
 ## Hra (schéma „WinPadWine Game“)
 
 S DXMT má projekt i schéma `WinPadWine Game` pro hru, kterou si do

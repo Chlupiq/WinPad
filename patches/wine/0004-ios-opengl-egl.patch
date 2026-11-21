@@ -1,0 +1,201 @@
+From: WinPad
+Subject: [PATCH] win32u: OpenGL through WinPad's EGL on iOS.
+
+Wine's EGL path (egl_init, egldrv_*) is what win32u uses on iOS, where the
+display driver has no OpenGL of its own. Two changes, both under WINE_IOS:
+
+- egl_init takes EGL from the host (winpad_egl_get_proc_address, from
+  tests/opengl/winpad_egl.m) instead of dlopen'ing a libEGL.
+- A window's surface is not Wine's framebuffer emulation (framebuffer_surface,
+  whose swap shows nothing) but an EGL window surface of that EGL, which
+  draws into a framebuffer of its own and reads the frame back at
+  eglSwapBuffers. Its client surface is "offscreen", so win32u hands it a DC
+  at present, and the frame goes into the window with GDI
+  (NtGdiSetDIBitsToDeviceInternal), through the window surface the host shows
+  anyway. The client area's size reaches the EGL at creation and whenever the
+  window changes (GL_FLUSH_UPDATED).
+
+Applies to Madeira's wine at 257f271 (dlls/win32u/opengl.c); compiled with
+SONAME_LIBEGL defined (tests/wine-loader/build-win32u.sh).
+---
+--- a/dlls/win32u/opengl.c
++++ b/dlls/win32u/opengl.c
+@@ -180,6 +180,10 @@
+ 
+ #ifdef SONAME_LIBEGL
+ 
++#ifdef WINE_IOS
++extern void *winpad_egl_get_proc_address( const char *name );
++#endif
++
+ struct framebuffer_surface
+ {
+     struct opengl_drawable base;
+@@ -656,6 +660,121 @@
+     return "";
+ }
+ 
++#ifdef WINE_IOS
++
++/* WinPad: a window's GL surface on iOS. EGL (winpad_egl.m) renders it into
++ * a framebuffer of its own and reads it back at eglSwapBuffers; the frame then
++ * goes into the window with GDI, through the window surface the host already
++ * shows. A client surface that is "offscreen" gets a DC for that at present. */
++struct ios_gl_client
++{
++    struct client_surface client;
++    EGLSurface surface;
++};
++
++static void ios_gl_client_destroy( struct client_surface *client )
++{
++}
++
++static void ios_gl_client_detach( struct client_surface *client )
++{
++}
++
++static void ios_gl_client_update( struct client_surface *client )
++{
++}
++
++static void ios_gl_client_present( struct client_surface *client, HDC hdc )
++{
++    struct ios_gl_client *gl = CONTAINING_RECORD( client, struct ios_gl_client, client );
++    const void *(*get_pixels)( EGLSurface, int *, int * ) = winpad_egl_get_proc_address( "winpadEGLSurfacePixels" );
++    char buffer[FIELD_OFFSET( BITMAPINFO, bmiColors[3] )];
++    BITMAPINFO *info = (BITMAPINFO *)buffer;
++    const void *bits;
++    int width, height;
++
++    if (!hdc || !gl->surface || !get_pixels || !(bits = get_pixels( gl->surface, &width, &height ))) return;
++    memset( buffer, 0, sizeof(buffer) );
++    info->bmiHeader.biSize = sizeof(info->bmiHeader);
++    info->bmiHeader.biWidth = width;
++    info->bmiHeader.biHeight = height; /* bottom-up rows, as glReadPixels reads them */
++    info->bmiHeader.biPlanes = 1;
++    info->bmiHeader.biBitCount = 32;
++    info->bmiHeader.biCompression = BI_RGB;
++    NtGdiSetDIBitsToDeviceInternal( hdc, 0, 0, width, height, 0, 0, 0, height, bits, info,
++                                    DIB_RGB_COLORS, 0, 0, FALSE, NULL );
++}
++
++static const struct client_surface_funcs ios_gl_client_funcs =
++{
++    .destroy = ios_gl_client_destroy,
++    .detach = ios_gl_client_detach,
++    .update = ios_gl_client_update,
++    .present = ios_gl_client_present,
++};
++
++static void ios_gl_drawable_resize( struct opengl_drawable *drawable )
++{
++    void (*resize)( EGLSurface, int, int ) = winpad_egl_get_proc_address( "winpadEGLSurfaceResize" );
++    RECT rect;
++
++    if (!drawable->client || !drawable->client->hwnd || !resize) return;
++    NtUserGetClientRect( drawable->client->hwnd, &rect, NtUserGetDpiForWindow( drawable->client->hwnd ) );
++    TRACE( "%s resized to %dx%d\n", debugstr_opengl_drawable( drawable ), (int)rect.right, (int)rect.bottom );
++    resize( drawable->surface, max( rect.right, 1 ), max( rect.bottom, 1 ) );
++}
++
++static void ios_gl_drawable_destroy( struct opengl_drawable *drawable )
++{
++    if (drawable->client) CONTAINING_RECORD( drawable->client, struct ios_gl_client, client )->surface = NULL;
++    if (drawable->surface) display_funcs.p_eglDestroySurface( display_egl.display, drawable->surface );
++}
++
++static void ios_gl_drawable_flush( struct opengl_drawable *drawable, UINT flags )
++{
++    if (flags & GL_FLUSH_UPDATED) ios_gl_drawable_resize( drawable );
++}
++
++static BOOL ios_gl_drawable_swap( struct opengl_drawable *drawable )
++{
++    if (!display_funcs.p_eglSwapBuffers( display_egl.display, drawable->surface )) return FALSE;
++    client_surface_present( drawable->client );
++    return TRUE;
++}
++
++static const struct opengl_drawable_funcs ios_gl_drawable_funcs =
++{
++    .destroy = ios_gl_drawable_destroy,
++    .flush = ios_gl_drawable_flush,
++    .swap = ios_gl_drawable_swap,
++};
++
++static BOOL egldrv_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
++{
++    struct ios_gl_client *client;
++    struct opengl_drawable *gl;
++
++    if (!(client = client_surface_create( sizeof(*client), &ios_gl_client_funcs, hwnd ))) return FALSE;
++    client->client.offscreen = 1;
++    gl = opengl_drawable_create( sizeof(*gl), &ios_gl_drawable_funcs, format, &client->client );
++    client_surface_release( &client->client );
++    if (!gl) return FALSE;
++
++    gl->surface = display_funcs.p_eglCreateWindowSurface( display_egl.display, egl_config_for_format( &display_egl, format ),
++                                                         (EGLNativeWindowType)hwnd, NULL );
++    if (!gl->surface)
++    {
++        opengl_drawable_release( gl );
++        return FALSE;
++    }
++    client->surface = gl->surface;
++    ios_gl_drawable_resize( gl );
++    *drawable = gl;
++    return TRUE;
++}
++
++#else
++
+ static BOOL egldrv_surface_create( HWND hwnd, int format, struct opengl_drawable **drawable )
+ {
+     struct client_surface *client;
+@@ -667,6 +786,8 @@
+     return !!*drawable;
+ }
+ 
++#endif /* WINE_IOS */
++
+ static BOOL egldrv_pbuffer_create( HDC hdc, int format, BOOL largest, GLenum texture_format, GLenum texture_target,
+                                    GLint max_level, GLsizei *width, GLsizei *height, struct opengl_drawable **drawable )
+ {
+@@ -877,6 +998,18 @@
+     struct opengl_funcs *funcs = &display_funcs;
+     const char *extensions;
+ 
++#ifdef WINE_IOS
++    /* WinPad: EGL is linked into the host (tests/opengl/winpad_egl.m), there is
++     * nothing to dlopen. A host without it has a stub that returns NULL. */
++    funcs->egl_handle = (void *)winpad_egl_get_proc_address;
++    if (!(funcs->p_eglGetProcAddress = winpad_egl_get_proc_address( "eglGetProcAddress" )) ||
++        !(funcs->p_eglQueryString = funcs->p_eglGetProcAddress( "eglQueryString" )))
++    {
++        WARN( "No EGL in this host, no OpenGL\n" );
++        funcs->egl_handle = NULL;
++        return FALSE;
++    }
++#else
+     if (!(funcs->egl_handle = dlopen( SONAME_LIBEGL, RTLD_NOW | RTLD_GLOBAL )))
+     {
+         ERR( "Failed to load %s: %s\n", SONAME_LIBEGL, dlerror() );
+@@ -892,6 +1025,7 @@
+     LOAD_FUNCPTR( eglGetProcAddress );
+     LOAD_FUNCPTR( eglQueryString );
+ #undef LOAD_FUNCPTR
++#endif
+ 
+     if (!(extensions = funcs->p_eglQueryString( EGL_NO_DISPLAY, EGL_EXTENSIONS )))
+     {
+@@ -924,7 +1058,9 @@
+     return TRUE;
+ 
+ failed:
++#ifndef WINE_IOS
+     dlclose( funcs->egl_handle );
++#endif
+     funcs->egl_handle = NULL;
+     return FALSE;
+ }
