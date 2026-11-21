@@ -51,6 +51,7 @@
 #import "Library.h"
 
 #import "Covers.h"
+#import "GOG.h"
 #import "Package.h"
 #import "WinPadJIT.h"
 #import "WinPadRedist.h"
@@ -2201,6 +2202,8 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 @property(nonatomic) NSInteger focus;
 @property(nonatomic, strong) WinPadBackdrop* backdrop;
 @property(nonatomic, strong) UIButton* settings;
+// GOG: the account's games, installed straight into Documents (GOG.m).
+@property(nonatomic, strong) UIButton* gog;
 @property(nonatomic, strong) UILabel* clock;
 // Is the JIT on: a tap opens the guide to turning it on (WinPadJITGuideViewController).
 @property(nonatomic, strong) UIButton* jitBadge;
@@ -2254,6 +2257,8 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 - (void)ask64BitFor:(WinPadGame*)game program:(NSString*)program;
 - (void)askToStartWithout:(NSString*)text start:(void (^)(void))start cancel:(void (^)(void))cancel;
 - (void)openSettings;
+- (void)openGOG;
+- (void)gogInstalled:(NSNotification*)note;
 - (void)attach:(GCController*)controller;
 - (void)readPad:(GCExtendedGamepad*)pad;
 - (void)installNext;
@@ -2295,6 +2300,18 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.settings.accessibilityLabel = @"Nastavení";
   [self.settings addTarget:self action:@selector(openSettings) forControlEvents:UIControlEventTouchUpInside];
   [self.view addSubview:self.settings];
+
+  self.gog = [UIButton buttonWithType:UIButtonTypeSystem];
+  [self.gog setImage:[UIImage systemImageNamed:@"bag"] forState:UIControlStateNormal];
+  self.gog.tintColor = UIColor.whiteColor;
+  self.gog.backgroundColor = [UIColor colorWithWhite:1 alpha:0.12];
+  self.gog.accessibilityLabel = @"Hry z GOG";
+  [self.gog addTarget:self action:@selector(openGOG) forControlEvents:UIControlEventTouchUpInside];
+  [self.view addSubview:self.gog];
+  [NSNotificationCenter.defaultCenter addObserver:self
+                                         selector:@selector(gogInstalled:)
+                                             name:WinPadGOGInstalledNotification
+                                           object:nil];
 
   self.jitBadge = [UIButton buttonWithConfiguration:[UIButtonConfiguration filledButtonConfiguration] primaryAction:nil];
   [self.jitBadge addTarget:self action:@selector(openJITGuide) forControlEvents:UIControlEventTouchUpInside];
@@ -2435,6 +2452,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                           [weak showFocus];
                                                                         }]];
   for (GCController* pad in GCController.controllers) [self attach:pad];
+  // CI: GOG against a local copy of its servers, in Documents/gog.txt (build-xcode.sh).
+  const long long gog_test = [[NSUserDefaults.standardUserDefaults stringForKey:@"gogTest"] longLongValue];
+  if (gog_test > 0) WinPadGOGTest(gog_test);
   // CI: what the cover sources find for a title, in Documents/covers.txt (build-xcode.sh).
   NSString* cover_test = [NSUserDefaults.standardUserDefaults stringForKey:@"coverTest"];
   if (cover_test.length) {
@@ -2730,7 +2750,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.settings.frame = CGRectMake(m, top, button, button);
   self.settings.layer.cornerRadius = button / 2;
   [self.jitBadge sizeToFit];
-  self.jitBadge.frame = CGRectMake(m + button + 12, top, MAX(self.jitBadge.bounds.size.width, 120), button);
+  self.gog.frame = CGRectMake(m + button + 12, top, button, button);
+  self.gog.layer.cornerRadius = button / 2;
+  self.jitBadge.frame = CGRectMake(m + 2 * (button + 12), top, MAX(self.jitBadge.bounds.size.width, 120), button);
   self.clock.font = [UIFont systemFontOfSize:compact ? 18 : 26 weight:UIFontWeightLight];
   self.clock.frame = CGRectMake(m + w - 200, top, 200, button);
 
@@ -3353,6 +3375,20 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     else
       show();
   });
+}
+
+- (void)openGOG {
+  if (self.presentedViewController || self.started) return;
+  UINavigationController* nav = [[UINavigationController alloc] initWithRootViewController:[WinPadGOGViewController new]];
+  nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  nav.modalPresentationStyle = UIModalPresentationFormSheet;
+  [self presentViewController:nav animated:YES completion:nil];
+}
+
+// A game came from GOG (GOG.m): the library shows it, focused.
+- (void)gogInstalled:(NSNotification*)note {
+  [self reload];
+  if ([note.object isKindOfClass:NSString.class]) [self focusFolder:note.object];
 }
 
 - (void)openSettings {
