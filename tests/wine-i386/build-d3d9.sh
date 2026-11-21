@@ -16,6 +16,15 @@
 # Wine's (with d3dcompiler_43 and d3dxof, which it imports). d3d8-cube.c is
 # the D3D8 cube.
 #
+# Direct3D 10 and 11 come from the same DXMT build: its dxgi.dll, d3d11.dll
+# and d3d10core.dll, which reach Metal through the same winemetal.dll. Wine's
+# own d3d10.dll and d3d10_1.dll (D3D10CreateDevice*, effects, reflection)
+# hand their devices to DXMT's d3d10core.dll; Wine's D3DX10, D3DX11, D2D1 and
+# d3dcompiler_47 (D3DCompile, which games of that time also call) are built
+# for them. Wine's own DXGI and D3D11 are not: they draw through wined3d's
+# OpenGL or Vulkan, which iOS has not. d3d11-triangle.c is the D3D11 test
+# (also built as d3d10-triangle.exe, through D3D10).
+#
 # The Wine modules a 32-bit program with a window needs come first, built
 # with build.sh: user32 and what it imports, and ucrtbase, which DXMT's DLLs
 # import through api-ms-win-crt-*.
@@ -40,10 +49,14 @@ D3D8TO9=255338f698c8270b537f0a91a13f795f4f988250
 # there before (modules and programs other steps built) is put back. So is
 # hello.exe as it was: FEX's code caches and the AOT image of the runs
 # before are for that file, and a relinked one differs (its time stamp).
+# Wine's Direct3D 10 modules and the D3DX/D2D1 ones that import them (build.sh
+# leaves them out, as nothing it builds has DXGI or Direct3D 10/11).
+d3d10_wine="d3d10 d3d10_1 d3dcompiler_47 d2d1 d3dx11_42 d3dx11_43 d3dx10_33 d3dx10_34 d3dx10_35 \
+    d3dx10_36 d3dx10_37 d3dx10_38 d3dx10_39 d3dx10_40 d3dx10_41 d3dx10_42 d3dx10_43"
 keep=$(mktemp -d)
 [ ! -d "$out" ] || cp -R "$out/." "$keep/"
 sh "$here/build.sh" "$work" ntdll kernelbase kernel32 user32 gdi32 win32u advapi32 sechost \
-    msvcrt ucrtbase imm32 dbghelp d3dx9_43 d3dcompiler_43 d3dxof
+    msvcrt ucrtbase imm32 dbghelp d3dx9_43 d3dcompiler_43 d3dxof $d3d10_wine
 for f in "$keep"/*; do
     [ -e "$f" ] || continue
     n=${f##*/}
@@ -51,6 +64,10 @@ for f in "$keep"/*; do
     cp -R "$f" "$out/$n"
 done
 rm -rf "$keep"
+# Without their debug information, like build.sh's other extra modules.
+for m in $d3d10_wine; do
+    llvm-strip --strip-debug "$out/$m.dll"
+done
 
 # What DXMT's meson build takes from the Wine tree (src/winemetal/meson.build).
 targets=
@@ -108,6 +125,10 @@ p="$d/build-pe-i386/src"
 "$tc/i686-w64-mingw32-strip" -o "$out/d3d9.dll" "$p/d3d9shim/d3d9shim.dll"
 "$tc/i686-w64-mingw32-strip" -o "$out/d3d9shim.dll" "$p/d3d9shim/d3d9shim.dll"
 "$tc/i686-w64-mingw32-strip" -o "$out/d3d9-emulated.dll" "$p/d3d9/d3d9.dll"
+# Direct3D 10/11 and DXGI.
+"$tc/i686-w64-mingw32-strip" -o "$out/dxgi.dll" "$p/dxgi/dxgi.dll"
+"$tc/i686-w64-mingw32-strip" -o "$out/d3d11.dll" "$p/d3d11/d3d11.dll"
+"$tc/i686-w64-mingw32-strip" -o "$out/d3d10core.dll" "$p/d3d10/d3d10core.dll"
 
 # d3d8to9, linked with its C++ runtime (no libc++.dll in the set); Release
 # builds of it log nothing (D3D8TO9NOLOG).
@@ -132,16 +153,26 @@ cp "$d8/LICENSE.md" "$out/d3d8to9-LICENSE.md"
     -Wl,--entry=_start -Wl,--large-address-aware \
     -DWINPAD_D3D8_SECONDS="${D3D9_CUBE_SECONDS:-8}" \
     -o "$out/d3d8-cube.exe" "$here/d3d8-cube.c" -lkernel32 -luser32 -ld3d8
+# The D3D11 triangle and its D3D10 twin, the same way; D3D11_TRIANGLE_SECONDS
+# of wall-clock time, then exit 43.
+for v in 11 10; do
+    "$tc/i686-w64-mingw32-clang" -O2 -g -nostdlib -ffreestanding \
+        -static-libgcc -Wno-unused-command-line-argument \
+        -Wl,--entry=_start -Wl,--large-address-aware \
+        -DWINPAD_D3D11_SECONDS="${D3D11_TRIANGLE_SECONDS:-8}" -DWINPAD_D3D10=$((v == 10)) \
+        -o "$out/d3d$v-triangle.exe" "$here/d3d11-triangle.c" -lkernel32 -luser32 -ld3d$v -ldxguid
+done
 # MinGW's import libraries name USER32.dll and GDI32.dll, which Wine does not
 # find in these runs; see lowercase-imports.py.
 python3 -I "$here/lowercase-imports.py" "$out/winemetal.dll" "$out/d3d9.dll" "$out/d3d9shim.dll" \
-    "$out/d3d9-emulated.dll" "$out/d3d9-cube.exe" "$out/d3d8.dll" "$out/d3d8-cube.exe"
+    "$out/d3d9-emulated.dll" "$out/d3d9-cube.exe" "$out/d3d8.dll" "$out/d3d8-cube.exe" \
+    "$out/dxgi.dll" "$out/d3d11.dll" "$out/d3d10core.dll" "$out/d3d11-triangle.exe" "$out/d3d10-triangle.exe"
 
 # Every DLL a module imports has to be there (api-ms-win-* resolve through
 # the API set schema, to ucrtbase).
 missing=0
 present=$(ls "$out" | tr 'A-Z' 'a-z')
-for f in "$out"/*.dll "$out"/d3d9-cube.exe "$out"/d3d8-cube.exe; do
+for f in "$out"/*.dll "$out"/d3d9-cube.exe "$out"/d3d8-cube.exe "$out"/d3d1?-triangle.exe; do
     imports=$("$tc/llvm-objdump" -p "$f" | sed -n 's/^ *DLL Name: //p' | tr 'A-Z' 'a-z' | sort -u)
     echo "${f##*/}:" $imports
     for i in $imports; do

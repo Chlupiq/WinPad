@@ -117,6 +117,16 @@ takže potřebuje připojený debugger: spouštěj ho z Xcode, ne z plochy.
 Na simulátoru kostka nedoběhne: jeho Metal nemá argument buffery tier 2
 (Metal 3), na kterých DXMT kreslí.
 
+## Direct3D 11 a 10 (schémata „WinPadWine D3D11“ a „WinPadWine D3D10“)
+
+Stejně jako kostka, jen přes Direct3D 11: `d3d11-triangle.exe` vytvoří
+zařízení a swap chain (DXMT `d3d11.dll` a `dxgi.dll`), přeloží shadery
+přes Wine `d3dcompiler_47` a 8 sekund kreslí otáčející se trojúhelník.
+`d3d10-triangle.exe` jde přes Wine `d3d10.dll` do DXMT `d3d10core.dll`
+a jen mění barvu okna. Obě běží s JITem (z Xcode / se StikDebugem).
+Hry s DirectX 10/11 z knihovny používají tytéž DLL, není potřeba nic
+zapínat.
+
 ## Hra (schéma „WinPadWine Game“)
 
 S DXMT má projekt i schéma `WinPadWine Game` pro hru, kterou si do

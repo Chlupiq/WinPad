@@ -19,6 +19,8 @@
 				<string>hello.exe (text)</string>
 				<string>window.exe (Win32 window)</string>
 				<string>D3D9 cube (JIT, from Xcode)</string>
+				<string>D3D11 triangle (JIT, from Xcode)</string>
+				<string>D3D10 clear (JIT, from Xcode)</string>
 				<string>Game (JIT, from Xcode)</string>
 			</array>
 			<key>Values</key>
@@ -27,6 +29,8 @@
 				<string>hello</string>
 				<string>window</string>
 				<string>d3d9-cube</string>
+				<string>d3d11-triangle</string>
+				<string>d3d10-triangle</string>
 				<string>game</string>
 			</array>
 		</dict>
