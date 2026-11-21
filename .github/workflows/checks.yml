@@ -917,6 +917,36 @@ jobs:
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d10-triangle.exe" || status=$?
           grep -E 'WINPAD-D3D10|err:' "$RUNNER_TEMP/wine-loader/host-d3d10-triangle/run.log" | head -60 || true
           exit $status
+      # 64-bit x86 programs: an ARM64EC session with Madeira's arm64ec-windows modules,
+      # the x86-64 code run by FEX's ARM64EC module (xtajit64.dll) with the JIT.
+      - name: A 64-bit x86 program runs in Wine through ARM64EC and FEX on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "Hello from x86_64 PE under ARM64EC + FEX on iOS!"
+          # Madeira's hello-x64.exe ends with exit code 42 (0x2a) on purpose.
+          WINEHOST_EXPECT_EXIT: 42
+          WINEHOST_SECONDS: 40
+          WINEHOST_EXPECT_LOG: |
+            winehost: 64-bit x86 program, running it through ARM64EC and FEX
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/hello-x64.exe" || status=$?
+          grep -iE 'xtajit64|arm64ec|err:|ntdll' "$RUNNER_TEMP/wine-loader/host-hello-x64/run.log" | head -80 || true
+          exit $status
+      - name: A 64-bit Direct3D 11 program (Madeira's cube) creates its device and presents through DXMT and Metal, through ARM64EC and FEX on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "winehost: drawable 1 of Metal layer"
+          WINEHOST_EXPECT_EXIT: "running,0"
+          WINEHOST_SECONDS: 40
+          WINEHOST_EXPECT_LOG: |
+            winehost: 64-bit x86 program, running it through ARM64EC and FEX
+            winehost: Metal layer
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/cube-x64.exe" || status=$?
+          grep -iE '\[cube\]|d3d11|dxgi|err:' "$RUNNER_TEMP/wine-loader/host-cube-x64/run.log" | head -80 || true
+          exit $status
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}

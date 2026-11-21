@@ -75,6 +75,20 @@ if [ -n "$sim_window_aot" ]; then
     cp "$sim_window_aot" "$proj/Frameworks/iphonesimulator/fexaot-window.dylib"
 fi
 cp -R "$work/i386-windows" "$proj/wine/"
+# Madeira's ARM64EC Wine modules, for 64-bit x86 programs (main.m MakePrefix): plain PE
+# files, the same for both platforms, loaded into the JIT pool. Of its test programs only
+# hello-x64.exe and the Direct3D 11 cube-x64.exe come along.
+ec="$work/madeira/app/Madeira/arm64ec-windows"
+if [ -f "$ec/ntdll.dll" ]; then
+    mkdir -p "$proj/wine/arm64ec-windows"
+    for f in "$ec"/*; do
+        case ${f##*/} in
+            hello-x64.exe | cube-x64.exe) ;;
+            *-x64.exe | *-x64.dll) continue ;;
+        esac
+        cp "$f" "$proj/wine/arm64ec-windows/"
+    done
+fi
 mkdir -p "$proj/wine/nls" "$proj/wine/fonts"
 cp "$work"/madeira/wine/nls/*.nls "$proj/wine/nls/"
 # The registry each launch's prefix starts from (main.m's MakePrefix).
@@ -159,6 +173,11 @@ build() {
         test -f "$product/$f" || { echo "the $1 build lacks $f" >&2; exit 1; }
     done
     test -f "$product/Settings.bundle/Root.plist" || { echo "the $1 build lacks its Settings.bundle" >&2; exit 1; }
+    if [ -d "$proj/wine/arm64ec-windows" ]; then
+        for f in ntdll.dll xtajit64.dll kernel32.dll d3d11.dll dxgi.dll winemetal.dll hello-x64.exe; do
+            test -f "$product/arm64ec-windows/$f" || { echo "the $1 build lacks arm64ec-windows/$f" >&2; exit 1; }
+        done
+    fi
     test -f "$product/profiles/mafia.json" || { echo "the $1 build lacks the game profiles" >&2; exit 1; }
     test -f "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" ||
         { echo "the $1 build lacks the JIT helper extension" >&2; exit 1; }
