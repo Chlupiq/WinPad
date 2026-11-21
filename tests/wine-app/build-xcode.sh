@@ -426,15 +426,18 @@ grep -q '^cover button: visible' "$docs/covers.txt" ||
 # GOG (GOG.m) against a local copy of its servers (gog-fixture.py): sign in with a code, the
 # account's Windows games, and a game installed from its depots' chunks into Documents: the
 # English depot and not the German one, the owned DLC and not the other, the 32-bit depot and
-# not the 64-bit one, small files out of their container, no support files.
+# not the 64-bit one, small files out of their container, no support files; and a generation 1
+# game, whose files are ranges of one main.bin.
 gog_dir=$(mktemp -d)
 gog_port=18765
 python3 -I "$here/gog-fixture.py" "$gog_dir/www" "$gog_port" "$sim_app/i386-windows/hello.exe"
-python3 -I -m http.server "$gog_port" --bind 127.0.0.1 --directory "$gog_dir/www" >"$gog_dir/server.log" 2>&1 &
+python3 -I "$here/gog-fixture.py" --serve "$gog_dir/www" "$gog_port" >"$gog_dir/server.log" 2>&1 &
 gog_server=$!
 sleep 1
-rm -rf "$docs/gog.txt" "$docs/WinPad GOG Test" "$docs/.gog"
-xcrun simctl launch "$udid" "$bundle" -gogTest 1207658999 -gogAPIBase "http://127.0.0.1:$gog_port" -coverAuto NO >/dev/null
+rm -rf "$docs/gog.txt" "$docs/WinPad GOG Test" "$docs/WinPad GOG Old" "$docs/.gog"
+# The second game is GOG's generation 1 (ranges of one main.bin), fetched in parts of 1000 bytes.
+xcrun simctl launch "$udid" "$bundle" -gogTest 1207658999,1207650001 -gogV1Part 1000 \
+    -gogAPIBase "http://127.0.0.1:$gog_port" -coverAuto NO >/dev/null
 for _ in $(seq 90); do
     grep -q '== finished' "$docs/gog.txt" 2>/dev/null && break
     sleep 1
@@ -451,8 +454,10 @@ done <"$gog_dir/www/expected.txt"
 while IFS= read -r unexpected; do
     ! grep -qF "$unexpected" "$docs/gog.txt" || { echo "the GOG install has what it should not: $unexpected" >&2; exit 1; }
 done <"$gog_dir/www/unexpected.txt"
-[ ! -e "$docs/.gog/1207658999" ] || { echo "the GOG install left its download folder behind" >&2; exit 1; }
-rm -rf "$docs/WinPad GOG Test" "$gog_dir"
+[ ! -e "$docs/.gog/1207658999" ] && [ ! -e "$docs/.gog/1207650001" ] ||
+    { echo "the GOG install left its download folder behind" >&2; exit 1; }
+grep -q '" 206 ' "$gog_dir/server.log" || { echo "generation 1 was not fetched with Range requests" >&2; exit 1; }
+rm -rf "$docs/WinPad GOG Test" "$docs/WinPad GOG Old" "$gog_dir"
 
 # The same on an iPhone, which runs the library on its side and smaller: Obal must be on the
 # screen there too, with a game that has code maps (Obal beside the export, the tightest).

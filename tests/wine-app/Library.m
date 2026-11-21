@@ -2453,8 +2453,8 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                         }]];
   for (GCController* pad in GCController.controllers) [self attach:pad];
   // CI: GOG against a local copy of its servers, in Documents/gog.txt (build-xcode.sh).
-  const long long gog_test = [[NSUserDefaults.standardUserDefaults stringForKey:@"gogTest"] longLongValue];
-  if (gog_test > 0) WinPadGOGTest(gog_test);
+  NSString* gog_test = [NSUserDefaults.standardUserDefaults stringForKey:@"gogTest"];
+  if (gog_test.length) WinPadGOGTest(gog_test);
   // CI: what the cover sources find for a title, in Documents/covers.txt (build-xcode.sh).
   NSString* cover_test = [NSUserDefaults.standardUserDefaults stringForKey:@"coverTest"];
   if (cover_test.length) {

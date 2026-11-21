@@ -58,13 +58,21 @@ static NSURLSession* Session(void) {
 
 // Gets URL (with TOKEN as the bearer, if any). DONE gets the body, or why not with the HTTP
 // status (0 when the server was not reached). Runs on the session's queue.
+static void FetchRange(NSURL* url, NSString* token, NSString* range, void (^done)(NSData* data, NSString* error, NSInteger status));
+
 static void Fetch(NSURL* url, NSString* token, void (^done)(NSData* data, NSString* error, NSInteger status)) {
+  FetchRange(url, token, nil, done);
+}
+
+// The same with a Range header (RANGE: "bytes=START-END"), for generation 1's main.bin.
+static void FetchRange(NSURL* url, NSString* token, NSString* range, void (^done)(NSData* data, NSString* error, NSInteger status)) {
   if (!url) {
     done(nil, @"špatná adresa", 0);
     return;
   }
   NSMutableURLRequest* r = [NSMutableURLRequest requestWithURL:url];
   if (token) [r setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
+  if (range) [r setValue:range forHTTPHeaderField:@"Range"];
   [[Session() dataTaskWithRequest:r
                 completionHandler:^(NSData* data, NSURLResponse* response, NSError* error) {
                   const NSInteger status =
@@ -365,6 +373,9 @@ NSString* WinPadGOGInstalledFolder(long long productId) {
 @property(nonatomic, strong) GOGFile* container;            // with sfcRef: the depot's container
 @property(nonatomic) long long sfcOffset;
 @property(nonatomic) BOOL isContainer;
+// Generation 1: its bytes are a range of RANGENAME (main.bin) in the build's depot; its MD5.
+@property(nonatomic, copy) NSString* rangeName;
+@property(nonatomic, copy) NSString* md5;
 @property(nonatomic) NSInteger pending;  // chunks not yet written
 @property(nonatomic) int fd;
 @end
@@ -399,6 +410,8 @@ NSString* WinPadGOGInstalledFolder(long long productId) {
 @property(nonatomic, strong) dispatch_queue_t q;  // everything below
 @property(nonatomic, copy) NSString* token;
 @property(nonatomic, copy) NSString* buildId;
+@property(nonatomic) int generation;           // 2 (Galaxy's chunks) or 1 (ranges of main.bin)
+@property(nonatomic, copy) NSString* legacyBuildId;  // generation 1's build, in its paths
 @property(nonatomic, copy) NSString* staging;
 @property(nonatomic, strong) NSArray<GOGFile*>* files;
 @property(nonatomic, strong) NSArray<NSString*>* directories;
@@ -467,7 +480,7 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
   NSArray* langs = [depot[@"languages"] isKindOfClass:NSArray.class] ? depot[@"languages"] : @[];
   if (!langs.count) return YES;
   for (id l in langs)
-    if ([l isKindOfClass:NSString.class] && ([l isEqualToString:@"*"] || (language && [l caseInsensitiveCompare:language] == NSOrderedSame)))
+    if ([l isKindOfClass:NSString.class] && ([l isEqualToString:@"*"] || [l caseInsensitiveCompare:@"Neutral"] == NSOrderedSame || (language && [l caseInsensitiveCompare:language] == NSOrderedSame)))
       return YES;
   return NO;
 }
@@ -536,7 +549,11 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
 
 // The secure links (CDN addresses with a token) for PRODUCT's chunks, best first, or nil.
 - (NSArray*)secureLinksFor:(long long)product error:(NSString**)error {
-  NSURL* url = GOGURL(@"content-system.gog.com", [NSString stringWithFormat:@"/products/%lld/secure_link?_version=2&generation=2&path=/", product]);
+  NSURL* url = GOGURL(@"content-system.gog.com",
+                      self.generation == 1
+                          ? [NSString stringWithFormat:@"/products/%lld/secure_link?_version=2&type=depot&path=/windows/%@", product,
+                                                       self.legacyBuildId ?: @""]
+                          : [NSString stringWithFormat:@"/products/%lld/secure_link?_version=2&generation=2&path=/", product]);
   NSData* data = FetchSync(url, self.token, error, NULL);
   id j = JSONMaybeZlib(data);
   NSMutableArray* urls = [NSMutableArray new];
@@ -562,33 +579,46 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
   NSURL* builds_url = GOGURL(@"content-system.gog.com", [NSString stringWithFormat:@"/products/%lld/os/windows/builds?generation=2", pid]);
   id builds = JSONMaybeZlib(FetchSync(builds_url, token, &why, NULL));
   if (![builds isKindOfClass:NSDictionary.class]) return why ?: @"GOG neposlal seznam verzí hry.";
+  // The newest public build of generation 2, else of generation 1 (older games GOG never
+  // repacked for Galaxy: whole files in one main.bin per build).
   NSDictionary* build = nil;
-  BOOL old_only = NO;
+  NSDictionary* old = nil;
   for (NSDictionary* b in builds[@"items"]) {
     if (![b isKindOfClass:NSDictionary.class]) continue;
     const id branch = b[@"branch"];
     if (branch && branch != NSNull.null) continue;
-    if ([b[@"generation"] intValue] == 2) {
+    const int gen = [b[@"generation"] intValue];
+    if (gen == 2) {
       build = b;
       break;
     }
-    old_only = YES;
+    if (gen == 1 && !old) old = b;
   }
-  if (!build)
-    return old_only ? @"Tuhle hru má GOG jen ve starém formátu (generace 1), který WinPad zatím neumí stáhnout. Stáhni její offline instalátor na "
-                      @"počítači a nainstaluj ji přes WinPad Translator."
-                    : @"GOG pro tuhle hru nemá verzi pro Windows ke stažení.";
+  if (!build && !old) {
+    id builds1 = JSONMaybeZlib(FetchSync(
+        GOGURL(@"content-system.gog.com", [NSString stringWithFormat:@"/products/%lld/os/windows/builds?generation=1", pid]), token, NULL, NULL));
+    for (NSDictionary* b in [builds1 isKindOfClass:NSDictionary.class] ? builds1[@"items"] : nil)
+      if ([b isKindOfClass:NSDictionary.class] && (!b[@"branch"] || b[@"branch"] == NSNull.null)) {
+        old = b;
+        break;
+      }
+  }
+  if (!build && !old) return @"GOG pro tuhle hru nemá verzi pro Windows ke stažení.";
+
+  // The DLCs the account owns (their depots are in the base game's manifest).
+  NSMutableSet<NSNumber*>* owned = [NSMutableSet setWithObject:@(pid)];
+  id user = JSONMaybeZlib(FetchSync(GOGURL(@"embed.gog.com", @"/user/data/games"), token, NULL, NULL));
+  for (id o in [user isKindOfClass:NSDictionary.class] ? user[@"owned"] : nil)
+    if ([o respondsToSelector:@selector(longLongValue)]) [owned addObject:@([o longLongValue])];
+  if (!build) return [self planV1:old owned:owned];
+
+  self.generation = 2;
   self.buildId = Str(build[@"build_id"]) ?: @"";
   id manifest = JSONMaybeZlib(FetchSync([NSURL URLWithString:Str(build[@"link"]) ?: @""], nil, &why, NULL));
   if (![manifest isKindOfClass:NSDictionary.class]) return why ?: @"Manifest hry od GOG je poškozený.";
   const long long base = [manifest[@"baseProductId"] longLongValue] ?: pid;
+  [owned addObject:@(base)];
   self.folder = FolderName(Str(manifest[@"installDirectory"]), self.product.title);
-
-  // The DLCs the account owns (their depots are in the base game's manifest).
-  NSMutableSet<NSNumber*>* owned = [NSMutableSet setWithObjects:@(pid), @(base), nil];
-  id user = JSONMaybeZlib(FetchSync(GOGURL(@"embed.gog.com", @"/user/data/games"), token, NULL, NULL));
-  for (id o in [user isKindOfClass:NSDictionary.class] ? user[@"owned"] : nil)
-    if ([o respondsToSelector:@selector(longLongValue)]) [owned addObject:@([o longLongValue])];
 
   NSArray* depots = [manifest[@"depots"] isKindOfClass:NSArray.class] ? manifest[@"depots"] : @[];
   NSMutableOrderedSet* languages = [NSMutableOrderedSet new];
@@ -668,7 +698,101 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
     [products addObject:@(depot_product)];
   }
   if (!files.count) return @"V téhle hře GOG nenabízí žádné soubory pro Windows ve tvém jazyce.";
+  return [self use:order directories:dirs.array links:links products:products];
+}
 
+// Generation 1: the build's repository.json lists depots, a depot's manifest lists files, each
+// a range of the build's main.bin (fetched in parts, the file checked by its MD5 at the end).
+- (NSString*)planV1:(NSDictionary*)build owned:(NSMutableSet<NSNumber*>*)owned {
+  NSString* why = nil;
+  const long long pid = self.product.productId;
+  self.generation = 1;
+  self.legacyBuildId = Str(build[@"legacy_build_id"]) ?: Str(build[@"build_id"]) ?: @"";
+  self.buildId = [@"v1-" stringByAppendingString:self.legacyBuildId];
+  NSString* link = Str(build[@"link"]);
+  NSURL* repo_url = link.length ? [NSURL URLWithString:link]
+                                : GOGURL(@"cdn.gog.com", [NSString stringWithFormat:@"/content-system/v1/manifests/%lld/windows/%@/repository.json",
+                                                                                    pid, self.legacyBuildId]);
+  id repo = JSONMaybeZlib(FetchSync(repo_url, nil, &why, NULL));
+  NSDictionary* product = [repo isKindOfClass:NSDictionary.class] && [repo[@"product"] isKindOfClass:NSDictionary.class] ? repo[@"product"] : nil;
+  if (!product) return why ?: @"Manifest hry od GOG (generace 1) je poškozený.";
+  const long long base = [product[@"rootGameID"] longLongValue] ?: pid;
+  [owned addObject:@(base)];
+  self.folder = FolderName(Str(product[@"installDirectory"]), self.product.title);
+  NSArray* depots = [product[@"depots"] isKindOfClass:NSArray.class] ? product[@"depots"] : @[];
+  NSMutableOrderedSet* languages = [NSMutableOrderedSet new];
+  for (NSDictionary* d in depots) {
+    if (![d isKindOfClass:NSDictionary.class] || d[@"redist"]) continue;
+    for (id l in [d[@"languages"] isKindOfClass:NSArray.class] ? d[@"languages"] : @[])
+      if ([l isKindOfClass:NSString.class] && ![l isEqualToString:@"*"] && [l caseInsensitiveCompare:@"Neutral"] != NSOrderedSame)
+        [languages addObject:l];
+  }
+  self.language = PickLanguage(languages);
+  const long long part = MAX(1024LL, [[NSUserDefaults.standardUserDefaults objectForKey:@"gogV1Part"] longLongValue] ?: 4LL * 1024 * 1024);
+
+  NSMutableDictionary<NSString*, GOGFile*>* files = [NSMutableDictionary new];
+  NSMutableArray<GOGFile*>* order = [NSMutableArray new];
+  NSMutableOrderedSet<NSString*>* dirs = [NSMutableOrderedSet new];
+  NSMutableSet<NSNumber*>* products = [NSMutableSet new];
+  NSURL* dir = repo_url.URLByDeletingLastPathComponent;
+  for (NSDictionary* d in depots) {
+    if (![d isKindOfClass:NSDictionary.class] || d[@"redist"]) continue;  // redistributables' installers
+    NSArray* systems = [d[@"systems"] isKindOfClass:NSArray.class] ? d[@"systems"] : nil;
+    if (systems.count && ![systems containsObject:@"Windows"]) continue;
+    if (!DepotHasLanguage(d, self.language)) continue;
+    long long depot_product = 0;
+    for (id g in [d[@"gameIDs"] isKindOfClass:NSArray.class] ? d[@"gameIDs"] : @[ @(base) ])
+      if ([g respondsToSelector:@selector(longLongValue)] && [owned containsObject:@([g longLongValue])]) {
+        depot_product = [g longLongValue];
+        break;
+      }
+    if (!depot_product) continue;
+    NSString* name = Str(d[@"manifest"]);
+    if (!name.length || [name containsString:@"/"]) continue;
+    id meta = JSONMaybeZlib(FetchSync([dir URLByAppendingPathComponent:name], nil, &why, NULL));
+    NSDictionary* depot = [meta isKindOfClass:NSDictionary.class] && [meta[@"depot"] isKindOfClass:NSDictionary.class] ? meta[@"depot"] : nil;
+    if (!depot) return why ?: @"Seznam souborů hry od GOG (generace 1) je poškozený.";
+    for (NSDictionary* item in [depot[@"files"] isKindOfClass:NSArray.class] ? depot[@"files"] : @[]) {
+      if (![item isKindOfClass:NSDictionary.class]) continue;
+      NSString* path = SafePath(Str(item[@"path"]) ?: @"");
+      if (!path) continue;
+      if ([item[@"directory"] boolValue]) {
+        [dirs addObject:path];
+        continue;
+      }
+      if ([item[@"support"] boolValue]) continue;
+      GOGFile* f = [GOGFile new];
+      f.path = path;
+      f.size = [item[@"size"] longLongValue];
+      f.md5 = Str(item[@"hash"]);
+      // "url": "PRODUCT/main.bin", whose secure link the range comes by.
+      NSArray* url_parts = [Str(item[@"url"]) ?: @"" componentsSeparatedByString:@"/"];
+      f.productId = url_parts.count > 1 && [url_parts.firstObject longLongValue] > 0 ? [url_parts.firstObject longLongValue] : depot_product;
+      f.rangeName = url_parts.count && [url_parts.lastObject length] ? url_parts.lastObject : @"main.bin";
+      const long long offset = [item[@"offset"] longLongValue];
+      NSMutableArray* parts = [NSMutableArray new];
+      for (long long at = 0; at < f.size; at += part) {
+        const long long n = MIN(part, f.size - at);
+        [parts addObject:@{@"range" : @(offset + at), @"size" : @(n), @"compressedSize" : @(n)}];
+      }
+      f.chunks = parts;
+      NSString* key = path.lowercaseString;
+      if (files[key]) [order removeObjectIdenticalTo:files[key]];
+      files[key] = f;
+      [order addObject:f];
+      [products addObject:@(f.productId)];
+    }
+  }
+  if (!files.count) return @"V téhle hře GOG nenabízí žádné soubory pro Windows ve tvém jazyce.";
+  return [self use:order directories:dirs.array links:@{} products:products];
+}
+
+// The plan: secure links for each product, the sizes.
+- (NSString*)use:(NSArray<GOGFile*>*)order
+     directories:(NSArray<NSString*>*)dirs
+           links:(NSDictionary*)links
+        products:(NSSet<NSNumber*>*)products {
+  NSString* why = nil;
   self.endpoints = [NSMutableDictionary new];
   for (NSNumber* p in products) {
     NSArray* urls = [self secureLinksFor:p.longLongValue error:&why];
@@ -679,7 +803,7 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
 
   dispatch_sync(self.q, ^{
     self.files = order;
-    self.directories = dirs.array;
+    self.directories = dirs;
     self.links = links;
     long long install = 0, download = 0;
     NSInteger count = 0;
@@ -837,7 +961,8 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
   NSMutableDictionary* params = [e[@"parameters"] mutableCopy];
   NSString* path = Str(params[@"path"]) ?: @"";
   while ([path hasSuffix:@"/"]) path = [path substringToIndex:path.length - 1];
-  params[@"path"] = [NSString stringWithFormat:@"%@/%@", path, GalaxyPath(Str(job.chunk[@"compressedMd5"]) ?: @"")];
+  params[@"path"] = job.file.rangeName ? [NSString stringWithFormat:@"%@/%@", path, job.file.rangeName]
+                                       : [NSString stringWithFormat:@"%@/%@", path, GalaxyPath(Str(job.chunk[@"compressedMd5"]) ?: @"")];
   NSMutableString* url = [Str(e[@"url_format"]) mutableCopy];
   for (NSString* key in params) {
     NSString* value = Str(params[key]);
@@ -889,11 +1014,22 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
 
 - (void)fetch:(GOGJob*)job attempt:(int)attempt {
   NSURL* url = [self urlFor:job endpoint:(NSUInteger)attempt];
-  Fetch(url, nil, ^(NSData* data, NSString* error, NSInteger status) {
+  NSNumber* range = job.chunk[@"range"];
+  const long long range_size = [job.chunk[@"size"] longLongValue];
+  NSString* header = range ? [NSString stringWithFormat:@"bytes=%lld-%lld", range.longLongValue, range.longLongValue + range_size - 1] : nil;
+  FetchRange(url, nil, header, ^(NSData* data, NSString* error, NSInteger status) {
     // Inflating and checking off the install's queue; writing on it.
     NSString* why = error;
     NSData* plain = nil;
-    if (data) {
+    if (data && range) {
+      // A server that ignores Range sends the whole main.bin.
+      if (status == 200 && (long long)data.length >= range.longLongValue + range_size && (long long)data.length != range_size)
+        data = [data subdataWithRange:NSMakeRange((NSUInteger)range.longLongValue, (NSUInteger)range_size)];
+      if ((long long)data.length == range_size)
+        plain = data;
+      else
+        why = [NSString stringWithFormat:@"server poslal %lu bajtů místo %lld", (unsigned long)data.length, range_size];
+    } else if (data) {
       NSString* zmd5 = Str(job.chunk[@"compressedMd5"]);
       const long long size = [job.chunk[@"size"] longLongValue];
       if (zmd5.length && ![MD5Hex(data) isEqualToString:zmd5.lowercaseString])
@@ -942,6 +1078,16 @@ static BOOL DepotHasLanguage(NSDictionary* depot, NSString* language) {
         close(f.fd);
         f.fd = -1;
         NSString* full = [self.staging stringByAppendingPathComponent:f.path];
+        NSString* part = [full stringByAppendingString:@".winpad-part"];
+        if (f.md5.length && f.size <= 256LL * 1024 * 1024) {
+          NSData* whole = [NSData dataWithContentsOfFile:part options:NSDataReadingMappedIfSafe error:nil];
+          if (![MD5Hex(whole ?: [NSData data]) isEqualToString:f.md5.lowercaseString]) {
+            [self stopWith:[NSString stringWithFormat:@"Soubor %@ se stáhl poškozený (MD5 nesedí), zkus to znovu.", f.path]];
+            [self notify:NO];
+            [self pump];
+            return;
+          }
+        }
         [NSFileManager.defaultManager removeItemAtPath:full error:nil];
         if (rename([[full stringByAppendingString:@".winpad-part"] fileSystemRepresentation], full.fileSystemRepresentation) != 0) {
           [self stopWith:[NSString stringWithFormat:@"Soubor %@ nejde uložit (%s).", f.path, strerror(errno)]];
@@ -1534,7 +1680,56 @@ static NSString* Status(WinPadGOGInstall* install, long long productId) {
 
 #pragma mark - CI
 
-void WinPadGOGTest(long long productId) {
+// CI: installs GAMES[I...] one after another, says what each did, then FINISH.
+static void TestInstalls(NSArray<WinPadGOGProduct*>* games, NSUInteger i, NSMutableString* report, void (^finish)(void)) {
+  if (i >= games.count) {
+    finish();
+    return;
+  }
+  const long long productId = games[i].productId;
+  void (^next)(void) = ^{
+    TestInstalls(games, i + 1, report, finish);
+  };
+  WinPadGOGInstall* install = [WinPadGOGInstall installFor:games[i]];
+  __block BOOL planned = NO;
+  install.changed = ^(WinPadGOGInstall* inst) {
+    if (inst.state == WinPadGOGPlanned && !planned) {
+      planned = YES;
+      [report appendFormat:@"plan: %@ | language %@ | %ld files | install %lld | download %lld\n", inst.folder, inst.language,
+                           (long)inst.fileCount, inst.installSize, inst.downloadSize];
+      [inst start];
+    } else if (inst.state == WinPadGOGDone) {
+      inst.changed = nil;
+      [report appendFormat:@"installed: %@ | downloaded %lld\n", inst.folder, inst.downloaded];
+      NSString* dir = [Documents() stringByAppendingPathComponent:inst.folder];
+      NSDirectoryEnumerator* e = [NSFileManager.defaultManager enumeratorAtPath:dir];
+      NSMutableArray* lines = [NSMutableArray new];
+      for (NSString* rel in e) {
+        BOOL is_dir = NO;
+        [NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:rel] isDirectory:&is_dir];
+        if (is_dir) {
+          [lines addObject:[NSString stringWithFormat:@"dir: %@\n", rel]];
+          continue;
+        }
+        NSData* data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:rel]];
+        [lines addObject:[NSString stringWithFormat:@"file: %@ | %lu | %@\n", rel, (unsigned long)data.length, MD5Hex(data ?: [NSData data])]];
+      }
+      [lines sortUsingSelector:@selector(compare:)];
+      for (NSString* l in lines) [report appendString:l];
+      [report appendFormat:@"installed folder found: %@\n", WinPadGOGInstalledFolder(productId) ?: @"none"];
+      next();
+    } else if (inst.state == WinPadGOGFailed || inst.state == WinPadGOGCancelled) {
+      inst.changed = nil;
+      [report appendFormat:@"failed: %@ | %@\n", inst.folder ?: inst.product.title, inst.error ?: @"cancelled"];
+      next();
+    }
+  };
+}
+
+void WinPadGOGTest(NSString* productIds) {
+  NSMutableArray<NSNumber*>* wanted = [NSMutableArray new];
+  for (NSString* id_ in [productIds componentsSeparatedByString:@","])
+    if (id_.longLongValue > 0) [wanted addObject:@(id_.longLongValue)];
   NSMutableString* report = [NSMutableString new];
   NSString* path = [Documents() stringByAppendingPathComponent:@"gog.txt"];
   void (^write)(void) = ^{
@@ -1556,48 +1751,15 @@ void WinPadGOGTest(long long productId) {
     }
     WinPadGOGOwnedGames(^(NSArray<WinPadGOGProduct*>* games, NSString* error) {
       [report appendFormat:@"games: %lu%@\n", (unsigned long)games.count, error ? [@" " stringByAppendingString:error] : @""];
-      WinPadGOGProduct* pick = nil;
-      for (WinPadGOGProduct* g in games) {
+      NSMutableArray<WinPadGOGProduct*>* picks = [NSMutableArray new];
+      for (NSNumber* want in wanted)
+        for (WinPadGOGProduct* g in games)
+          if (g.productId == want.longLongValue) [picks addObject:g];
+      for (WinPadGOGProduct* g in games)
         [report appendFormat:@"game: %lld | %@ | %@\n", g.productId, g.title, g.imageURL.lastPathComponent ?: @"-"];
-        if (g.productId == productId) pick = g;
-      }
       write();
-      if (!pick) {
-        finish();
-        return;
-      }
-      WinPadGOGInstall* install = [WinPadGOGInstall installFor:pick];
-      __block BOOL planned = NO;
-      install.changed = ^(WinPadGOGInstall* i) {
-        if (i.state == WinPadGOGPlanned && !planned) {
-          planned = YES;
-          [report appendFormat:@"plan: %@ | language %@ | %ld files | install %lld | download %lld\n", i.folder, i.language,
-                               (long)i.fileCount, i.installSize, i.downloadSize];
-          [i start];
-        } else if (i.state == WinPadGOGDone) {
-          [report appendFormat:@"installed: %@ | downloaded %lld\n", i.folder, i.downloaded];
-          NSString* dir = [Documents() stringByAppendingPathComponent:i.folder];
-          NSDirectoryEnumerator* e = [NSFileManager.defaultManager enumeratorAtPath:dir];
-          NSMutableArray* lines = [NSMutableArray new];
-          for (NSString* rel in e) {
-            BOOL is_dir = NO;
-            [NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:rel] isDirectory:&is_dir];
-            if (is_dir) {
-              [lines addObject:[NSString stringWithFormat:@"dir: %@\n", rel]];
-              continue;
-            }
-            NSData* data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:rel]];
-            [lines addObject:[NSString stringWithFormat:@"file: %@ | %lu | %@\n", rel, (unsigned long)data.length, MD5Hex(data ?: [NSData data])]];
-          }
-          [lines sortUsingSelector:@selector(compare:)];
-          for (NSString* l in lines) [report appendString:l];
-          [report appendFormat:@"installed folder found: %@\n", WinPadGOGInstalledFolder(productId) ?: @"none"];
-          finish();
-        } else if (i.state == WinPadGOGFailed || i.state == WinPadGOGCancelled) {
-          [report appendFormat:@"failed: %@\n", i.error ?: @"cancelled"];
-          finish();
-        }
-      };
+      TestInstalls(picks, 0, report, finish);
     });
   });
 }
+

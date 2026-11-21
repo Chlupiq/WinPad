@@ -74,8 +74,9 @@ typedef NS_ENUM(NSInteger, WinPadGOGState) {
 @end
 
 // CI (build-xcode.sh, with the "gogAPIBase" setting pointing at a local copy of GOG's servers):
-// signs in with the code "test", lists the games, installs PRODUCT_ID and writes what happened
+// signs in with the code "test", lists the games, installs PRODUCT_IDS (comma-separated) one after
+// another and writes what happened
 // into Documents/gog.txt, ending with "== finished".
-void WinPadGOGTest(long long productId);
+void WinPadGOGTest(NSString* productIds);
 
 NS_ASSUME_NONNULL_END

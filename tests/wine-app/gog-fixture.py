@@ -14,7 +14,13 @@ out); and depots the app must not download: a DLC the account does not own and t
 of a 32/64-bit pair (neither is served, so fetching one fails). OUT/expected.txt has the lines
 the app's report (Documents/gog.txt) must have.
 
+A second game, OLD_ID, GOG has only in generation 1 (older games never repacked for Galaxy): its
+repository.json lists depots, each depot's manifest lists files as ranges of one main.bin,
+fetched with Range requests (the server here answers those, as GOG's CDN does); its Neutral and
+English depots go in, the German one and the DirectX redistributable stay out.
+
 Usage: gog-fixture.py OUT PORT PROGRAM.EXE
+       gog-fixture.py --serve OUT PORT   (an HTTP server for OUT that answers Range requests)
 """
 import hashlib
 import json
@@ -25,6 +31,7 @@ import zlib
 PRODUCT_ID = 1207658999
 DLC_ID = 1207659000
 NOT_OWNED_ID = 1207659777
+OLD_ID = 1207650001
 
 
 def md5(b):
@@ -145,18 +152,102 @@ def main():
              "parameters": {"base_url": f"{base}/cdn", "path": f"/{store}/{product}/", "token": "t"}, "priority": 100},
         ]})
 
+    # The generation 1 game: one main.bin with every file's bytes, at offsets.
+    legacy = "24680"
+    old_files = {"neutral": [("/OLD.EXE", exe), ("/data/readme.txt", b"read me\n" * 40)],
+                 "english": [("/lang/english.txt", english)], "german": [("/lang/german.txt", german)]}
+    main_bin = b""
+    v1_dir = f"cdn/content-system/v1/manifests/{OLD_ID}/windows/{legacy}"
+    for name, entries in old_files.items():
+        listed = []
+        for path, data in entries:
+            listed.append({"url": f"{OLD_ID}/main.bin", "path": path, "size": len(data), "offset": len(main_bin),
+                           "hash": md5(data)})
+            main_bin += data
+        if name == "neutral":
+            listed.append({"directory": True, "path": "/saves"})
+            listed.append({"url": f"{OLD_ID}/main.bin", "path": "/support/old-redist.exe", "size": 3,
+                           "offset": 0, "hash": md5(main_bin[:3]), "support": True})
+        put(f"{v1_dir}/{name}.json", {"version": 1, "depot": {"name": name, "files": listed}})
+    put(f"cdn/token=t/content-system/v1/depots/{OLD_ID}/windows/{legacy}/main.bin", main_bin)
+    put(f"{v1_dir}/repository.json", {"version": 1, "product": {
+        "rootGameID": str(OLD_ID), "installDirectory": "WinPad GOG Old", "name": "WinPad GOG Old",
+        "gameIDs": [{"gameID": str(OLD_ID), "name": {"en": "WinPad GOG Old"}}],
+        "depots": [
+            {"languages": ["Neutral"], "gameIDs": [str(OLD_ID)], "systems": ["Windows"], "manifest": "neutral.json",
+             "size": "1"},
+            {"languages": ["English"], "gameIDs": [str(OLD_ID)], "systems": ["Windows"], "manifest": "english.json",
+             "size": "1"},
+            {"languages": ["German"], "gameIDs": [str(OLD_ID)], "systems": ["Windows"], "manifest": "german.json",
+             "size": "1"},
+            {"redist": "DirectX", "executable": "/__redist/DirectX/DXSETUP.exe", "argument": "/silent", "size": "1"},
+        ]}})
+    put(f"content-system.gog.com/products/{OLD_ID}/os/windows/builds", {"total_count": 1, "items": [
+        {"build_id": "5550001", "legacy_build_id": legacy, "generation": 1, "branch": None,
+         "link": f"{base}/{v1_dir}/repository.json"}]})
+    put(f"content-system.gog.com/products/{OLD_ID}/secure_link", {"urls": [
+        {"endpoint_name": "local", "url_format": "{base_url}/token={token}{path}",
+         "parameters": {"base_url": f"{base}/cdn", "path": f"/content-system/v1/depots/{OLD_ID}/windows/{legacy}",
+                        "token": "t"}, "priority": 100}]})
+    for path, data in old_files["neutral"] + old_files["english"]:
+        expect(path.lstrip("/"), data)
+    expected.append("dir: saves")
+    expected.append("installed: WinPad GOG Old |")
+    expected.append("installed folder found: WinPad GOG Old")
+    expected.append("language English")
+
     put("auth.gog.com/token", {"access_token": "test-access", "expires_in": 3600, "token_type": "bearer",
                                "refresh_token": "test-refresh", "user_id": "42"})
-    put("embed.gog.com/user/data/games", {"owned": [PRODUCT_ID, DLC_ID]})
+    put("embed.gog.com/user/data/games", {"owned": [PRODUCT_ID, DLC_ID, OLD_ID]})
     put("embed.gog.com/account/getFilteredProducts", {"page": 1, "totalPages": 1, "products": [
         {"id": PRODUCT_ID, "title": "WinPad GOG Test", "worksOn": {"Windows": True, "Mac": False, "Linux": False}},
+        {"id": OLD_ID, "title": "WinPad GOG Old", "worksOn": {"Windows": True, "Mac": False, "Linux": False}},
         {"id": 5, "title": "Mac Only", "worksOn": {"Windows": False, "Mac": True, "Linux": False}},
     ]})
     with open(os.path.join(out, "expected.txt"), "w") as f:
         f.write("\n".join(expected) + "\n")
     with open(os.path.join(out, "unexpected.txt"), "w") as f:
-        f.write("german.txt\nvcredist\noutside.txt\nMac Only\n.winpad-sfc\n.winpad-part\n")
+        f.write("german.txt\nvcredist\noutside.txt\nMac Only\n.winpad-sfc\n.winpad-part\nold-redist\nfailed:\n")
+
+
+def serve(root, port):
+    """Plain files under ROOT, with single Range requests answered by 206 (as GOG's CDN)."""
+    import http.server
+    import re
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=root, **k)
+
+        def send_head(self):
+            m = re.fullmatch(r"bytes=(\d+)-(\d+)", self.headers.get("Range", ""))
+            path = self.translate_path(self.path)
+            if not m or not os.path.isfile(path):
+                return super().send_head()
+            start, end = int(m.group(1)), int(m.group(2))
+            f = open(path, "rb")
+            size = os.fstat(f.fileno()).st_size
+            if start >= size or end < start:
+                f.close()
+                self.send_error(416)
+                return None
+            end = min(end, size - 1)
+            f.seek(start)
+            data = f.read(end - start + 1)
+            f.close()
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            import io
+            return io.BytesIO(data)
+
+    http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1] == "--serve":
+        serve(sys.argv[2], int(sys.argv[3]))
+    else:
+        main()
