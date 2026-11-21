@@ -186,10 +186,17 @@ def main(argv=None):
         return gui.main()
     args = parser().parse_args(argv)
     if args.list_profiles:
+        auto = 0
         for prof in profiles.load_all().values():
+            if prof["id"].startswith("pf-"):
+                auto += 1  # from Proton's umu-protonfixes: counted, not listed
+                continue
             how = ", ".join(f"Steam {r['steamAppId']}" if "steamAppId" in r else
+                            f"GOG {r['gogId']}" if "gogId" in r else
                             " + ".join([r["exe"]] + r.get("files", [])) for r in prof["match"])
             print(f"{prof['id']} v{prof['version']}: {prof.get('title', '')} ({how})")
+        if auto:
+            print(f"+ {auto} profiles from Proton's umu-protonfixes (pf-<Steam id>, found by Steam or GOG id)")
         return 0
     for key, value in vars(args).items():
         if key in ("remove_game", "library", "cloud_setup", "cloud_repo", "github_token", "p12_password",

@@ -1155,6 +1155,19 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
   if (directx_native.count)
     [said addObject:[NSString stringWithFormat:@"DirectX from Microsoft in place of Wine's: %@",
                                                [directx_native componentsJoinedByString:@" "]]];
+  // Microsoft's DLLs the game's profile asks for (Proton's winetricks d3dx9_43 ...), native
+  // first even where Wine has its own; the library downloaded DirectX for them.
+  NSArray* want_dx = [s[@"nativeDirectX"] isKindOfClass:NSArray.class] ? s[@"nativeDirectX"] : @[];
+  NSArray<NSString*>* profile_dx = WinPadDirectXLinkNative(
+      [prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"], WinPadDirectXDLLsForVerbs(want_dx));
+  for (NSString* dll in profile_dx) dlls[dll] = @"n,b";
+  if (profile_dx.count)
+    [said addObject:[NSString stringWithFormat:@"DirectX from Microsoft for the game's profile: %@",
+                                               [profile_dx componentsJoinedByString:@" "]]];
+  else if (want_dx.count)
+    [said addObject:[NSString stringWithFormat:@"the game's profile wants DirectX from Microsoft (%@), which is not "
+                                               @"downloaded",
+                                               [want_dx componentsJoinedByString:@" "]]];
   NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
   NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
   if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {
@@ -1193,7 +1206,21 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
       if ([arg isKindOfClass:NSString.class]) [args addObject:arg];
     if (args.count) [said addObject:[@"arguments: " stringByAppendingString:[args componentsJoinedByString:@" "]]];
   }
-  [said addObjectsFromArray:AddRegistryDefaults(prefix, s[@"registry"], [game.arch isEqualToString:@"32bit"])];
+  // The Windows version the game's profile wants (Proton's winetricks win7, winxp ...), for its
+  // program only: Wine's AppDefaults\PROGRAM.exe\Version.
+  NSDictionary* registry = [s[@"registry"] isKindOfClass:NSDictionary.class] ? s[@"registry"] : @{};
+  NSString* winver = [s[@"windowsVersion"] isKindOfClass:NSString.class] ? s[@"windowsVersion"] : nil;
+  NSSet* winvers = [NSSet setWithArray:@[ @"win95", @"win98", @"win2k", @"winxp", @"vista", @"win7", @"win8", @"win81",
+                                          @"win10", @"win11" ]];
+  if ([winvers containsObject:winver] && game.exe.lastPathComponent.length) {
+    NSMutableDictionary* merged = [registry mutableCopy];
+    NSString* key = [@"HKCU\\Software\\Wine\\AppDefaults\\" stringByAppendingString:game.exe.lastPathComponent];
+    NSMutableDictionary* values = [([merged[key] isKindOfClass:NSDictionary.class] ? merged[key] : @{}) mutableCopy];
+    if (!values[@"Version"]) values[@"Version"] = winver;
+    merged[key] = values;
+    registry = merged;
+  }
+  [said addObjectsFromArray:AddRegistryDefaults(prefix, registry, [game.arch isEqualToString:@"32bit"])];
   // Empty folders the game writes into (Mafia's Maps): copying a game often leaves them out,
   // and then its saves fail with "path not found".
   if ([s[@"folders"] isKindOfClass:NSArray.class] && game.folder.length) {

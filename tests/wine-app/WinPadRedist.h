@@ -41,4 +41,12 @@ void WinPadDirectXDownload(void (^progress)(double fraction), void (^done)(NSStr
 // first (d3dx9_30...) for WINEDLLOVERRIDES.
 NSArray<NSString*>* WinPadDirectXLink(NSString* syswow64, NSString* bundleI386);
 
+// A game profile's "nativeDirectX" (Proton's winetricks verbs: d3dx9, d3dx9_43, xact,
+// d3dcompiler_43, xinput, or DLL names): the downloaded DLLs they stand for, lowercase
+// names (d3dx9_43.dll...), empty when DirectX is not downloaded or has none of them.
+NSArray<NSString*>* WinPadDirectXDLLsForVerbs(NSArray* verbs);
+// For main.m, a game that wants DLLS (WinPadDirectXDLLsForVerbs) of Microsoft even where Wine
+// has its own: links them into SYSWOW64 and returns their module names, to load native first.
+NSArray<NSString*>* WinPadDirectXLinkNative(NSString* syswow64, NSArray<NSString*>* dlls);
+
 NS_ASSUME_NONNULL_END

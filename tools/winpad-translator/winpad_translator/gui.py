@@ -188,7 +188,7 @@ def main():
     entries["game_dir"].trace_add("write", folder_picked)
     ttk.Label(frame, text="Game profile").grid(row=row, column=0, sticky="w", pady=2)
     try:
-        known = list(profiles.load_all())
+        known = [pid for pid in profiles.load_all() if not pid.startswith("pf-")]
     except (OSError, ValueError, profiles.ProfileError):
         known = []
     entries["profile"] = tk.StringVar(value=p.profile or "auto")

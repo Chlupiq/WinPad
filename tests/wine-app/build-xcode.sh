@@ -93,6 +93,8 @@ cp -R "$here/Settings.bundle" "$proj/"
 rm -rf "$proj/profiles"
 mkdir -p "$proj/profiles"
 cp "$here/../../tools/winpad-translator/data/profiles/"*.json "$proj/profiles/"
+# And those made from Proton's umu-protonfixes (import-protonfixes.py), found by Steam or GOG id.
+cp "$here/../../tools/winpad-translator/data/protonfixes.json" "$proj/profiles/"
 # The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
 cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
 sh "$here/build-stikjit.sh" "$proj/StikJIT"
@@ -270,9 +272,17 @@ echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT
 # writes: the library unpacks the ones waiting in Documents and in its Inbox
 # (where AirDrop puts them) into game folders first; a broken one stays.
 docs="$data/Documents"
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Zed Game" "$docs/library.txt" "$docs/broken.winpad" \
-    "$docs/Inbox/Zed Game.winpad"
-mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Inbox"
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Zed Game" "$docs/Deep" "$docs/library.txt" \
+    "$docs/broken.winpad" "$docs/Inbox/Zed Game.winpad"
+mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Inbox" "$docs/Deep/Bin" "$docs/Deep/_CommonRedist"
+# A game with nothing to name its program: the game's is in Bin, next to a larger launcher at the
+# top and an installer in _CommonRedist (the library picks Bin/Deep.exe), and it is a GOG game
+# whose Proton fix (umu-protonfixes, import-protonfixes.py) is the app's profile: Kingdoms of
+# Amalur, GOG 1077045575 = Steam 1041720.
+cp "$sim_app/i386-windows/hello.exe" "$docs/Deep/Bin/Deep.exe"
+cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Deep/GameLauncher.exe"
+cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Deep/_CommonRedist/Big.exe"
+printf '{"gameId": "1077045575", "name": "Deep"}\n' >"$docs/Deep/goggame-1077045575.info"
 packed=$(mktemp -d)
 mkdir -p "$packed/Zed Game/DATA"
 cp "$sim_app/i386-windows/hello.exe" "$packed/Zed Game/PACKED.EXE"
@@ -312,7 +322,7 @@ cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/GAME.EXE"
 # is GAME.EXE although a larger launcher is there (the library's own pick), with a resolution
 # and a picture; a program in a subfolder is offered too.
 mkdir -p "$docs/Plain/Bin" "$docs/.winpad-games"
-cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Plain/Launcher.exe"
+cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Plain/Other.exe"
 cp "$sim_app/i386-windows/hello.exe" "$docs/Plain/Bin/Tool.exe"
 printf '{"exe": "GAME.EXE", "screen": "800x600", "scaling": "stretch"}\n' >"$docs/.winpad-games/Plain.json"
 echo notes >"$docs/Empty/readme.txt"
@@ -354,7 +364,7 @@ xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
-for expect in 'library: 4 games' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v4 (app)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
+for expect in 'library: 5 games' 'library: Kingdoms of Amalur: Re-Reckoning | Deep/Bin/Deep.exe | 32bit | image none | profile pf-1041720 v1 (app)' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v4 (app)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
     'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none | profile test v3' \
     'start: game Test Game/TEST.EXE, image none' 'settings: game profile test v3' \
     'settings: WINEDLLOVERRIDES=d3d8=b;dinput8=n,b;dsound=n' 'settings: WINPAD_TEST=1' \
@@ -365,7 +375,7 @@ for expect in 'library: 4 games' 'library: Mafia | Mafia/Game.exe | 32bit | imag
     'export: Test Game | 1 maps, 1 new | WinPad-mapy-test-game-' 'export: Test Game after it, 0 new' \
     'package: Zed Game.winpad -> Zed Game' 'package: broken.winpad -> Není to balíček WinPad' \
     'library: WinPad Packed | Zed Game/PACKED.EXE | 32bit | image none' \
-    'own: Plain | exe Plain/GAME.EXE (auto Launcher.exe) | screen 800x600 | scaling stretch | programs GAME.EXE, Launcher.exe, Bin/Tool.exe' \
+    'own: Plain | exe Plain/GAME.EXE (auto Other.exe) | screen 800x600 | scaling stretch | programs GAME.EXE, Other.exe, Bin/Tool.exe' \
     'own: Plain saved | exe scaling screen'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
@@ -500,7 +510,7 @@ assert codemaps.ipad_folders(names.values()) == ["Plain"], names
 assert main_id in names and names[main_id].upper().endswith("\\PLAIN\\GAME.EXE"), names
 print(f"recorded {len(maps)} code maps, {sum(len(b) for b in blocks.values())} blocks:", sorted(set(names.values()))[:8])
 PY
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/broken.winpad" "$docs/.winpad-games" "$packed" \
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Zed Game" "$docs/Deep" "$docs/broken.winpad" "$docs/.winpad-games" "$packed" \
     "$docs/fexcache/Test Game" "$docs/fexcache/Plain" "$docs/export-Test Game.zip" "$out/export-check"
 echo "The game library found the games in Documents, unpacked a .winpad package, applied a game profile, exported a game's code maps for WinPad Translator and started the one picked with the controller's buttons"
 [ -n "$sim_window_aot" ] || exit 0

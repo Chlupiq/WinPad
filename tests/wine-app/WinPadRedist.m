@@ -231,3 +231,46 @@ void WinPadDirectXDownload(void (^progress)(double fraction), void (^done)(NSStr
                                              delegateQueue:nil];
   [[current.session downloadTaskWithURL:[NSURL URLWithString:@WINPAD_DIRECTX_URL]] resume];
 }
+
+NSArray<NSString*>* WinPadDirectXDLLsForVerbs(NSArray* verbs) {
+  NSArray<NSString*>* have = WinPadDirectXDLLs();
+  NSMutableOrderedSet<NSString*>* out = [NSMutableOrderedSet new];
+  for (id item in verbs) {
+    if (![item isKindOfClass:NSString.class]) continue;
+    NSString* verb = [item lowercaseString];
+    if ([verb hasSuffix:@".dll"]) verb = verb.stringByDeletingPathExtension;
+    // A family (d3dx9: d3dx9_24 ... d3dx9_43), or one DLL (d3dx9_43).
+    NSArray<NSString*>* prefixes = [verb isEqualToString:@"d3dx9"]    ? @[ @"d3dx9_" ]
+                                   : [verb isEqualToString:@"d3dx10"] ? @[ @"d3dx10" ]
+                                   : [verb isEqualToString:@"xinput"] ? @[ @"xinput1_" ]
+                                   : [verb hasPrefix:@"xact"]         ? @[ @"xactengine", @"x3daudio", @"xapofx", @"xaudio2_" ]
+                                   : [verb isEqualToString:@"x3daudio"] ? @[ @"x3daudio" ]
+                                                                        : nil;
+    for (NSString* dll in have) {
+      NSString* stem = dll.stringByDeletingPathExtension;
+      BOOL take = [stem isEqualToString:verb];
+      for (NSString* prefix in prefixes) take = take || [stem hasPrefix:prefix];
+      if (take) [out addObject:dll];
+    }
+  }
+  return out.array;
+}
+
+NSArray<NSString*>* WinPadDirectXLinkNative(NSString* syswow64, NSArray<NSString*>* dlls) {
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSMutableArray* native = [NSMutableArray new];
+  NSString* dir = WinPadDirectXDir();
+  for (NSString* name in dlls) {
+    NSString* path = [syswow64 stringByAppendingPathComponent:name];
+    NSString* target = [dir stringByAppendingPathComponent:name];
+    NSDictionary* attrs = [fm attributesOfItemAtPath:path error:nil];
+    // Only a link the app made; a file a program put there stays (and is native anyway).
+    if (attrs && ![attrs.fileType isEqualToString:NSFileTypeSymbolicLink]) continue;
+    if (![[fm destinationOfSymbolicLinkAtPath:path error:nil] isEqualToString:target]) {
+      [fm removeItemAtPath:path error:nil];
+      if (![fm createSymbolicLinkAtPath:path withDestinationPath:target error:nil]) continue;
+    }
+    [native addObject:name.stringByDeletingPathExtension];
+  }
+  return native;
+}

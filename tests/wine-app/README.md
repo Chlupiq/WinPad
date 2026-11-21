@@ -21,8 +21,18 @@ spustí). Ve složce hry může být:
 
 - `winpad.json` s názvem hry a jejím programem, např.
   `{"title": "Need for Speed Underground 2", "exe": "SPEED2.EXE"}`. Bez něj
-  je názvem jméno složky a programem největší `.exe`, který není instalátor
-  ani pomocný program.
+  je názvem jméno složky a program aplikace vybere sama: hledá `.exe` až tři
+  složky hluboko (`Bin`, `System`, `Binaries\Win32`...), přeskočí složky
+  s instalátory (`_CommonRedist`, `DirectX`...), instalátory, nastavení
+  a spouštěče (`Launcher.exe`: na iPadu běží jen jeden program, takže
+  spouštěč hru nespustí), dá přednost 32bitovému programu před 64bitovým,
+  programu pojmenovanému jako složka a pak největšímu. 64bitovou hru
+  aplikace nespustí bez ptaní: nabídne její 32bitový program, má-li ho.
+  Profil hry aplikace najde i sama: profily, které nosí (stejné jako ve
+  WinPad Translatoru), a přes 130 profilů z Protonu (umu-protonfixes), podle
+  `steam_appid.txt` nebo `goggame-<id>.info` ve složce hry. Profil může chtít
+  DLL z DirectX od Microsoftu (`nativeDirectX`): aplikace DirectX před
+  spuštěním stáhne sama.
   WinPad Translator do něj zapíše profil známé hry (`"profile"`: program,
   přepsání DLL, proměnné prostředí, argumenty, hodnoty registru, třeba
   rozlišení). Aplikace hru spustí s nimi; vlastní klíče v `winpad.json`
