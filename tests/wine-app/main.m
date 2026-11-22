@@ -1412,7 +1412,9 @@ static CFTimeInterval fps_shown;
   printf("mouse: a finger on the picture is %s; %s moves the mouse; speed %.2f\n",
          [touch_mouse isEqualToString:@"off"] ? "nothing" : touch_mouse.UTF8String,
          pad_mouse_stick == PadRUp ? "the right stick" : pad_mouse_stick == PadLUp ? "the left stick" : "no stick", mouse_speed);
-  Gamepads(gamepad_test || !touch || [touch boolValue] ? self.view : nil, self.game.settings);
+  // A Mac has a keyboard, a mouse and maybe a controller: no touch controller unless asked for.
+  const BOOL touch_default = !NSProcessInfo.processInfo.isiOSAppOnMac;
+  Gamepads(gamepad_test || (touch ? [touch boolValue] : touch_default) ? self.view : nil, self.game.settings);
   if (pad_mouse_stick >= 0) {
     stick_mouse = [WinPadStickMouse new];
     [[CADisplayLink displayLinkWithTarget:stick_mouse selector:@selector(tick:)] addToRunLoop:NSRunLoop.mainRunLoop

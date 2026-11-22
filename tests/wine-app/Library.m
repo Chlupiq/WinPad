@@ -1451,7 +1451,8 @@ static NSString* DirectXSummary(void) {
     cell.textLabel.text = @"Dotykové ovládání";
     UISwitch* toggle = [UISwitch new];
     id touch = [NSUserDefaults.standardUserDefaults objectForKey:@"touchControls"];
-    toggle.on = !touch || [touch boolValue];
+    // A Mac has a keyboard, a mouse and maybe a controller: no touch controller by default.
+    toggle.on = touch ? [touch boolValue] : !NSProcessInfo.processInfo.isiOSAppOnMac;
     [toggle addTarget:self action:@selector(touchChanged:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
@@ -2203,7 +2204,7 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 }
 @end
 
-@interface LibraryViewController ()
+@interface LibraryViewController () <UIDocumentPickerDelegate>
 @property(nonatomic, strong) NSArray<WinPadGame*>* games;
 @property(nonatomic) NSInteger focus;
 @property(nonatomic, strong) WinPadBackdrop* backdrop;
@@ -2226,6 +2227,8 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 @property(nonatomic, strong) UIScrollView* row;
 @property(nonatomic, strong) NSMutableArray<UIButton*>* cards;
 @property(nonatomic, strong) UILabel* addGame;
+// A game folder from pickGameFolder is being copied into Documents.
+@property(nonatomic) BOOL copyingGame;
 @property(nonatomic, strong) UILabel* empty;
 @property(nonatomic, strong) UILabel* hints;
 @property(nonatomic, strong) NSMutableArray* observers;
@@ -2350,6 +2353,12 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.addGame.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
   self.addGame.layer.cornerRadius = 6;
   self.addGame.layer.masksToBounds = YES;
+  // A tap picks a game's folder (on a Mac anywhere on it) and copies it into the library.
+  if (NSProcessInfo.processInfo.isiOSAppOnMac)
+    self.addGame.text = @"Přidat hru\n\nKlikni a vyber složku hry na Macu, zkopíruje se do knihovny. "
+                        @"Nebo otevři soubor .winpad z převodníku.";
+  self.addGame.userInteractionEnabled = YES;
+  [self.addGame addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(pickGameFolder)]];
   [self.row addSubview:self.addGame];
 
   self.heroTitle = [UILabel new];
@@ -2531,8 +2540,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [self becomeFirstResponder];
   [self openPackages:@[]];
 #if !TARGET_OS_SIMULATOR
-  // The first launch on a device without the JIT: how to turn it on, once.
-  if (![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+  // The first launch on a device without the JIT: how to turn it on, once. A Mac turns it on
+  // itself.
+  if (!NSProcessInfo.processInfo.isiOSAppOnMac && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
       ![NSUserDefaults.standardUserDefaults boolForKey:@"jitGuideShown"] && !WinPadJITUsable() &&
       !self.installing && !self.presentedViewController) {
     [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"jitGuideShown"];
@@ -2609,6 +2619,62 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   f.timeStyle = NSDateFormatterShortStyle;
   f.dateStyle = NSDateFormatterNoStyle;
   self.clock.text = [f stringFromDate:NSDate.date];
+}
+
+// "Přidat hru": a game's folder from Files (on a Mac its Finder), copied into Documents, where
+// the library finds it. A copy, not a bookmark: Wine opens the game's files by path.
+- (void)pickGameFolder {
+  if (self.presentedViewController || self.copyingGame) return;
+  UIDocumentPickerViewController* picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ UTTypeFolder ]];
+  picker.delegate = self;
+  picker.allowsMultipleSelection = NO;
+  [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController*)picker didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
+  NSURL* source = urls.firstObject;
+  if (!source) return;
+  NSString* target = [Documents() stringByAppendingPathComponent:source.lastPathComponent];
+  if ([NSFileManager.defaultManager fileExistsAtPath:target]) {
+    UIAlertController* alert = [UIAlertController
+        alertControllerWithTitle:@"Hra už v knihovně je"
+                         message:[NSString stringWithFormat:@"Složka %@ už v knihovně je. Smaž ji nebo přejmenuj tu, "
+                                                            @"kterou přidáváš.", source.lastPathComponent]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+    return;
+  }
+  self.copyingGame = YES;
+  NSString* text = self.addGame.text;
+  self.addGame.text = [NSString stringWithFormat:@"Kopíruju %@…", source.lastPathComponent];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    const BOOL scoped = [source startAccessingSecurityScopedResource];
+    NSError* error = nil;
+    // Hidden from the library (WinPadFindGames skips dot folders) until the copy is whole.
+    NSString* partial = [Documents() stringByAppendingPathComponent:[NSString stringWithFormat:@".%@.copying", source.lastPathComponent]];
+    [NSFileManager.defaultManager removeItemAtPath:partial error:nil];
+    BOOL ok = [NSFileManager.defaultManager copyItemAtURL:source toURL:[NSURL fileURLWithPath:partial] error:&error] &&
+              [NSFileManager.defaultManager moveItemAtPath:partial toPath:target error:&error];
+    if (!ok) [NSFileManager.defaultManager removeItemAtPath:partial error:nil];
+    if (scoped) [source stopAccessingSecurityScopedResource];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self.copyingGame = NO;
+      self.addGame.text = text;
+      NSLog(@"WinPad Wine: game folder %@ -> %@: %@", source.path, target, ok ? @"copied" : error);
+      if (!ok) {
+        UIAlertController* alert =
+            [UIAlertController alertControllerWithTitle:@"Hru se nepodařilo zkopírovat"
+                                                message:error.localizedDescription ?: @"?"
+                                         preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+      }
+      [NSUserDefaults.standardUserDefaults setObject:target.lastPathComponent forKey:@"lastGame"];
+      [self reload];
+    });
+  });
 }
 
 - (void)reload {

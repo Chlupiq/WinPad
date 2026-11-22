@@ -145,6 +145,9 @@ targets:
         CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        # The iPad build also runs on a Mac with Apple silicon (Xcode's "My Mac (Designed for
+        # iPad)"): a Mac's GPU with full Metal, and the app makes its own JIT (JITPool.c).
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES
         ARCHS: arm64
         CLANG_ENABLE_OBJC_ARC: YES
         CODE_SIGN_STYLE: Automatic

@@ -59,6 +59,9 @@ BOOL WinPadJITPrepare(NSString** note) {
     ready = YES;
   } else if (failed_before && !winpad_jit_pool_ready()) {
     line = @"the JIT check stopped the app last time: this launch runs without the JIT";
+  } else if (kind == WINPAD_JIT_MAC) {
+    ready = !winpad_jit_prepare_mac_pool(PoolSize(), Marker().fileSystemRepresentation, why, sizeof(why));
+    line = [@"Mac: " stringByAppendingString:@(why)];
   } else {
     ready = !winpad_jit_prepare_pool(PoolSize(), Marker().fileSystemRepresentation, why, sizeof(why));
     line = @(why);
@@ -74,7 +77,9 @@ NSString* WinPadJITStatus(void) {
     case WINPAD_JIT_SIMULATOR: return @"Simulátor: JIT bez debuggeru";
     case WINPAD_JIT_DEBUGGED: return @"Zapnutý (debugger, bez TXM)";
     case WINPAD_JIT_TXM_SCRIPT: return winpad_jit_pool_ready() ? @"Zapnutý (StikDebug)" : @"StikDebug připojen";
+    case WINPAD_JIT_MAC: return winpad_jit_pool_ready() ? @"Zapnutý (Mac)" : @"Mac: zapne se se spuštěním hry";
     case WINPAD_JIT_NONE:
+      if (winpad_jit_on_mac()) return @"Mac: JIT nejde, hry běží z AOT obrazu";
       if (winpad_jit_has_txm() && winpad_jit_traced() && winpad_jit_under_xcode()) return @"Xcode: na TXM bez JITu";
       return @"Vypnutý: hry běží z AOT obrazu";
   }
@@ -83,7 +88,7 @@ NSString* WinPadJITStatus(void) {
 
 BOOL WinPadJITAttached(void) {
   const enum winpad_jit_kind kind = winpad_jit_kind(NULL, 0);
-  return kind == WINPAD_JIT_DEBUGGED || kind == WINPAD_JIT_TXM_SCRIPT;
+  return kind == WINPAD_JIT_DEBUGGED || kind == WINPAD_JIT_TXM_SCRIPT || kind == WINPAD_JIT_MAC;
 }
 
 static NSURL* StikDebugURL(void) {
@@ -102,6 +107,8 @@ BOOL WinPadJITShouldAskStikDebug(void) {
 #if TARGET_OS_SIMULATOR
   return NO;
 #else
+  // A Mac needs no StikDebug: the app maps its pool itself (WINPAD_JIT_MAC).
+  if (winpad_jit_on_mac()) return NO;
   if (!WinPadJITWanted() || !WinPadJITAskWanted() || WinPadJITAttached() || winpad_jit_under_xcode()) return NO;
   if (winpad_jit_pool_ready()) return NO;
   return WinPadJITCanTurnOn();
@@ -213,6 +220,7 @@ static NSString* HelperIdentifier(void) {
 NSString* WinPadJITBuiltInUnavailableReason(void) {
   // A plain if (not #if), so the device-only helpers stay used in a simulator build (-Werror).
   if (TARGET_OS_SIMULATOR) return @"Vestavěný JIT funguje jen na skutečném iPadu nebo iPhonu.";
+  if (winpad_jit_on_mac()) return @"Na Macu JIT pomocníka nepotřebuje: aplikace si ho zapne sama.";
   if (getenv("LC_HOME_PATH")) return @"V LiveContainer vestavěný JIT nejde: použij StikDebug.";
   if (!HelperIdentifier()) return @"V téhle instalaci chybí pomocník JITu (WinPadJITHelper.appex).";
   if (HasGetTaskAllow() == 0)

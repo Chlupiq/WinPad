@@ -100,11 +100,47 @@ int winpad_jit_has_txm(void) {
 #endif
 }
 
+// NSProcessInfo.isiOSAppOnMac through the Objective-C runtime, so that this file stays plain C
+// with no framework to link (jit-protocol-test.sh builds it for macOS with CoreFoundation only).
+int winpad_jit_on_mac(void) {
+  const char* force = getenv("WINPAD_JIT_MAC");
+  if (force && *force) return atoi(force) != 0;
+#if TARGET_OS_SIMULATOR || !TARGET_OS_IPHONE
+  return 0;
+#else
+  static int on_mac = -1;
+  if (on_mac >= 0) return on_mac;
+  on_mac = 0;
+  void* (*get_class)(const char*) = (void* (*)(const char*))dlsym(RTLD_DEFAULT, "objc_getClass");
+  void* (*sel)(const char*) = (void* (*)(const char*))dlsym(RTLD_DEFAULT, "sel_registerName");
+  void* send = dlsym(RTLD_DEFAULT, "objc_msgSend");
+  void* info_class = get_class && sel && send ? get_class("NSProcessInfo") : NULL;
+  if (info_class) {
+    void* info = ((void* (*)(void*, void*))send)(info_class, sel("processInfo"));
+    void* is_mac = sel("isiOSAppOnMac");
+    if (info) on_mac = ((signed char (*)(void*, void*))send)(info, is_mac) != 0;
+  }
+  return on_mac;
+#endif
+}
+
+static int mac_pool_state;  // 0 not tried, 1 ready, -1 failed
+static char mac_pool_why[256];
+
 enum winpad_jit_kind winpad_jit_kind(char* why, size_t why_size) {
 #if TARGET_OS_SIMULATOR
   say(why, why_size, "simulator: the JIT runs without a debugger");
   return WINPAD_JIT_SIMULATOR;
 #else
+  if (winpad_jit_on_mac()) {
+    if (mac_pool_state < 0) {
+      say(why, why_size, "Mac: %s", mac_pool_why);
+      return WINPAD_JIT_NONE;
+    }
+    say(why, why_size, mac_pool_state > 0 ? "Mac: %s" : "Mac (Designed for iPad): the app maps its own JIT pool",
+        mac_pool_why);
+    return WINPAD_JIT_MAC;
+  }
   if (winpad_jit_pool_ready()) {
     say(why, why_size, "StikDebug prepared the JIT pool");
     return WINPAD_JIT_TXM_SCRIPT;
@@ -151,7 +187,7 @@ __attribute__((naked, noinline)) static void jit26_detach(void) {
 static int pool_state;  // 0 not tried, 1 ready, -1 failed
 static char pool_why[256];
 
-int winpad_jit_pool_ready(void) { return pool_state == 1; }
+int winpad_jit_pool_ready(void) { return pool_state == 1 || mac_pool_state == 1; }
 
 int winpad_jit_failed_before(const char* marker) {
   if (!marker || access(marker, F_OK)) return 0;
@@ -265,4 +301,80 @@ int winpad_jit_prepare_pool(size_t size, const char* marker, char* why, size_t w
   if (!pool_state) pool_state = prepare(size, marker, pool_why, sizeof(pool_why)) ? -1 : 1;
   say(why, why_size, "%s", pool_why);
   return pool_state == 1 ? 0 : -1;
+}
+
+// A Mac's kernel lets the process map executable memory as a simulator does (winehost.c's
+// publish_jit_pool), at least while a debugger has it; whether it does so without one is what
+// the check below finds out.
+static int prepare_mac(size_t size, const char* marker, char* why, size_t why_size) {
+#if !defined(__aarch64__)
+  say(why, why_size, "not arm64");
+  return -1;
+#else
+  const vm_address_t page = 16384;
+  size = (size + page - 1) & ~(size_t)(page - 1);
+  mach_port_t task = mach_task_self(), entry = MACH_PORT_NULL;
+  memory_object_size_t entry_size = size;
+  kern_return_t kr = mach_make_memory_entry_64(
+      task, &entry_size, 0, MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, &entry,
+      MACH_PORT_NULL);
+  if (kr != KERN_SUCCESS) {
+    say(why, why_size, "no memory entry for the JIT pool: %s", mach_error_string(kr));
+    return -1;
+  }
+  vm_address_t rw = 0, rx = 0;
+  kr = vm_map(task, &rw, size, 0, VM_FLAGS_ANYWHERE, entry, 0, FALSE, VM_PROT_READ | VM_PROT_WRITE,
+              VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_DEFAULT);
+  if (kr != KERN_SUCCESS) {
+    mach_port_deallocate(task, entry);
+    say(why, why_size, "no writable view of the JIT pool: %s", mach_error_string(kr));
+    return -1;
+  }
+  kr = vm_map(task, &rx, size, 0, VM_FLAGS_ANYWHERE, entry, 0, FALSE, VM_PROT_READ | VM_PROT_EXECUTE,
+              VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE, VM_INHERIT_DEFAULT);
+  mach_port_deallocate(task, entry);
+  if (kr != KERN_SUCCESS) {
+    vm_deallocate(task, rw, size);
+    say(why, why_size, "no executable view of the JIT pool: %s", mach_error_string(kr));
+    return -1;
+  }
+  // As prepare(): should the kernel refuse to run it, the app stops here and the marker tells
+  // the next launch to run without the JIT.
+  int fd = marker ? open(marker, O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1;
+  if (fd >= 0) {
+    (void)!write(fd, "jit check\n", 10);
+    fsync(fd);
+    close(fd);
+  }
+  volatile uint32_t* code = (volatile uint32_t*)rw;
+  code[0] = 0x52800540;
+  code[1] = 0xd65f03c0;
+  sys_icache_invalidate((void*)rx, 8);
+  const int answer = ((int (*)(void))rx)();
+  code[0] = 0;
+  code[1] = 0;
+  if (marker) unlink(marker);
+  if (answer != 42) {
+    vm_deallocate(task, rw, size);
+    vm_deallocate(task, rx, size);
+    say(why, why_size, "code in the JIT pool returned %d, not 42", answer);
+    return -1;
+  }
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%lx", (unsigned long)rx);
+  setenv("WINE_IOS_JIT_RX", buf, 1);
+  snprintf(buf, sizeof(buf), "%lx", (unsigned long)rw);
+  setenv("WINE_IOS_JIT_RW", buf, 1);
+  snprintf(buf, sizeof(buf), "%lx", (unsigned long)size);
+  setenv("WINE_IOS_JIT_SIZE", buf, 1);
+  say(why, why_size, "the app's own JIT pool: RX %#lx RW %#lx, %zu MB%s", (unsigned long)rx, (unsigned long)rw,
+      size >> 20, winpad_jit_cs_debugged() ? " (a debugger has had the app)" : "");
+  return 0;
+#endif
+}
+
+int winpad_jit_prepare_mac_pool(size_t size, const char* marker, char* why, size_t why_size) {
+  if (!mac_pool_state) mac_pool_state = prepare_mac(size, marker, mac_pool_why, sizeof(mac_pool_why)) ? -1 : 1;
+  say(why, why_size, "%s", mac_pool_why);
+  return mac_pool_state == 1 ? 0 : -1;
 }
