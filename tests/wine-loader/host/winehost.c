@@ -260,7 +260,13 @@ static struct known_window* known_window(void* hwnd, int add) {
   for (int i = 0; i < known_count; i++)
     if (known[i].hwnd == hwnd) return &known[i];
   if (!add) return NULL;
-  struct known_window* k = &known[known_count < 64 ? known_count++ : 63];
+  struct known_window* k = known_count < 64 ? &known[known_count++] : NULL;
+  // Full: a hidden window's slot, else one that never drew, else none.
+  for (int i = 0; !k && i < 64; i++)
+    if (!known[i].visible) k = &known[i];
+  for (int i = 0; !k && i < 64; i++)
+    if (!known[i].presented && known[i].hwnd != main_window) k = &known[i];
+  if (!k) return NULL;
   memset(k, 0, sizeof(*k));
   k->hwnd = hwnd;
   return k;
@@ -314,6 +320,9 @@ static void client_in_surface(void* hwnd, int surf_w, int surf_h, int* ox, int* 
   if (*oy < 0 || *oy >= surf_h) *oy = 0;
   *w = k->cw < surf_w - *ox ? k->cw : surf_w - *ox;
   *h = k->ch < surf_h - *oy ? k->ch : surf_h - *oy;
+  // The app copies stride * h bytes from the client's first pixel: with a left offset the last
+  // row would run past the surface.
+  if (*ox && *oy + *h == surf_h) --*h;
 }
 
 // The client area taps are fractions of: the picture window's, else the main window's.
@@ -332,9 +341,12 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
                          int cw, int ch) {
   fprintf(stderr, "winehost: window %p at %d,%d %dx%d, visible %d, client %d,%d %dx%d\n", hwnd, x,
           y, w, h, visible, cx, cy, cw, ch);
-  struct known_window* k = known_window(hwnd, 1);
-  k->x = x, k->y = y, k->w = w, k->h = h, k->visible = visible;
-  k->cx = cx, k->cy = cy, k->cw = cw, k->ch = ch;
+  // Only windows that can be the picture (child controls, tooltips and menus are smaller).
+  struct known_window* k = known_window(hwnd, w >= 320 && h >= 200);
+  if (k) {
+    k->x = x, k->y = y, k->w = w, k->h = h, k->visible = visible;
+    k->cx = cx, k->cy = cy, k->cw = cw, k->ch = ch;
+  }
   if (visible && w >= 320 && h >= 200 && (hwnd == main_window || (long)w * h > main_area)) {
     main_area = (long)w * h;
     __atomic_store_n(&main_window, hwnd, __ATOMIC_RELEASE);
