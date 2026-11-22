@@ -931,6 +931,63 @@ static NSString* WindowsDir(NSString* path) {
   return [NSString stringWithFormat:@"Z:%@\\", [path stringByReplacingOccurrencesOfString:@"/" withString:@"\\"]];
 }
 
+// A game's launcher that starts the game: a 32-bit program cannot start another here, so
+// Wine hands the start over to the app (patches/madeira/0014-handoff-child-program): it
+// writes HandoffFile() and the app, next launch, starts that program of the game itself.
+static NSString* HandoffFile(void) { return DocumentsPath(@".winpad-handoff.txt"); }
+static NSString* HandoffNext(void) { return DocumentsPath(@".winpad-handoff.json"); }
+
+// What follows the program in a Windows command line, as arguments ("a b" stays one).
+static NSArray<NSString*>* CommandLineArgs(NSString* cmdline) {
+  NSMutableArray<NSString*>* args = [NSMutableArray new];
+  NSMutableString* cur = nil;
+  BOOL quoted = NO;
+  for (NSUInteger i = 0; i <= cmdline.length; i++) {
+    const unichar c = i < cmdline.length ? [cmdline characterAtIndex:i] : ' ';
+    if (c == '"') {
+      quoted = !quoted;
+      if (!cur) cur = [NSMutableString new];
+    } else if ((c == ' ' || c == '\t') && !quoted) {
+      if (cur) [args addObject:cur];
+      cur = nil;
+    } else {
+      if (!cur) cur = [NSMutableString new];
+      [cur appendFormat:@"%C", c];
+    }
+  }
+  if (args.count) [args removeObjectAtIndex:0];  // the program
+  return args;
+}
+
+// The handed-over start (HandoffFile) as the game folder's program: {folder, exe, args}, or nil
+// when the program is not in that folder.
+static NSDictionary* ReadHandoff(NSString* folder) {
+  NSString* text = [NSString stringWithContentsOfFile:HandoffFile() encoding:NSUTF8StringEncoding error:nil];
+  if (!text) return nil;
+  NSMutableDictionary* lines = [NSMutableDictionary new];
+  for (NSString* line in [text componentsSeparatedByString:@"\n"]) {
+    const NSRange eq = [line rangeOfString:@"="];
+    if (eq.location != NSNotFound) lines[[line substringToIndex:eq.location]] = [line substringFromIndex:eq.location + 1];
+  }
+  NSString* image = lines[@"image"];
+  NSString* docs = WindowsDir(DocumentsPath(folder));
+  if (image.length <= docs.length || [image rangeOfString:docs options:NSCaseInsensitiveSearch | NSAnchoredSearch].location == NSNotFound)
+    return nil;
+  NSString* rel = [[image substringFromIndex:docs.length] stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+  // The file in the folder as it is named there (Wine compares without case).
+  NSString* dir = DocumentsPath(folder);
+  NSMutableArray* parts = [NSMutableArray new];
+  for (NSString* part in rel.pathComponents) {
+    NSString* found = part;
+    for (NSString* name in [NSFileManager.defaultManager contentsOfDirectoryAtPath:[dir stringByAppendingPathComponent:[parts componentsJoinedByString:@"/"]] error:nil])
+      if ([name caseInsensitiveCompare:part] == NSOrderedSame) found = name;
+    [parts addObject:found];
+  }
+  rel = [parts componentsJoinedByString:@"/"];
+  if (![NSFileManager.defaultManager fileExistsAtPath:[dir stringByAppendingPathComponent:rel]]) return nil;
+  return @{@"folder" : folder, @"exe" : rel, @"args" : CommandLineArgs(lines[@"cmdline"] ?: @"")};
+}
+
 // The Wine prefix, kept from launch to launch: what programs write there, such
 // as a game's saves and settings in C:\users and the registry (*.reg), stays.
 // A 32-bit process's system32 is C:\windows\syswow64, with the i386 DLLs;
@@ -1242,6 +1299,7 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
 @interface WineViewController : UIViewController
 @property(nonatomic, strong) UITextView* text;
 @property(nonatomic, strong) NSTimer* timer;
+@property(nonatomic) BOOL handoffShown;  // the launcher's start of the game was offered
 @property(atomic, copy) NSString* summary;
 @property(nonatomic, copy) NSString* program;
 @property(nonatomic, strong) WinPadGame* game;  // the game the library started, or nil
@@ -1352,6 +1410,46 @@ static CFTimeInterval fps_shown;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
     [self runWine];
   });
+}
+
+// The game's launcher started the game (HandoffFile): Wine runs one program per app run, so
+// the app remembers it (HandoffNext), closes, and its next launch starts it.
+- (void)handOff {
+  NSDictionary* next = ReadHandoff(self.game.folder);
+  printf("WinPad Wine: the program starts %s in the game folder: %s\n",
+         next ? [next[@"exe"] UTF8String] : "a program outside", next ? "handed over to the next launch" : "not handed over");
+  fflush(stdout);
+  if (!next) return;
+  NSMutableDictionary* saved = [next mutableCopy];
+  saved[@"time"] = @(NSDate.date.timeIntervalSince1970);
+  [[NSJSONSerialization dataWithJSONObject:saved options:0 error:nil] writeToFile:HandoffNext() atomically:YES];
+  UIAlertController* tell = [UIAlertController
+      alertControllerWithTitle:[NSString stringWithFormat:@"Spustit %@", [next[@"exe"] lastPathComponent]]
+                       message:@"Program spouští hru jako další program, a to WinPad neumí současně. Aplikace se "
+                               @"zavře; až ji znovu otevřeš, spustí se rovnou hra."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [tell addAction:[UIAlertAction actionWithTitle:@"Zavřít a spustit hru"
+                                           style:UIAlertActionStyleDefault
+                                         handler:^(UIAlertAction* action) {
+                                           printf("WinPad Wine: closing for the handed-over program\n%s, exit 0\n",
+                                                  FinishedMarker.UTF8String);
+                                           fflush(stdout);
+                                           UIApplication* app = UIApplication.sharedApplication;
+                                           const SEL suspend = NSSelectorFromString(@"suspend");
+                                           if ([app respondsToSelector:suspend]) ((void (*)(id, SEL))objc_msgSend)(app, suspend);
+                                           dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC),
+                                                          dispatch_get_main_queue(), ^{
+                                                            exit(0);
+                                                          });
+                                         }]];
+  [tell addAction:[UIAlertAction actionWithTitle:@"Zůstat"
+                                           style:UIAlertActionStyleCancel
+                                         handler:^(UIAlertAction* action) {
+                                           [NSFileManager.defaultManager removeItemAtPath:HandoffNext() error:nil];
+                                           [NSFileManager.defaultManager removeItemAtPath:HandoffFile() error:nil];
+                                           self.handoffShown = NO;
+                                         }]];
+  [self presentViewController:tell animated:YES completion:nil];
 }
 
 // Exit or the controller's Home button (RequestExit): asks, then ends the game and the app.
@@ -1535,6 +1633,10 @@ static CFTimeInterval fps_shown;
 
 - (void)showLog {
   NSString* summary = self.summary;
+  if (self.game && !self.handoffShown && [NSFileManager.defaultManager fileExistsAtPath:HandoffFile()]) {
+    self.handoffShown = YES;
+    [self handOff];
+  }
   // The custom stretch follows the game's resolution as it changes it.
   if (game_has_layer && [picture_scaling isEqualToString:@"custom"] && [game_layer isKindOfClass:CAMetalLayer.class] &&
       !CGSizeEqualToSize(((CAMetalLayer*)game_layer).drawableSize, picture_laid_out))
@@ -1641,6 +1743,12 @@ static CFTimeInterval fps_shown;
     // Folders the copy of the game lacks (empty ones) are made when the game creates a file in
     // them (patches/madeira/0009-game-dir-missing-folders).
     setenv("WINE_IOS_GAME_DIR", game_folder.fileSystemRepresentation, 1);
+    // A launcher's start of a program in Documents (the game) comes back to the app.
+    [NSFileManager.defaultManager removeItemAtPath:HandoffFile() error:nil];
+    if (self.game) {
+      setenv("WINPAD_HANDOFF_FILE", HandoffFile().fileSystemRepresentation, 1);
+      setenv("WINPAD_HANDOFF_DIR", WindowsDir(DocumentsPath(@"")).UTF8String, 1);
+    }
     // The Ultimate ASI Loader many games carry is a dinput8.dll of their own; the game's
     // winpad.json (its profile) may add more.
     for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))
@@ -1801,6 +1909,27 @@ static CFTimeInterval fps_shown;
     NSLog(@"WinPad Wine: recording code maps needs the JIT: only in a simulator");
 #endif
   }
+  // A game's launcher started the game in the last run (handOff): start it now, once.
+  NSData* handoff = [NSData dataWithContentsOfFile:HandoffNext()];
+  [NSFileManager.defaultManager removeItemAtPath:HandoffNext() error:nil];
+  NSDictionary* next = handoff ? [NSJSONSerialization JSONObjectWithData:handoff options:0 error:nil] : nil;
+  if ([next isKindOfClass:NSDictionary.class] && [next[@"folder"] isKindOfClass:NSString.class] &&
+      [next[@"exe"] isKindOfClass:NSString.class] && NSDate.date.timeIntervalSince1970 - [next[@"time"] doubleValue] < 600 &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"])
+    for (WinPadGame* game in WinPadFindGames())
+      if ([game.folder isEqualToString:next[@"folder"]]) {
+        game.exe = [game.folder stringByAppendingPathComponent:next[@"exe"]];
+        NSMutableDictionary* settings = [(game.settings ?: @{}) mutableCopy];
+        if ([next[@"args"] isKindOfClass:NSArray.class]) settings[@"args"] = next[@"args"];
+        game.settings = settings;
+        NSLog(@"WinPad Wine: starting %@, which the game's launcher started", game.exe);
+        WineViewController* wine = [WineViewController new];
+        wine.program = @"game";
+        wine.game = game;
+        self.window.rootViewController = wine;
+        [self.window makeKeyAndVisible];
+        return;
+      }
   LibraryViewController* library = [LibraryViewController new];
   __weak UIWindow* window = self.window;
   library.start = ^(NSString* program, WinPadGame* game) {

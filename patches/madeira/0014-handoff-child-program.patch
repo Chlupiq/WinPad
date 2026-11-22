@@ -1,0 +1,75 @@
+From: WinPad
+Subject: [PATCH] ntdll: Hand a 32-bit program's child program over to the app on iOS.
+
+A 32-bit process cannot start a second 32-bit program on iOS (one guest
+window per app run; Madeira refuses 32-bit children elsewhere for the same
+reason), so a game's launcher (Morrowind Launcher.exe: Play ->
+ShellExecute Morrowind.exe) did nothing. With WINPAD_HANDOFF_FILE and
+WINPAD_HANDOFF_DIR set (tests/wine-app/main.m), a 32-bit process starting a
+program under WINPAD_HANDOFF_DIR (the app's Documents as a DOS path,
+compared without case) writes image=, cmdline= and cwd= lines to the file
+and gets STATUS_ACCESS_DENIED; the app then starts that program in the
+next run. Logged as "[handoff] ...".
+
+Applies to willfaust/Madeira at 48f9764.
+---
+diff --git a/build/ntdll-unix/process_ios.c b/build/ntdll-unix/process_ios.c
+index 0e1d438..c4ef599 100644
+--- a/build/ntdll-unix/process_ios.c
++++ b/build/ntdll-unix/process_ios.c
+@@ -1229,6 +1229,55 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
+         return STATUS_ACCESS_DENIED;
+     }
+ 
++    /* WinPad: a 32-bit program cannot start a second 32-bit program here, so a game's
++     * launcher that starts the game (ShellExecute -> CreateProcess) hands it over to the
++     * app instead: with WINPAD_HANDOFF_FILE set, a 32-bit process starting a program whose
++     * path begins with WINPAD_HANDOFF_DIR (the app's Documents, as a DOS path) writes
++     * "image=", "cmdline=" and "cwd=" lines (UTF-8) to that file and gets
++     * STATUS_ACCESS_DENIED; the app starts that program on its next launch. */
++    {
++        const char *file = getenv( "WINPAD_HANDOFF_FILE" ), *dir = getenv( "WINPAD_HANDOFF_DIR" );
++        const WCHAR *ip = params->ImagePathName.Buffer;
++        int ip_len = params->ImagePathName.Length / sizeof(WCHAR), dl = dir ? (int)strlen( dir ) : 0, k;
++
++        if (file && *file && dl && ios_wow_base() && ip_len > dl)
++        {
++            for (k = 0; k < dl; k++)
++            {
++                WCHAR c = ip[k], d = (unsigned char)dir[k];
++                if (c >= 'A' && c <= 'Z') c += 32;
++                if (d >= 'A' && d <= 'Z') d += 32;
++                if (c == '/') c = '\\';
++                if (d == '/') d = '\\';
++                if (c != d) break;
++            }
++            if (k == dl)
++            {
++                const UNICODE_STRING *strs[3] = { &params->ImagePathName, &params->CommandLine,
++                                                  &params->CurrentDirectory.DosPath };
++                static const char * const keys[3] = { "image=", "cmdline=", "cwd=" };
++                FILE *f = fopen( file, "w" );
++                int n;
++
++                for (n = 0; f && n < 3; n++)
++                {
++                    DWORD wl = strs[n]->Length / sizeof(WCHAR);
++                    char *utf8 = malloc( wl * 3 + 1 );
++                    DWORD ul = utf8 && wl ? ntdll_wcstoumbs( strs[n]->Buffer, wl, utf8, wl * 3, FALSE ) : 0;
++
++                    if ((int)ul < 0) ul = 0;
++                    fprintf( f, "%s%.*s\n", keys[n], (int)ul, utf8 ? utf8 : "" );
++                    free( utf8 );
++                }
++                if (f) fclose( f );
++                dprintf( 2, "[handoff] %s started %s (%s): handed to the app in %s\n",
++                         f ? "the program" : "the program (file not written)",
++                         debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ), file );
++                return STATUS_ACCESS_DENIED;
++            }
++        }
++    }
++
+     /* ml526: stamp every accepted spawn on the startup timeline. This is the
+      * boundary the coarse phase accounting could not see — steam.exe -> the
+      * webhelper spawn was a ~16s block with no internal detail. */
