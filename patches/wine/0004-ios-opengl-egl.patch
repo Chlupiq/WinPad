@@ -171,7 +171,7 @@ SONAME_LIBEGL defined (tests/wine-loader/build-win32u.sh).
 +     * nothing to dlopen. A host without it has a stub that returns NULL. */
 +    funcs->egl_handle = (void *)winpad_egl_get_proc_address;
 +    if (!(funcs->p_eglGetProcAddress = winpad_egl_get_proc_address( "eglGetProcAddress" )) ||
-+        !(funcs->p_eglQueryString = funcs->p_eglGetProcAddress( "eglQueryString" )))
++        !(funcs->p_eglQueryString = (void *)funcs->p_eglGetProcAddress( "eglQueryString" )))
 +    {
 +        WARN( "No EGL in this host, no OpenGL\n" );
 +        funcs->egl_handle = NULL;

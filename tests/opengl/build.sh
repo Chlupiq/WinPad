@@ -66,8 +66,11 @@ if [ "$(git -C "$g" rev-parse HEAD 2>/dev/null || true)" != "$GL4ES_COMMIT" ]; t
 fi
 gl4es_flags="-w -DNOX11 -DNOEGL -DSTATICLIB -DNO_GBM -DNO_LOADER -DNO_INIT_CONSTRUCTOR -DDEFAULT_ES=2
     -fvisibility=hidden -I$g/include -I$g/src -I$g/src/util -I$g/src/glx"
+# Mach-O has no symbol aliases: directstate.c's AliasDecl lines become calls.
+python3 -I "$here/no-aliases.py" "$g/src/gl/directstate.c" "$g/src/gl/directstate_ios.c"
 n=0
-for f in $(sed -n '/^SET(GL_SRC/,/^)/p' "$g/src/CMakeLists.txt" | grep -o 'gl/[a-z_/0-9]*\.c') glx/hardext.c; do
+for f in $(sed -n '/^SET(GL_SRC/,/^)/p' "$g/src/CMakeLists.txt" | grep -o 'gl/[a-z_/0-9]*\.c' |
+    sed 's|^gl/directstate\.c$|gl/directstate_ios.c|') glx/hardext.c; do
     # shellcheck disable=SC2086
     compile "$g/src/$f" "gl4es_$(echo "$f" | tr '/' '_' | sed 's/\.c$//')" $gl4es_flags
     n=$((n + 1))
