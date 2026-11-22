@@ -121,6 +121,8 @@ static int windows_before_count;
 static void* main_window;
 static int main_cx, main_cy, main_cw, main_ch;
 static void note_present(void* hwnd);
+static void* picture_window(void);
+static void client_in_surface(void* hwnd, int surf_w, int surf_h, int* ox, int* oy, int* w, int* h);
 // What the run has to show (WINEHOST_* env) and what it has shown so far;
 // the host exits early once everything has shown up.
 enum { GOAL_FRAME = 1, GOAL_TYPED = 2, GOAL_NEW_WINDOW = 4, GOAL_CHANGED = 8 };
@@ -147,18 +149,17 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
   long dark = 0;
   met(GOAL_FRAME);
   note_present(hwnd);
-  // The app shows the window with a menu bar the scripted input goes to, else the main window
-  // (a game's or a launcher's, which has no title bar). The surface can be larger than the
-  // window (640x512 for a 638x471 one): the picture is the client area, which taps are
-  // fractions of.
-  void* shown = first_window ? first_window : __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
-  if (winehost_frame_hook && hwnd && hwnd == shown && surf_w > 0 && surf_h > 0) {
-    int w = surf_w, h = surf_h;
-    if (!first_window && main_cw > 0 && main_ch > 0) {
-      if (w > main_cw) w = main_cw;
-      if (h > main_ch) h = main_ch;
+  // The app shows the window with a menu bar the scripted input goes to, else the picture
+  // window (below), its client area only: the surface covers the whole window and can be
+  // larger (640x512 for a 638x471 dialog), and taps are fractions of the client area.
+  if (winehost_frame_hook && hwnd && surf_w > 0 && surf_h > 0) {
+    if (first_window) {
+      if (hwnd == first_window) winehost_frame_hook(hwnd, surf_w, surf_h, stride, bits);
+    } else if (hwnd == picture_window()) {
+      int ox, oy, w, h;
+      client_in_surface(hwnd, surf_w, surf_h, &ox, &oy, &w, &h);
+      winehost_frame_hook(hwnd, w, h, stride, (const unsigned char*)bits + (size_t)oy * stride + (size_t)ox * 4);
     }
-    winehost_frame_hook(hwnd, w, h, stride, bits);
   }
   for (int y = 0; y < surf_h; y++) {
     const unsigned char* row = (const unsigned char*)bits + (size_t)y * stride;
@@ -244,9 +245,11 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
 // fraction of.
 static long main_area;
 
-// The top-level windows seen (their last frame) and whether each has drawn: a window that never
-// draws (Morrowind Launcher.exe has a 640x480 one at 0,0 behind its 638x471 dialog) is no main
-// window while one that draws is there, or the app shows nothing and taps land beside the dialog.
+// The top-level windows seen (their last frame) and whether each has drawn through GDI.
+// Morrowind Launcher.exe has a 640x480 window at 0,0 that never draws behind its 638x471 dialog
+// without a caption: the main window (largest) is the empty one, so the app's picture and taps
+// go to the picture window instead, while the main window has no GDI frame and nothing presents
+// through Metal (a Direct3D game's window draws there, and stays the one for taps).
 static struct known_window {
   void* hwnd;
   int x, y, w, h, visible, cx, cy, cw, ch, presented;
@@ -263,29 +266,66 @@ static struct known_window* known_window(void* hwnd, int add) {
   return k;
 }
 
-static void consider_main(struct known_window* k) {
-  if (!k->visible || k->w < 320 || k->h < 200) return;
-  void* main = __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
-  struct known_window* m = main ? known_window(main, 0) : NULL;
-  const int main_draws = m && m->presented && m->visible;
-  if (k->hwnd != main && !(k->presented && !main_draws) && ((long)k->w * k->h <= main_area || (main_draws && !k->presented)))
-    return;
-  if (k->hwnd != main) fprintf(stderr, "winehost: main window %p (%dx%d)\n", k->hwnd, k->w, k->h);
-  main_area = (long)k->w * k->h;
-  __atomic_store_n(&main_window, k->hwnd, __ATOMIC_RELEASE);
-  if (k->cw > 0 && k->ch > 0) {
-    main_cx = k->cx;
-    main_cy = k->cy;
-    main_cw = k->cw;
-    main_ch = k->ch;
-  }
-}
-
 static void note_present(void* hwnd) {
   struct known_window* k = hwnd ? known_window(hwnd, 0) : NULL;
-  if (!k || k->presented) return;
-  k->presented = 1;
-  consider_main(k);
+  if (k) k->presented = 1;
+}
+
+// Frames presented through Metal (host/metal-display.m), when the app links it; looked up as
+// main.m does, so a host without it needs no stub.
+static long metal_frames(void) {
+  static long (*fn)(void);
+  static int looked;
+  if (!looked) {
+    fn = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
+    looked = 1;
+  }
+  return fn ? fn() : 0;
+}
+
+// The main window when it draws through GDI or nothing draws through Metal and no other window
+// draws; else the largest visible window at least 320x200 that has drawn through GDI.
+static struct known_window* picture_known(void) {
+  void* main = __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
+  struct known_window* m = main ? known_window(main, 0) : NULL;
+  if (m && m->presented) return m;
+  if (metal_frames() > 0) return m;
+  struct known_window* best = NULL;
+  for (int i = 0; i < known_count; i++) {
+    struct known_window* k = &known[i];
+    if (!k->presented || !k->visible || k->w < 320 || k->h < 200) continue;
+    if (!best || (long)k->w * k->h > (long)best->w * best->h) best = k;
+  }
+  return best ? best : m;
+}
+
+static void* picture_window(void) {
+  struct known_window* k = picture_known();
+  return k ? k->hwnd : NULL;
+}
+
+// Where the client area of HWND is in its surface (which starts at the window's top left).
+static void client_in_surface(void* hwnd, int surf_w, int surf_h, int* ox, int* oy, int* w, int* h) {
+  struct known_window* k = known_window(hwnd, 0);
+  *ox = 0, *oy = 0, *w = surf_w, *h = surf_h;
+  if (!k || k->cw <= 0 || k->ch <= 0) return;
+  *ox = k->cx - k->x, *oy = k->cy - k->y;
+  if (*ox < 0 || *ox >= surf_w) *ox = 0;
+  if (*oy < 0 || *oy >= surf_h) *oy = 0;
+  *w = k->cw < surf_w - *ox ? k->cw : surf_w - *ox;
+  *h = k->ch < surf_h - *oy ? k->ch : surf_h - *oy;
+}
+
+// The client area taps are fractions of: the picture window's, else the main window's.
+static int tap_area(int* x, int* y, int* w, int* h) {
+  struct known_window* k = first_window ? NULL : picture_known();
+  void* main = __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
+  if (k && k->hwnd != main && k->cw > 0 && k->ch > 0) {
+    *x = k->cx, *y = k->cy, *w = k->cw, *h = k->ch;
+    return 1;
+  }
+  *x = main_cx, *y = main_cy, *w = main_cw, *h = main_ch;
+  return main_cw > 0 && main_ch > 0;
 }
 
 void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, int cx, int cy,
@@ -295,13 +335,9 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
   struct known_window* k = known_window(hwnd, 1);
   k->x = x, k->y = y, k->w = w, k->h = h, k->visible = visible;
   k->cx = cx, k->cy = cy, k->cw = cw, k->ch = ch;
-  consider_main(k);
-  if (hwnd == main_window && !visible) {
-    // Hidden: the largest other visible one that draws, else none until one shows.
-    __atomic_store_n(&main_window, NULL, __ATOMIC_RELEASE);
-    main_area = 0;
-    for (int i = 0; i < known_count; i++)
-      if (known[i].presented) consider_main(&known[i]);
+  if (visible && w >= 320 && h >= 200 && (hwnd == main_window || (long)w * h > main_area)) {
+    main_area = (long)w * h;
+    __atomic_store_n(&main_window, hwnd, __ATOMIC_RELEASE);
   }
   if (hwnd == main_window && cw > 0 && ch > 0) {
     main_cx = cx;
@@ -422,10 +458,11 @@ static int send_posted_input(void) {
     }
     int x = (int)lroundf(e.x), y = (int)lroundf(e.y);
     if (e.type == EV_MOUSE_AT) {
-      if (main_cw <= 0 || main_ch <= 0) continue;  // no window to point into yet
+      int ax, ay, aw, ah;
+      if (!tap_area(&ax, &ay, &aw, &ah)) continue;  // no window to point into yet
       const float fx = e.x < 0 ? 0 : e.x > 1 ? 1 : e.x, fy = e.y < 0 ? 0 : e.y > 1 ? 1 : e.y;
-      x = main_cx + (int)(fx * (main_cw - 1) + 0.5f);
-      y = main_cy + (int)(fy * (main_ch - 1) + 0.5f);
+      x = ax + (int)(fx * (aw - 1) + 0.5f);
+      y = ay + (int)(fy * (ah - 1) + 0.5f);
     }
     winios_drv_post_mouse(x, y, e.flags, (unsigned)e.data, NULL);
     static int logged;
