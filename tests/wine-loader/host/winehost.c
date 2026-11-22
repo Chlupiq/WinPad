@@ -117,6 +117,10 @@ static unsigned char* before_click;  // the first window's last frame before the
 static int before_w, before_h;
 static void* windows_before_click[64];
 static int windows_before_count;
+// The program's main window and its client area (winios_window_frame, below).
+static void* main_window;
+static int main_cx, main_cy, main_cw, main_ch;
+static void note_present(void* hwnd);
 // What the run has to show (WINEHOST_* env) and what it has shown so far;
 // the host exits early once everything has shown up.
 enum { GOAL_FRAME = 1, GOAL_TYPED = 2, GOAL_NEW_WINDOW = 4, GOAL_CHANGED = 8 };
@@ -142,8 +146,20 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
   static int presents, after_input;
   long dark = 0;
   met(GOAL_FRAME);
-  if (winehost_frame_hook && hwnd && hwnd == first_window && surf_w > 0 && surf_h > 0)
-    winehost_frame_hook(hwnd, surf_w, surf_h, stride, bits);
+  note_present(hwnd);
+  // The app shows the window with a menu bar the scripted input goes to, else the main window
+  // (a game's or a launcher's, which has no title bar). The surface can be larger than the
+  // window (640x512 for a 638x471 one): the picture is the client area, which taps are
+  // fractions of.
+  void* shown = first_window ? first_window : __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
+  if (winehost_frame_hook && hwnd && hwnd == shown && surf_w > 0 && surf_h > 0) {
+    int w = surf_w, h = surf_h;
+    if (!first_window && main_cw > 0 && main_ch > 0) {
+      if (w > main_cw) w = main_cw;
+      if (h > main_ch) h = main_ch;
+    }
+    winehost_frame_hook(hwnd, w, h, stride, bits);
+  }
   for (int y = 0; y < surf_h; y++) {
     const unsigned char* row = (const unsigned char*)bits + (size_t)y * stride;
     for (int x = 0; x < surf_w; x++)
@@ -223,20 +239,69 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
 }
 
 // The program's main window: the largest visible one at least 320x200, as
-// Madeira's driver picks it (ios_main_window in driver_ios.c).
-static void* main_window;
-// The main window's client area on the screen (winios_window_frame), which an
-// absolute winehost_post_mouse is a fraction of.
-static int main_cx, main_cy, main_cw, main_ch;
+// Madeira's driver picks it (ios_main_window in driver_ios.c), declared above.
+// Its client area on the screen is what an absolute winehost_post_mouse is a
+// fraction of.
 static long main_area;
+
+// The top-level windows seen (their last frame) and whether each has drawn: a window that never
+// draws (Morrowind Launcher.exe has a 640x480 one at 0,0 behind its 638x471 dialog) is no main
+// window while one that draws is there, or the app shows nothing and taps land beside the dialog.
+static struct known_window {
+  void* hwnd;
+  int x, y, w, h, visible, cx, cy, cw, ch, presented;
+} known[64];
+static int known_count;
+
+static struct known_window* known_window(void* hwnd, int add) {
+  for (int i = 0; i < known_count; i++)
+    if (known[i].hwnd == hwnd) return &known[i];
+  if (!add) return NULL;
+  struct known_window* k = &known[known_count < 64 ? known_count++ : 63];
+  memset(k, 0, sizeof(*k));
+  k->hwnd = hwnd;
+  return k;
+}
+
+static void consider_main(struct known_window* k) {
+  if (!k->visible || k->w < 320 || k->h < 200) return;
+  void* main = __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
+  struct known_window* m = main ? known_window(main, 0) : NULL;
+  const int main_draws = m && m->presented && m->visible;
+  if (k->hwnd != main && !(k->presented && !main_draws) && ((long)k->w * k->h <= main_area || (main_draws && !k->presented)))
+    return;
+  if (k->hwnd != main) fprintf(stderr, "winehost: main window %p (%dx%d)\n", k->hwnd, k->w, k->h);
+  main_area = (long)k->w * k->h;
+  __atomic_store_n(&main_window, k->hwnd, __ATOMIC_RELEASE);
+  if (k->cw > 0 && k->ch > 0) {
+    main_cx = k->cx;
+    main_cy = k->cy;
+    main_cw = k->cw;
+    main_ch = k->ch;
+  }
+}
+
+static void note_present(void* hwnd) {
+  struct known_window* k = hwnd ? known_window(hwnd, 0) : NULL;
+  if (!k || k->presented) return;
+  k->presented = 1;
+  consider_main(k);
+}
 
 void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, int cx, int cy,
                          int cw, int ch) {
   fprintf(stderr, "winehost: window %p at %d,%d %dx%d, visible %d, client %d,%d %dx%d\n", hwnd, x,
           y, w, h, visible, cx, cy, cw, ch);
-  if (visible && w >= 320 && h >= 200 && (hwnd == main_window || (long)w * h > main_area)) {
-    main_area = (long)w * h;
-    __atomic_store_n(&main_window, hwnd, __ATOMIC_RELEASE);
+  struct known_window* k = known_window(hwnd, 1);
+  k->x = x, k->y = y, k->w = w, k->h = h, k->visible = visible;
+  k->cx = cx, k->cy = cy, k->cw = cw, k->ch = ch;
+  consider_main(k);
+  if (hwnd == main_window && !visible) {
+    // Hidden: the largest other visible one that draws, else none until one shows.
+    __atomic_store_n(&main_window, NULL, __ATOMIC_RELEASE);
+    main_area = 0;
+    for (int i = 0; i < known_count; i++)
+      if (known[i].presented) consider_main(&known[i]);
   }
   if (hwnd == main_window && cw > 0 && ch > 0) {
     main_cx = cx;
