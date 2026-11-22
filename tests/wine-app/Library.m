@@ -201,10 +201,16 @@ static NSString* BestProgram(NSString* dir, NSString* folder) {
     NSString* arch = ProgramArch([dir stringByAppendingPathComponent:path]);
     NSString* stem = Letters(name.stringByDeletingPathExtension);
     const BOOL named = want.length >= 3 && stem.length >= 3 && ([want containsString:stem] || [stem containsString:want]);
+    // A launcher word only in what the name has beyond the folder's: "StarCraft.exe" in StarCraft
+    // is the game, "Morrowind Launcher.exe" in Morrowind is not (it had won over Morrowind.exe,
+    // being larger).
+    const BOOL launcher =
+        named ? [want containsString:stem] ? NO : LauncherProgram([stem stringByReplacingOccurrencesOfString:want withString:@""])
+              : LauncherProgram(name);
     // Higher wins, field by field.
     const long long score[6] = {
         HelperProgram(name) ? 0 : 1,
-        LauncherProgram(name) && !named ? 0 : 1,
+        launcher ? 0 : 1,
         [arch isEqualToString:@"32bit"] ? 2 : [arch isEqualToString:@"64bit"] ? 1 : 0,
         named ? 1 : 0,
         (long long)walk.fileAttributes.fileSize,

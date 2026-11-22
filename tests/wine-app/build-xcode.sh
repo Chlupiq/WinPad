@@ -272,7 +272,7 @@ echo "The x86 program ran in Wine in the app on the iPad simulator, from the AOT
 # writes: the library unpacks the ones waiting in Documents and in its Inbox
 # (where AirDrop puts them) into game folders first; a broken one stays.
 docs="$data/Documents"
-rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Zed Game" "$docs/Deep" "$docs/library.txt" \
+rm -rf "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Zed Game" "$docs/Deep" "$docs/Morrowind" "$docs/library.txt" \
     "$docs/broken.winpad" "$docs/Inbox/Zed Game.winpad"
 mkdir -p "$docs/Test Game" "$docs/Plain" "$docs/Empty" "$docs/Mafia" "$docs/Inbox" "$docs/Deep/Bin" "$docs/Deep/_CommonRedist"
 # A game with nothing to name its program: the game's is in Bin, next to a larger launcher at the
@@ -283,6 +283,11 @@ cp "$sim_app/i386-windows/hello.exe" "$docs/Deep/Bin/Deep.exe"
 cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Deep/GameLauncher.exe"
 cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Deep/_CommonRedist/Big.exe"
 printf '{"gameId": "1077045575", "name": "Deep"}\n' >"$docs/Deep/goggame-1077045575.info"
+# A game whose launcher carries the folder's name and is larger than the game's program, as GOG's
+# Morrowind has it: the library picks Morrowind.exe, not "Morrowind Launcher.exe".
+mkdir -p "$docs/Morrowind"
+cp "$sim_app/i386-windows/hello.exe" "$docs/Morrowind/Morrowind.exe"
+cat "$sim_app/i386-windows/hello.exe" "$sim_app/i386-windows/hello.exe" >"$docs/Morrowind/Morrowind Launcher.exe"
 packed=$(mktemp -d)
 mkdir -p "$packed/Zed Game/DATA"
 cp "$sim_app/i386-windows/hello.exe" "$packed/Zed Game/PACKED.EXE"
@@ -364,7 +369,7 @@ xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
-for expect in 'library: 5 games' 'library: Kingdoms of Amalur: Re-Reckoning | Deep/Bin/Deep.exe | 32bit | image none | profile pf-1041720 v1 (app)' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v4 (app)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
+for expect in 'library: 6 games' 'library: Morrowind | Morrowind/Morrowind.exe | 32bit | image none' 'library: Kingdoms of Amalur: Re-Reckoning | Deep/Bin/Deep.exe | 32bit | image none | profile pf-1041720 v1 (app)' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v4 (app)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
     'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none | profile test v3' \
     'start: game Test Game/TEST.EXE, image none' 'settings: game profile test v3' \
     'settings: WINEDLLOVERRIDES=d3d8=b;dinput8=n,b;dsound=n' 'settings: WINPAD_TEST=1' \

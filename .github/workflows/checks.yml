@@ -773,6 +773,17 @@ jobs:
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$game/cwd.exe" || status=$?
           grep -E '^cwd:|current directory' "$RUNNER_TEMP/wine-loader/host-cwd/run.log" || true
           exit $status
+      - name: A 32-bit x86 program creates windows and a dialog by class atom (MAKEINTATOM, the dialog class 0x8002), as a game's launcher does, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # wow64win.dll built with patches/wine/0005 passes the atom through instead of adding the
+          # guest window base (Morrowind Launcher.exe died in NtUserCreateWindowEx). Every check prints
+          # "atomclass: ok" or "atomclass: FAIL"; the last line only when all passed.
+          WINEHOST_EXPECT_OUTPUT: "atomclass: all passed"
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/atomclass.exe" || status=$?
+          grep -E '^atomclass:|\[mach_exc\] sym|not in stack limits' "$RUNNER_TEMP/wine-loader/host-atomclass/run.log" | head -40 || true
+          exit $status
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         id: modules-iphoneos
         run: |
