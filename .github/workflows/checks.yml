@@ -1032,12 +1032,18 @@ jobs:
       - name: A 64-bit Direct3D 12 program (Madeira's cube) presents through madeira-d3d12 and Metal, through ARM64EC and FEX on an iPad simulator
         if: ${{ !cancelled() }}
         env:
-          WINEHOST_EXPECT_OUTPUT: "cube: entering the frame loop"
+          # The cube's own lines stay in its stdout buffer until it ends, so the
+          # check is on what the runtime and the host log: both shaders converted
+          # from DXIL at run time and frames presented to the window's layer.
+          WINEHOST_EXPECT_OUTPUT: "winehost: drawable 1 of Metal layer"
           WINEHOST_EXPECT_EXIT: "running,0"
           WINEHOST_SECONDS: 40
           WINEHOST_EXPECT_LOG: |
             winehost: 64-bit x86 program, running it through ARM64EC and FEX
-            winehost: Metal layer
+            [madeira-ir] converter ready (runtime DXIL conversion)
+            [madeira-d3d12] VS converted at runtime
+            [madeira-d3d12] PS converted at runtime
+            [madeira-d3d12] batch #1000 committed
         run: |
           status=0
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-cube-x64.exe" || status=$?
@@ -1096,12 +1102,7 @@ jobs:
         if: always()
         run: |
           for n in d3d12-m2-x64 d3d12-cube-x64; do
-            log=$RUNNER_TEMP/wine-loader/host-$n/run.log
-            [ -f "$log" ] || continue
-            echo "=== $n"
-            grep -vE 'err:virtual|ios_jit|tramp\[' "$log" | grep -iE '^  (ok|FAIL)|checks,|cube:|madeira|d3d12|irconv|metal|exception|winehost:' | cut -c1-300 | head -150 || true
-            echo "--- end of $n's log"
-            tail -40 "$log" | cut -c1-300
+            sh tests/wine-loader/show-run.sh "$RUNNER_TEMP/wine-loader/host-$n/run.log"
           done
 
   winpad-translator:
