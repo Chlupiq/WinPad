@@ -60,6 +60,8 @@
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include "JITPool.h"
+
 #include <math.h>
 #include <string.h>
 #include <sys/utsname.h>
@@ -2549,6 +2551,19 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [self openJITGuide];
   }
 #endif
+  // An iPad app on a Mac is held to its code signature: without a debugger the kernel kills it
+  // when Wine makes its own code executable (and FEX's JIT), so games run only from Xcode's Run.
+  if (NSProcessInfo.processInfo.isiOSAppOnMac && !winpad_jit_cs_debugged() && !self.presentedViewController &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
+    UIAlertController* alert = [UIAlertController
+        alertControllerWithTitle:@"Na Macu spusť WinPad z Xcode"
+                         message:@"Macy pouštějí iPadové aplikace jen s podepsaným kódem. Wine a JIT si ale kód "
+                                 @"vyrábějí za běhu, takže by hra spadla. Otevři projekt v Xcode, vyber cíl "
+                                 @"„My Mac (Designed for iPad)“ a stiskni Run."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+  }
   // CI (build-xcode.sh): a game's settings open, as a long press opens them, for a screenshot.
   NSString* settings_test = [NSUserDefaults.standardUserDefaults stringForKey:@"gameSettingsTest"];
   for (WinPadGame* game in settings_test ? self.games : @[])

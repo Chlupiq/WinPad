@@ -29,8 +29,10 @@ enum winpad_jit_kind {
   // TXM, and a debugger is attached now that is not Xcode's: StikDebug with universal.js,
   // which prepares the pool (winpad_jit_prepare_pool).
   WINPAD_JIT_TXM_SCRIPT,
-  // The iPad app on a Mac with Apple silicon ("Designed for iPad"): a Mac's kernel, no TXM. The
-  // app maps its pool itself (winpad_jit_prepare_mac_pool) and checks that code in it runs.
+  // The iPad app on a Mac with Apple silicon ("Designed for iPad") once a debugger has had it
+  // (CS_DEBUGGED, Xcode's Run): a Mac's kernel, no TXM. The app maps its pool itself
+  // (winpad_jit_prepare_mac_pool) and checks that code in it runs. Without a debugger the
+  // kernel kills the app at the first code it made, so that is WINPAD_JIT_NONE.
   WINPAD_JIT_MAC,
 };
 
