@@ -89,6 +89,10 @@ if [ -n "$x86_64" ]; then
         for f in "$ec"/*; do ln -s "$f" "$out/prefix/drive_c/windows/$d/"; done
     done
     cp "$here/prefix/system.reg" "$out/prefix/system.reg"
+    # Direct3D 12 (Madeira's d3d12.dll): the shader conversion service in DXMT's
+    # unix side dlopens Apple's converter from <main bundle>/d3d12/, which for
+    # winehost is its own directory (tests/wine-i386/build-dxmt-unix.sh).
+    [ ! -d "$work/dxmt-iphonesimulator/d3d12" ] || ln -s "$work/dxmt-iphonesimulator/d3d12" "$out/d3d12"
 fi
 if [ "$wow64" = 1 ]; then
     # A 32-bit process's system32 is C:\windows\syswow64; Madeira's app links

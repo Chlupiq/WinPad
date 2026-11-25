@@ -1010,6 +1010,71 @@ jobs:
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/cube-x64.exe" || status=$?
           grep -iE '\[cube\]|d3d11|dxgi|err:' "$RUNNER_TEMP/wine-loader/host-cube-x64/run.log" | head -80 || true
           exit $status
+      # Direct3D 12: Madeira's madeira-d3d12 (ARM64EC d3d12.dll), its shaders converted
+      # from DXIL by Apple's Metal Shader Converter in DXMT's unix side. Madeira's M2
+      # test drives device, queue, lists, fences and an offscreen triangle with pixels
+      # read back; its cube presents on screen.
+      # The simulator's GPU (argument buffers tier 1, no Metal 3) runs the converted
+      # shaders' pipelines but writes no pixels, as with DXMT's D3D9 cube above, so
+      # the five readback checks of the offscreen draws fail there, and the queue's
+      # completion runs late for the synchronous signal cycles. Every other check
+      # (device, queue, lists, allocators, fences, events, buffers, runtime DXIL
+      # conversion of all four pipelines) has to pass; Madeira's README has 90/90
+      # on an A15 and on its iOS VM. On an iPad: the app's d3d12-m2-x64.exe.
+      - name: A 64-bit Direct3D 12 program (Madeira's M2 test) runs its device, sync and offscreen checks through madeira-d3d12, through ARM64EC and FEX on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "90 checks, "
+          WINEHOST_EXPECT_EXIT: 1
+          WINEHOST_SECONDS: 60
+          WINEHOST_EXPECT_LOG: |
+            winehost: 64-bit x86 program, running it through ARM64EC and FEX
+            madeira-d3d12 M2: x64 caller -> ARM64EC D3D12 runtime
+            [madeira-ir] converter ready (runtime DXIL conversion)
+            [madeira-d3d12] PS converted at runtime
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-m2-x64.exe" || status=$?
+          log=$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log
+          sh tests/wine-loader/show-run.sh "$log"
+          [ $status = 0 ] || exit $status
+          sim_gpu='four more record/close/execute/signal cycles|drawn half is|undrawn half kept|the two halves differ|depth kept the near|sampled texel times tint'
+          if grep '^  FAIL' "$log" | grep -vE "$sim_gpu"; then
+            echo "the checks above fail beyond what the simulator's GPU explains"
+            exit 1
+          fi
+          echo "$(grep -c '^  ok' "$log") checks passed, $(grep -c '^  FAIL' "$log") failed on the simulator's GPU"
+      - name: A 64-bit Direct3D 12 program (Madeira's cube) presents through madeira-d3d12 and Metal, through ARM64EC and FEX on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          # The cube's own lines stay in its stdout buffer until it ends, so the
+          # check is on what the runtime and the host log: both shaders converted
+          # from DXIL at run time and frames presented to the window's layer.
+          WINEHOST_EXPECT_OUTPUT: "winehost: drawable 1 of Metal layer"
+          WINEHOST_EXPECT_EXIT: "running,0"
+          WINEHOST_SECONDS: 40
+          WINEHOST_EXPECT_LOG: |
+            winehost: 64-bit x86 program, running it through ARM64EC and FEX
+            [madeira-ir] converter ready (runtime DXIL conversion)
+            [madeira-d3d12] VS converted at runtime
+            [madeira-d3d12] PS converted at runtime
+            [madeira-d3d12] batch #1000 committed
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-cube-x64.exe" || status=$?
+          grep -vE 'err:virtual|ios_jit|tramp\[' "$RUNNER_TEMP/wine-loader/host-d3d12-cube-x64/run.log" | grep -iE 'cube:|madeira|d3d12|irconv|metal|exception|winehost:' | head -300 || true
+          echo "--- end of the run log ---"
+          tail -80 "$RUNNER_TEMP/wine-loader/host-d3d12-cube-x64/run.log" | cut -c1-400 || true
+          exit $status
+      - name: Run logs of the Direct3D 12 programs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: d3d12-run-logs
+          path: |
+            ${{ runner.temp }}/wine-loader/host-d3d12-m2-x64/run.log
+            ${{ runner.temp }}/wine-loader/host-d3d12-cube-x64/run.log
+          if-no-files-found: ignore
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
@@ -1047,6 +1112,13 @@ jobs:
           name: fex-cache-hello
           path: ${{ runner.temp }}/fexcache
           if-no-files-found: ignore
+      # Again at the job's end, where the job log's tail keeps it in reach.
+      - name: What the Direct3D 12 programs printed
+        if: always()
+        run: |
+          for n in d3d12-m2-x64 d3d12-cube-x64; do
+            sh tests/wine-loader/show-run.sh "$RUNNER_TEMP/wine-loader/host-$n/run.log"
+          done
 
   winpad-translator:
     # WinPad Translator (tools/winpad-translator): turns any game's code maps into its AOT image.

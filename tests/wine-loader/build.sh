@@ -26,8 +26,13 @@ if [ ! -d "$work/madeira/.git" ]; then
 fi
 # arm64ec-windows: Madeira's ARM64EC Wine modules (ntdll, the system DLLs, DXMT's
 # d3d11/dxgi/winemetal and FEX's xtajit64.dll), for 64-bit x86 programs.
+# madeira-d3d12 and app/Madeira/d3d12: Madeira's Direct3D 12 (its d3d12.dll is in
+# arm64ec-windows): the unix conversion service's sources, Apple's Metal Shader
+# Converter headers and its iOS library, which tests/wine-i386/build-dxmt-unix.sh
+# builds into DXMT's unix side.
 git -C "$work/madeira" sparse-checkout set --no-cone /build/ /app/Madeira/Winios/ \
-    /app/Madeira/aarch64-windows/ /app/Madeira/arm64ec-windows/
+    /app/Madeira/aarch64-windows/ /app/Madeira/arm64ec-windows/ \
+    /madeira-d3d12/ /app/Madeira/d3d12/
 git -C "$work/madeira" checkout -q -f "$MADEIRA_COMMIT"
 
 wine="$work/madeira/wine"

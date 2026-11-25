@@ -65,6 +65,9 @@ for sdk in iphoneos iphonesimulator; do
     cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$sdk/"
     [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$sdk/"
+    # Apple's Metal Shader Converter for Direct3D 12 (build-dxmt-unix.sh), which
+    # the app carries as d3d12/libmetalirconverter.dylib next to its executable.
+    [ -z "$d3d9" ] || [ ! -d "$work/dxmt-$sdk/d3d12" ] || cp -R "$work/dxmt-$sdk/d3d12" "$proj/wine/$sdk/"
     [ -z "$opengl" ] || cp "$work/opengl-$sdk/libwinpad_opengl.a" "$proj/lib/$sdk/"
     cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$sdk/"
 done
@@ -81,13 +84,14 @@ fi
 cp -R "$work/i386-windows" "$proj/wine/"
 # Madeira's ARM64EC Wine modules, for 64-bit x86 programs (main.m MakePrefix): plain PE
 # files, the same for both platforms, loaded into the JIT pool. Of its test programs only
-# hello-x64.exe and the Direct3D 11 cube-x64.exe come along.
+# hello-x64.exe, the Direct3D 11 cube-x64.exe and the Direct3D 12 ones
+# (d3d12-m2-x64.exe: device, sync, offscreen pixels; d3d12-cube-x64.exe on screen) come along.
 ec="$work/madeira/app/Madeira/arm64ec-windows"
 if [ -f "$ec/ntdll.dll" ]; then
     mkdir -p "$proj/wine/arm64ec-windows"
     for f in "$ec"/*; do
         case ${f##*/} in
-            hello-x64.exe | cube-x64.exe) ;;
+            hello-x64.exe | cube-x64.exe | d3d12-m2-x64.exe | d3d12-cube-x64.exe) ;;
             *-x64.exe | *-x64.dll) continue ;;
         esac
         cp "$f" "$proj/wine/arm64ec-windows/"
@@ -184,6 +188,12 @@ build() {
     if [ -d "$proj/wine/arm64ec-windows" ]; then
         for f in ntdll.dll xtajit64.dll kernel32.dll d3d11.dll dxgi.dll winemetal.dll hello-x64.exe; do
             test -f "$product/arm64ec-windows/$f" || { echo "the $1 build lacks arm64ec-windows/$f" >&2; exit 1; }
+        done
+    fi
+    if [ -d "$proj/wine/$1/d3d12" ]; then
+        for f in d3d12/libmetalirconverter.dylib arm64ec-windows/d3d12.dll arm64ec-windows/d3d12core.dll \
+            arm64ec-windows/madeira_d3d12.dll arm64ec-windows/d3d12-cube-x64.exe; do
+            test -f "$product/$f" || { echo "the $1 build lacks $f" >&2; exit 1; }
         done
     fi
     test -f "$product/profiles/mafia.json" || { echo "the $1 build lacks the game profiles" >&2; exit 1; }
