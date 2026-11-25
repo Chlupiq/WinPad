@@ -1419,7 +1419,12 @@ static CFTimeInterval fps_shown;
   printf("WinPad Wine: the program starts %s in the game folder: %s\n",
          next ? [next[@"exe"] UTF8String] : "a program outside", next ? "handed over to the next launch" : "not handed over");
   fflush(stdout);
-  if (!next) return;
+  // A program outside the game folder: nothing to hand over, and a later start may be.
+  [NSFileManager.defaultManager removeItemAtPath:HandoffFile() error:nil];
+  if (!next) {
+    self.handoffShown = NO;
+    return;
+  }
   NSMutableDictionary* saved = [next mutableCopy];
   saved[@"time"] = @(NSDate.date.timeIntervalSince1970);
   [[NSJSONSerialization dataWithJSONObject:saved options:0 error:nil] writeToFile:HandoffNext() atomically:YES];
@@ -1909,10 +1914,11 @@ static CFTimeInterval fps_shown;
     NSLog(@"WinPad Wine: recording code maps needs the JIT: only in a simulator");
 #endif
   }
-  // A game's launcher started the game in the last run (handOff): start it now, once.
+  // A game's launcher started the game in the last run (handOff): the library starts it, once,
+  // through Spustit's checks (StikDebug's JIT); the file goes when a program starts.
   NSData* handoff = [NSData dataWithContentsOfFile:HandoffNext()];
-  [NSFileManager.defaultManager removeItemAtPath:HandoffNext() error:nil];
   NSDictionary* next = handoff ? [NSJSONSerialization JSONObjectWithData:handoff options:0 error:nil] : nil;
+  WinPadGame* handed_over = nil;
   if ([next isKindOfClass:NSDictionary.class] && [next[@"folder"] isKindOfClass:NSString.class] &&
       [next[@"exe"] isKindOfClass:NSString.class] && NSDate.date.timeIntervalSince1970 - [next[@"time"] doubleValue] < 600 &&
       ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"])
@@ -1923,16 +1929,15 @@ static CFTimeInterval fps_shown;
         if ([next[@"args"] isKindOfClass:NSArray.class]) settings[@"args"] = next[@"args"];
         game.settings = settings;
         NSLog(@"WinPad Wine: starting %@, which the game's launcher started", game.exe);
-        WineViewController* wine = [WineViewController new];
-        wine.program = @"game";
-        wine.game = game;
-        self.window.rootViewController = wine;
-        [self.window makeKeyAndVisible];
-        return;
+        handed_over = game;
+        break;
       }
+  if (!handed_over) [NSFileManager.defaultManager removeItemAtPath:HandoffNext() error:nil];
   LibraryViewController* library = [LibraryViewController new];
+  library.handedOver = handed_over;
   __weak UIWindow* window = self.window;
   library.start = ^(NSString* program, WinPadGame* game) {
+    [NSFileManager.defaultManager removeItemAtPath:HandoffNext() error:nil];
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
       NSString* path = DocumentsPath(@"library.txt");
       NSString* report = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil] ?: @"";
