@@ -1,0 +1,37 @@
+From: WinPad
+Subject: [PATCH] virtual: Bind opengl32.dll to the host's OpenGL unix side.
+
+opengl32.dll got the "GL absent" stub table: it loaded, and every wgl and gl
+call failed. A WinPad host with OpenGL (tests/opengl/build.sh: Wine's
+opengl32 unix side, gl4es, an EGL on Apple's OpenGL ES) has
+winpad_opengl32_unix_table(), which gives its 64-bit and 32-bit tables; a
+host without it has a stub of it that returns NULL, and the stub table stays.
+
+Applies to willfaust/Madeira at 48f9764 (build/), after 0001-0011.
+---
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -9250,6 +9250,10 @@
+  * which is where the caller's compressed input and PCM output actually live. */
+ extern const void *winegstreamer_unix_call_wow64_funcs[];
+ 
++/* WinPad: opengl32's unix call tables (tests/opengl/opengl32_table.c), or
++ * NULL from the host's stub when it has no OpenGL. */
++extern const void *winpad_opengl32_unix_table( int wow );
++
+ /* MADEIRA: winegstreamer's unix side is bound for 32-bit (wow64) callers.
+  * A 64-bit (ARM64EC) caller gets it only with MADEIRA_WG_64BIT=1 (env, or
+  * env.MADEIRA_WG_64BIT = 1 in madeira.cfg); by default it keeps the generic
+@@ -9559,6 +9563,12 @@
+             }
+             libname = "win32u (stub table)";
+             funcs64 = funcs_wow64 = (const void *)ios_stub_unix_call_table;
++        } else if (match && strstr(match, "opengl32") && winpad_opengl32_unix_table( wow )) {
++            /* WinPad: opengl32's unix side is linked into the host
++             * (tests/opengl/build.sh): desktop GL through gl4es and OpenGL ES. */
++            libname = "opengl32 (WinPad, gl4es)";
++            funcs64 = winpad_opengl32_unix_table( FALSE );
++            funcs_wow64 = winpad_opengl32_unix_table( TRUE );
+         } else if (match && strstr(match, "opengl32")) {
+             pthread_once( &ios_stub_tables_once, ios_init_stub_tables );
+             WARN_(module)("iOS: module %p (%s) -> GL-absent stub table (attach ok, wgl/gl NOT_SUPPORTED)\n",

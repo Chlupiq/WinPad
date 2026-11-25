@@ -947,6 +947,39 @@ jobs:
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/d3d10-triangle.exe" || status=$?
           grep -E 'WINPAD-D3D10|err:' "$RUNNER_TEMP/wine-loader/host-d3d10-triangle/run.log" | head -60 || true
           exit $status
+      # OpenGL for 32-bit programs (tests/opengl): Wine's opengl32 with its unix side,
+      # win32u's EGL path (patches/wine/0004) on WinPad's EGL, gl4es and Apple's
+      # OpenGL ES. Built for the iPad too, for the app below; run on the simulator.
+      - name: OpenGL's unix side (opengl32, gl4es, WinPad's EGL) for the iPad simulator and the iPad
+        if: ${{ !cancelled() }}
+        id: opengl
+        run: |
+          sh tests/opengl/build.sh "$RUNNER_TEMP/wine-loader" iphonesimulator
+          sh tests/opengl/build.sh "$RUNNER_TEMP/wine-loader" iphoneos
+      - name: A 32-bit OpenGL program draws a textured quad and a triangle through gl4es and OpenGL ES, on an iPad simulator
+        if: ${{ !cancelled() && steps.opengl.outcome == 'success' }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "WINPAD-GL: swap 3 ok"
+          WINEHOST_EXPECT_EXIT: "running,43"
+          WINEHOST_SECONDS: 30
+          WINEHOST_EXPECT_LOG: |
+            WINPAD-GL: context current
+            WINPAD-GL: glActiveTextureARB found
+            WINPAD-GL: the textured quad drew
+            winpad-egl: swap 1 of surface
+            opengl32 (WinPad, gl4es)
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/gl-triangle.exe" || status=$?
+          grep -E 'WINPAD-GL|winpad-egl|LIBGL|opengl|err:wgl|err:opengl' "$RUNNER_TEMP/wine-loader/host-gl-triangle/run.log" | head -80 || true
+          exit $status
+      - name: Window content of the OpenGL program
+        if: ${{ !cancelled() && steps.opengl.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-window-gl-triangle
+          path: ${{ runner.temp }}/wine-loader/host-gl-triangle/frames
+          if-no-files-found: ignore
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
