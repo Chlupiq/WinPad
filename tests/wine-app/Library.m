@@ -3232,10 +3232,39 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   // may load by name, so its imports do not show them.
   NSArray* want_dx = [game.settings[@"nativeDirectX"] isKindOfClass:NSArray.class] ? game.settings[@"nativeDirectX"] : @[];
   if (!missing.count && (have_directx || !want_dx.count || [game.arch isEqualToString:@"64bit"])) return YES;
-  NSMutableArray<NSString*>* fetch = [NSMutableArray new];
-  NSMutableArray<NSString*>* others = [NSMutableArray new];
   // The download holds the 32-bit DirectX DLLs only: a 64-bit game gets none from it.
   const BOOL x64 = [game.arch isEqualToString:@"64bit"];
+  __weak LibraryViewController* weak = self;
+  // First the game's own installers (_CommonRedist, DirectX, vcredist...), with no download:
+  // what they hold goes into the app's shared folder, then the check runs again.
+  NSString* game_dir = [Documents() stringByAppendingPathComponent:game.folder];
+  NSString* scanned_key = [@"installersScanned." stringByAppendingString:game.folder];
+  if (missing.count && !x64 &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:scanned_key] &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] && WinPadGameInstallers(game_dir).count) {
+    UIAlertController* busy =
+        [UIAlertController alertControllerWithTitle:@"Hledám chybějící DLL"
+                                            message:[NSString stringWithFormat:@"Hra potřebuje %@. Hledám je "
+                                                                               @"v instalačkách ve složce hry…",
+                                                                               [missing componentsJoinedByString:@", "]]
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:busy animated:YES completion:nil];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      const int count = WinPadTakeDLLsFromGameInstallers(game_dir);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [NSUserDefaults.standardUserDefaults setBool:YES forKey:scanned_key];
+        printf("WinPad Library: %d DLLs out of %s's installers\n", count, game.folder.UTF8String);
+        [busy dismissViewControllerAnimated:YES completion:^{
+          LibraryViewController* me = weak;
+          me.dllsChecked = NO;
+          [me startProgram:program game:game];
+        }];
+      });
+    });
+    return NO;
+  }
+  NSMutableArray<NSString*>* fetch = [NSMutableArray new];
+  NSMutableArray<NSString*>* others = [NSMutableArray new];
   for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx && !x64 ? fetch : others addObject:dll];
   if (!have_directx && !x64)
     for (id verb in want_dx)
@@ -3243,7 +3272,6 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   printf("WinPad Library: %s lacks DLLs: %s\n", game.folder.UTF8String,
          [missing componentsJoinedByString:@", "].UTF8String);
   if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return YES;
-  __weak LibraryViewController* weak = self;
   void (^start)(void) = ^{
     [weak startProgram:program game:game];
   };
@@ -3278,6 +3306,20 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
               start();
               return;
             }
+            // DirectX came, the rest may be Visual C++'s: the check runs again.
+            if (!error) {
+              BOOL vc = NO;
+              for (NSString* dll in others)
+                if (WinPadVCRedistYearOf(dll) &&
+                    ![NSUserDefaults.standardUserDefaults
+                        boolForKey:[NSString stringWithFormat:@"vcredist%d", WinPadVCRedistYearOf(dll)]])
+                  vc = YES;
+              if (vc) {
+                me.dllsChecked = NO;
+                start();
+                return;
+              }
+            }
             NSString* text = error ? [NSString stringWithFormat:@"DirectX se nestáhl: %@\n\nChybí: %@", error,
                                                                 [still componentsJoinedByString:@", "]]
                                    : [NSString stringWithFormat:@"Tyhle DLL nemá ani DirectX od Microsoftu: %@",
@@ -3288,6 +3330,51 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     return NO;
   }
   if (!missing.count) return YES;
+  // Microsoft's Visual C++ runtime (MFC above all, Wine has its own C runtimes): its installer
+  // for the year of the first such DLL, once per year; then the check runs again.
+  int year = 0;
+  for (NSString* dll in missing) {
+    const int y = x64 ? 0 : WinPadVCRedistYearOf(dll);
+    if (y && ![NSUserDefaults.standardUserDefaults boolForKey:[NSString stringWithFormat:@"vcredist%d", y]]) {
+      year = y;
+      break;
+    }
+  }
+  if (year && !WinPadDirectXDownloading()) {
+    NSMutableArray* names = [NSMutableArray new];
+    for (NSString* dll in missing)
+      if (WinPadVCRedistYearOf(dll) == year) [names addObject:dll];
+    UIAlertController* busy = [UIAlertController
+        alertControllerWithTitle:@"Stahuji chybějící DLL"
+                         message:[NSString stringWithFormat:@"Hra potřebuje %@ z Visual C++ %d. Stahuji ho přímo od "
+                                                            @"Microsoftu…",
+                                                            [names componentsJoinedByString:@", "], year]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    NSString* intro = busy.message;
+    [self presentViewController:busy animated:YES completion:nil];
+    WinPadVCRedistDownload(
+        year,
+        ^(double fraction) {
+          busy.message = fraction < 1 ? [NSString stringWithFormat:@"%@\n%d %%", intro, (int)(fraction * 100)]
+                                      : [intro stringByAppendingString:@"\nRozbaluji…"];
+        },
+        ^(NSString* error) {
+          [busy dismissViewControllerAnimated:YES completion:^{
+            LibraryViewController* me = weak;
+            if (!me) return;
+            if (error) {
+              [me askToStartWithout:[NSString stringWithFormat:@"Visual C++ %d se nestáhl: %@\n\nChybí: %@", year, error,
+                                                               [names componentsJoinedByString:@", "]]
+                              start:start
+                             cancel:cancel];
+              return;
+            }
+            me.dllsChecked = NO;
+            start();
+          }];
+        });
+    return NO;
+  }
   // Only DLLs the app cannot get: said once for this game and these names.
   NSString* key = [@"dllsMissing." stringByAppendingString:game.folder];
   NSString* names = [missing componentsJoinedByString:@", "];

@@ -1040,6 +1040,9 @@ static NSString* MakePrefix(NSString* bundle, BOOL x64) {
   // lacks, and with the setting also those it has, loaded native first (ApplyGameSettings).
   directx_native = WinPadDirectXLink([prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"],
                                      [bundle stringByAppendingPathComponent:@"i386-windows"]);
+  // DLLs out of the game's own installers and Microsoft's Visual C++ (WinPadRedist.m): those Wine lacks.
+  WinPadExtraLink([prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"],
+                  [bundle stringByAppendingPathComponent:@"i386-windows"]);
   // The registry Wine's wineboot would have made: the builtin COM classes
   // the games need, such as DirectSound's audio device enumerator
   // (tests/wine-loader/prefix/system.reg, the same as run-host.sh's prefix).

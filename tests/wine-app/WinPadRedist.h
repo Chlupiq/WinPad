@@ -53,4 +53,26 @@ NSArray<NSString*>* WinPadDirectXDLLsForVerbs(NSArray* verbs);
 // has its own: links them into SYSWOW64 and returns their module names, to load native first.
 NSArray<NSString*>* WinPadDirectXLinkNative(NSString* syswow64, NSArray<NSString*>* dlls);
 
+// DLLs the app took out of other Microsoft installers: a game's own (its _CommonRedist,
+// DirectX or vcredist folder) and the Visual C++ runtimes it downloads. 32-bit, lowercase
+// names, shared by all games (Documents/.redist/extra). main.m links those Wine lacks into
+// syswow64, like DirectX's.
+NSString* WinPadExtraDir(void);
+NSArray<NSString*>* WinPadExtraLink(NSString* syswow64, NSString* bundleI386);
+
+// The installers in the game's folder GAMEFOLDER that may hold DLLs: cabinets, .msi files and
+// programs named like Microsoft's redistributables (vcredist, vc_redist, DXSETUP's cabinets),
+// up to four folders deep. Full paths.
+NSArray<NSString*>* WinPadGameInstallers(NSString* gameFolder);
+// Takes the 32-bit DLLs out of those installers into WinPadExtraDir (a file already there
+// stays). How many new DLLs. Reads big files: call it off the main queue.
+int WinPadTakeDLLsFromGameInstallers(NSString* gameFolder);
+
+// The Visual C++ installer year (2005 ... 2022) whose package holds DLL, or 0.
+int WinPadVCRedistYearOf(NSString* dll);
+// Downloads that year's 32-bit Visual C++ installer from Microsoft (winetricks' links,
+// Redist.c), checks it and takes its DLLs out into WinPadExtraDir. As WinPadDirectXDownload:
+// one download (of either) at a time, PROGRESS and DONE on the main queue.
+void WinPadVCRedistDownload(int year, void (^progress)(double fraction), void (^done)(NSString* _Nullable error));
+
 NS_ASSUME_NONNULL_END
