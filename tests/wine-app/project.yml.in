@@ -123,6 +123,9 @@ targets:
           cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/"
           # 64-bit x86 programs: Madeira's ARM64EC modules (plain PE files, both platforms).
           if [ -d "$PROJECT_DIR/wine/arm64ec-windows" ]; then cp -R "$PROJECT_DIR/wine/arm64ec-windows" "$app/"; fi
+          # Direct3D 12: Apple's Metal Shader Converter, dlopened from <app>/d3d12/.
+          rm -rf "$app/d3d12"
+          if [ -d "$PROJECT_DIR/wine/$PLATFORM_NAME/d3d12" ]; then cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/d3d12" "$app/"; fi
           cp -R "$PROJECT_DIR/wine/i386-windows" "$PROJECT_DIR/wine/nls" "$PROJECT_DIR/wine/fonts" "$app/"
           cp "$PROJECT_DIR/wine/system.reg" "$app/"
           if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; fi
@@ -136,7 +139,8 @@ targets:
             cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$app/PlugIns/"
           fi
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
-            for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib; do
+            for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib "$app"/d3d12/*.dylib; do
+              [ -f "$dylib" ] || continue
               codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
             done
           fi

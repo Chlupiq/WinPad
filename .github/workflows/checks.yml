@@ -1010,6 +1010,37 @@ jobs:
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/cube-x64.exe" || status=$?
           grep -iE '\[cube\]|d3d11|dxgi|err:' "$RUNNER_TEMP/wine-loader/host-cube-x64/run.log" | head -80 || true
           exit $status
+      # Direct3D 12: Madeira's madeira-d3d12 (ARM64EC d3d12.dll), its shaders converted
+      # from DXIL by Apple's Metal Shader Converter in DXMT's unix side. Madeira's M2
+      # test drives device, queue, lists, fences and an offscreen triangle with pixels
+      # read back; its cube presents on screen.
+      - name: A 64-bit Direct3D 12 program (Madeira's M2 test) runs its device, sync and offscreen checks through madeira-d3d12, through ARM64EC and FEX on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "checks, 0 failures"
+          WINEHOST_SECONDS: 60
+          WINEHOST_EXPECT_LOG: |
+            winehost: 64-bit x86 program, running it through ARM64EC and FEX
+            madeira-d3d12 M2: x64 caller -> ARM64EC D3D12 runtime
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-m2-x64.exe" || status=$?
+          grep -iE '^  (ok|FAIL)|checks,|madeira|d3d12|irconv|err:' "$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log" | head -200 || true
+          exit $status
+      - name: A 64-bit Direct3D 12 program (Madeira's cube) presents through madeira-d3d12 and Metal, through ARM64EC and FEX on an iPad simulator
+        if: ${{ !cancelled() }}
+        env:
+          WINEHOST_EXPECT_OUTPUT: "cube: entering the frame loop"
+          WINEHOST_EXPECT_EXIT: "running,0"
+          WINEHOST_SECONDS: 40
+          WINEHOST_EXPECT_LOG: |
+            winehost: 64-bit x86 program, running it through ARM64EC and FEX
+            winehost: Metal layer
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-cube-x64.exe" || status=$?
+          grep -iE 'cube:|madeira|d3d12|irconv|err:' "$RUNNER_TEMP/wine-loader/host-d3d12-cube-x64/run.log" | head -120 || true
+          exit $status
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
