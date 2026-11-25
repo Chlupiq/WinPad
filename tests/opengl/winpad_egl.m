@@ -182,6 +182,34 @@ static int display_dummy;
 static void *gles_lib;
 static Class eagl_class;
 
+/* The surfaces and contexts alive: a handle EGL did not hand out, or one already destroyed,
+ * is an error (EGL_BAD_SURFACE / EGL_BAD_CONTEXT) as real EGL reports it, not a second free. */
+static void *live[256];
+static int live_count;
+
+static void live_add( void *handle )
+{
+    pthread_mutex_lock( &lock );
+    if (live_count < (int)(sizeof(live) / sizeof(live[0]))) live[live_count++] = handle;
+    pthread_mutex_unlock( &lock );
+}
+
+/* Removes HANDLE; FALSE when it was not alive. */
+static int live_remove( void *handle )
+{
+    int found = 0;
+    pthread_mutex_lock( &lock );
+    for (int i = 0; i < live_count; i++)
+        if (live[i] == handle)
+        {
+            live[i] = live[--live_count];
+            found = 1;
+            break;
+        }
+    pthread_mutex_unlock( &lock );
+    return found;
+}
+
 static EGLBoolean fail( EGLint error )
 {
     last_error = error;
@@ -327,6 +355,7 @@ static struct surface *new_surface( void *hwnd, EGLint width, EGLint height )
     s->hwnd = hwnd;
     s->width = width > 0 ? width : 1;
     s->height = height > 0 ? height : 1;
+    live_add( s );
     return s;
 }
 
@@ -364,7 +393,12 @@ static EGLSurface egl_CreatePbufferSurface( EGLDisplay dpy, EGLConfig config, co
 static EGLBoolean egl_DestroySurface( EGLDisplay dpy, EGLSurface handle )
 {
     struct surface *s = handle;
-    if (!s) return fail( EGL_BAD_SURFACE );
+    if (!s || !live_remove( s ))
+    {
+        LOG( "eglDestroySurface of %p, which is not a live surface\n", s );
+        return fail( EGL_BAD_SURFACE );
+    }
+    LOG( "surface %p destroyed after %u swaps\n", s, s->swaps );
     /* tex and rb go with their share group; a surface lives as long as its window */
     if (current_draw == s) current_draw = NULL;
     if (current && current->fbo_surface == s) current->fbo_surface = NULL;
@@ -508,6 +542,7 @@ static EGLContext egl_CreateContext( EGLDisplay dpy, EGLConfig config, EGLContex
     }
     if (!(ctx = calloc( 1, sizeof(*ctx) ))) { [eagl release]; fail( EGL_BAD_ALLOC ); return NULL; }
     ctx->eagl = eagl;
+    live_add( ctx );
 
     pthread_mutex_lock( &lock );
     {
@@ -537,7 +572,12 @@ static EGLContext egl_CreateContext( EGLDisplay dpy, EGLConfig config, EGLContex
 static EGLBoolean egl_DestroyContext( EGLDisplay dpy, EGLContext handle )
 {
     struct context *ctx = handle;
-    if (!ctx) return fail( EGL_BAD_CONTEXT );
+    if (!ctx || !live_remove( ctx ))
+    {
+        LOG( "eglDestroyContext of %p, which is not a live context\n", ctx );
+        return fail( EGL_BAD_CONTEXT );
+    }
+    LOG( "context %p destroyed\n", ctx );
     if (current == ctx)
     {
         [eagl_class setCurrentContext:nil];
