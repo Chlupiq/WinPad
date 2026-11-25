@@ -784,6 +784,25 @@ jobs:
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/atomclass.exe" || status=$?
           grep -E '^atomclass:|\[mach_exc\] sym|not in stack limits' "$RUNNER_TEMP/wine-loader/host-atomclass/run.log" | head -40 || true
           exit $status
+      - name: A 32-bit x86 program in a game's folder that starts another program there (as a game's launcher starts the game) hands the start over to the app (patches/madeira/0014)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "spawn: handed over"
+        run: |
+          game="$RUNNER_TEMP/handoff-game"
+          rm -rf "$game"
+          mkdir -p "$game"
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/spawn.exe" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$game/"
+          # As the app sets them (tests/wine-app/main.m): the file, and its Documents as a DOS path.
+          export SIMCTL_CHILD_WINPAD_HANDOFF_FILE="$game/handoff.txt"
+          export SIMCTL_CHILD_WINPAD_HANDOFF_DIR="Z:$(echo "$RUNNER_TEMP" | tr / '\\')\\"
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$game/spawn.exe" || status=$?
+          grep -E '^spawn:|\[handoff\]' "$RUNNER_TEMP/wine-loader/host-spawn/run.log" || true
+          cat "$game/handoff.txt" || true
+          [ $status = 0 ] || exit $status
+          grep -qi '^image=Z:.*handoff-game.hello\.exe$' "$game/handoff.txt" &&
+            grep -qF -- '-arg "two words"' "$game/handoff.txt" ||
+            { echo "the hand-off file does not name hello.exe and its arguments" >&2; exit 1; }
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         id: modules-iphoneos
         run: |
