@@ -89,8 +89,10 @@ python3 -I "$here/wow64-ptrs.py" "$wine/dlls/opengl32/unix_thunks.c" "$out/src/u
 sed -e 's/strcpy( UlongToPtr(\*wow64_str), str )/strcpy( ios_wow_host_ptr(*wow64_str), str )/' \
     -e 's/\*wow_ptr = PtrToUlong( buffer->map_ptr )/*wow_ptr = ios_wow_guest_ptr32( buffer->map_ptr )/' \
     -e 's/\.formats = ULongToPtr(params32->formats)/.formats = ios_wow_host_ptr(params32->formats)/' \
+    -e 's/client_sync->unix_handle = /((struct __GLsync *)winpad_gl_client_ptr( client_sync ))->unix_handle = /' \
     "$wine/dlls/opengl32/unix_wgl.c" >"$out/src/unix_wgl.c"
-for s in 'ios_wow_host_ptr(\*wow64_str)' 'ios_wow_guest_ptr32( buffer->map_ptr )' 'ios_wow_host_ptr(params32->formats)'; do
+for s in 'ios_wow_host_ptr(\*wow64_str)' 'ios_wow_guest_ptr32( buffer->map_ptr )' 'ios_wow_host_ptr(params32->formats)' \
+    'winpad_gl_client_ptr( client_sync ))->unix_handle'; do
     grep -q "$s" "$out/src/unix_wgl.c" || { echo "unix_wgl.c: no $s after the rewrite" >&2; exit 1; }
 done
 python3 -I - "$out/src/unix_private.h" <<'EOF'
@@ -107,8 +109,13 @@ s = s.replace(old, '''static inline TEB *get_teb64( ULONG teb32 )
 {
     return NtCurrentTeb();  /* WinPad: the 32-bit TEB is a guest address here */
 }''')
+old = 'return (GLsync)(UINT_PTR)sync->unix_handle;'
+assert old in s, 'get_unix_sync changed upstream'
+s = s.replace(old, 'return (GLsync)(UINT_PTR)((struct __GLsync *)winpad_gl_client_ptr( sync ))->unix_handle;')
 open(p, 'w').write(s)
 EOF
+# The client objects (context, pbuffer, sync) of a 32-bit program are at guest addresses.
+python3 -I "$here/client-ptrs.py" "$wine" "$out/src"
 ntdll_flags="-fvisibility=hidden -Wno-implicit-function-declaration -Wno-int-conversion
     -include $wine/build-macos/include/config.h -include $madeira/build/ntdll-unix/shims/wine_ios_exit.h
     -I$madeira/build/ntdll-unix/shims -I$out/src -I$wine/build-macos/include -I$wine/include

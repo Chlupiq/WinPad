@@ -107,6 +107,8 @@ for f in "$wine"/dlls/win32u/*.c "$wine"/dlls/win32u/dibdrv/*.c; do
             mkdir -p "$out/src"
             cp "$f" "$out/src/opengl.c"
             patch -s "$out/src/opengl.c" "$root/patches/wine/0004-ios-opengl-egl.patch"
+            # A 32-bit program's context and pbuffer objects are at guest addresses.
+            python3 -I "$root/tests/opengl/client-ptrs.py" "$wine" "$out/src"
             printf '#define SONAME_LIBEGL "winpad-egl"\n' >"$out/src/egl_ios.h"
             compile "$out/src/opengl.c" "$name" -include "$out/src/egl_ios.h"
             continue ;;
