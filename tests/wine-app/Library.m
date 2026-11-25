@@ -2539,6 +2539,13 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   [super viewDidAppear:animated];
   [self becomeFirstResponder];
   [self openPackages:@[]];
+  if (self.handedOver && !self.installing) {
+    WinPadGame* game = self.handedOver;
+    self.handedOver = nil;
+    [self focusFolder:game.folder];
+    [self startProgram:@"game" game:game];
+    return;
+  }
 #if !TARGET_OS_SIMULATOR
   // The first launch on a device without the JIT: how to turn it on, once. A Mac turns it on
   // itself.
