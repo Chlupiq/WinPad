@@ -144,7 +144,7 @@ targets:
       base:
         INFOPLIST_FILE: Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: @BUNDLE@
-        CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
+        CODE_SIGN_ENTITLEMENTS: "$(WINPAD_APP_ENTITLEMENTS_$(WINPAD_VPN)_$(WINPAD_MEMORY))"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         # The iPad build also runs on a Mac with Apple silicon (Xcode's "My Mac (Designed for

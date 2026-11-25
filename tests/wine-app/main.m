@@ -47,6 +47,7 @@
 // Documents/fexcache/<game folder>/codemap/new (the test programs:
 // Documents/fexcache/codemap/new), so a later image can have it. If the run
 // stops the app, the next launch shows the log of that run.
+#include <os/proc.h>
 #import <objc/message.h>
 #import <AVFoundation/AVFoundation.h>
 #import <GameController/GameController.h>
@@ -2024,6 +2025,10 @@ static CFTimeInterval fps_shown;
 
 @implementation WineAppDelegate
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)options {
+  // How much memory iPadOS lets the app have (more with the increased memory limit
+  // entitlement, WINPAD_MEMORY in WinPad.xcconfig): games' RAM and video memory share it.
+  printf("WinPad Wine: memory available to the app: %llu MB of %llu MB\n",
+         (unsigned long long)os_proc_available_memory() >> 20, NSProcessInfo.processInfo.physicalMemory >> 20);
   // StikDebug started the app with its script attached: the JIT pool is made now, while the
   // script waits for it (WinPadJIT.m).
   if (WinPadJITAttached()) {

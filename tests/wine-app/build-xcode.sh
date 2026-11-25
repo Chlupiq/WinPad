@@ -114,7 +114,7 @@ cp "$here/../../tools/winpad-translator/data/profiles/"*.json "$proj/profiles/"
 # And those made from Proton's umu-protonfixes (import-protonfixes.py), found by Steam or GOG id.
 cp "$here/../../tools/winpad-translator/data/protonfixes.json" "$proj/profiles/"
 # The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
-cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
+cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$here/WinPadMemory.entitlements" "$proj/"
 sh "$here/build-stikjit.sh" "$proj/StikJIT"
 # libmspack's cabinet decompressor, for Microsoft's DirectX installer (Redist.c).
 sh "$here/fetch-mspack.sh" "$proj/mspack"
