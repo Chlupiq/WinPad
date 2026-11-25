@@ -1014,21 +1014,36 @@ jobs:
       # from DXIL by Apple's Metal Shader Converter in DXMT's unix side. Madeira's M2
       # test drives device, queue, lists, fences and an offscreen triangle with pixels
       # read back; its cube presents on screen.
+      # The simulator's GPU (argument buffers tier 1, no Metal 3) runs the converted
+      # shaders' pipelines but writes no pixels, as with DXMT's D3D9 cube above, so
+      # the five readback checks of the offscreen draws fail there, and the queue's
+      # completion runs late for the synchronous signal cycles. Every other check
+      # (device, queue, lists, allocators, fences, events, buffers, runtime DXIL
+      # conversion of all four pipelines) has to pass; Madeira's README has 90/90
+      # on an A15 and on its iOS VM. On an iPad: the app's d3d12-m2-x64.exe.
       - name: A 64-bit Direct3D 12 program (Madeira's M2 test) runs its device, sync and offscreen checks through madeira-d3d12, through ARM64EC and FEX on an iPad simulator
         if: ${{ !cancelled() }}
         env:
-          WINEHOST_EXPECT_OUTPUT: "checks, 0 failures"
+          WINEHOST_EXPECT_OUTPUT: "90 checks, "
+          WINEHOST_EXPECT_EXIT: 1
           WINEHOST_SECONDS: 60
           WINEHOST_EXPECT_LOG: |
             winehost: 64-bit x86 program, running it through ARM64EC and FEX
             madeira-d3d12 M2: x64 caller -> ARM64EC D3D12 runtime
+            [madeira-ir] converter ready (runtime DXIL conversion)
+            [madeira-d3d12] PS converted at runtime
         run: |
           status=0
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-m2-x64.exe" || status=$?
-          grep -vE 'err:virtual|ios_jit|tramp\[' "$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log" | grep -iE '^  (ok|FAIL)|checks,|madeira|d3d12|irconv|metal|exception|winehost:' | head -300 || true
-          echo "--- end of the run log ---"
-          tail -80 "$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log" | cut -c1-400 || true
-          exit $status
+          log=$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log
+          sh tests/wine-loader/show-run.sh "$log"
+          [ $status = 0 ] || exit $status
+          sim_gpu='four more record/close/execute/signal cycles|drawn half is|undrawn half kept|the two halves differ|depth kept the near|sampled texel times tint'
+          if grep '^  FAIL' "$log" | grep -vE "$sim_gpu"; then
+            echo "the checks above fail beyond what the simulator's GPU explains"
+            exit 1
+          fi
+          echo "$(grep -c '^  ok' "$log") checks passed, $(grep -c '^  FAIL' "$log") failed on the simulator's GPU"
       - name: A 64-bit Direct3D 12 program (Madeira's cube) presents through madeira-d3d12 and Metal, through ARM64EC and FEX on an iPad simulator
         if: ${{ !cancelled() }}
         env:
