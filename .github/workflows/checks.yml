@@ -1025,7 +1025,9 @@ jobs:
         run: |
           status=0
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-m2-x64.exe" || status=$?
-          grep -iE '^  (ok|FAIL)|checks,|madeira|d3d12|irconv|err:' "$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log" | head -200 || true
+          grep -vE 'err:virtual|ios_jit|tramp\[' "$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log" | grep -iE '^  (ok|FAIL)|checks,|madeira|d3d12|irconv|metal|exception|winehost:' | head -300 || true
+          echo "--- end of the run log ---"
+          tail -80 "$RUNNER_TEMP/wine-loader/host-d3d12-m2-x64/run.log" | cut -c1-400 || true
           exit $status
       - name: A 64-bit Direct3D 12 program (Madeira's cube) presents through madeira-d3d12 and Metal, through ARM64EC and FEX on an iPad simulator
         if: ${{ !cancelled() }}
@@ -1039,8 +1041,19 @@ jobs:
         run: |
           status=0
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/madeira/app/Madeira/arm64ec-windows/d3d12-cube-x64.exe" || status=$?
-          grep -iE 'cube:|madeira|d3d12|irconv|err:' "$RUNNER_TEMP/wine-loader/host-d3d12-cube-x64/run.log" | head -120 || true
+          grep -vE 'err:virtual|ios_jit|tramp\[' "$RUNNER_TEMP/wine-loader/host-d3d12-cube-x64/run.log" | grep -iE 'cube:|madeira|d3d12|irconv|metal|exception|winehost:' | head -300 || true
+          echo "--- end of the run log ---"
+          tail -80 "$RUNNER_TEMP/wine-loader/host-d3d12-cube-x64/run.log" | cut -c1-400 || true
           exit $status
+      - name: Run logs of the Direct3D 12 programs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: d3d12-run-logs
+          path: |
+            ${{ runner.temp }}/wine-loader/host-d3d12-m2-x64/run.log
+            ${{ runner.temp }}/wine-loader/host-d3d12-cube-x64/run.log
+          if-no-files-found: ignore
       # After DXMT and the cube, which the app links and carries for its D3D9 scheme.
       - name: The x86 programs in Wine in an iPad app (Xcode project), hello.exe and the one with a window, run on an iPad simulator
         if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
@@ -1078,6 +1091,18 @@ jobs:
           name: fex-cache-hello
           path: ${{ runner.temp }}/fexcache
           if-no-files-found: ignore
+      # Again at the job's end, where the job log's tail keeps it in reach.
+      - name: What the Direct3D 12 programs printed
+        if: always()
+        run: |
+          for n in d3d12-m2-x64 d3d12-cube-x64; do
+            log=$RUNNER_TEMP/wine-loader/host-$n/run.log
+            [ -f "$log" ] || continue
+            echo "=== $n"
+            grep -vE 'err:virtual|ios_jit|tramp\[' "$log" | grep -iE '^  (ok|FAIL)|checks,|cube:|madeira|d3d12|irconv|metal|exception|winehost:' | cut -c1-300 | head -150 || true
+            echo "--- end of $n's log"
+            tail -40 "$log" | cut -c1-300
+          done
 
   winpad-translator:
     # WinPad Translator (tools/winpad-translator): turns any game's code maps into its AOT image.
