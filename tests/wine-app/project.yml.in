@@ -119,8 +119,10 @@ targets:
         script: |
           set -e
           app="$TARGET_BUILD_DIR/$WRAPPER_NAME"
-          rm -rf "$app/aarch64-windows" "$app/i386-windows" "$app/nls" "$app/fonts"
+          rm -rf "$app/aarch64-windows" "$app/arm64ec-windows" "$app/i386-windows" "$app/nls" "$app/fonts"
           cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/"
+          # 64-bit x86 programs: Madeira's ARM64EC modules (plain PE files, both platforms).
+          if [ -d "$PROJECT_DIR/wine/arm64ec-windows" ]; then cp -R "$PROJECT_DIR/wine/arm64ec-windows" "$app/"; fi
           cp -R "$PROJECT_DIR/wine/i386-windows" "$PROJECT_DIR/wine/nls" "$PROJECT_DIR/wine/fonts" "$app/"
           cp "$PROJECT_DIR/wine/system.reg" "$app/"
           if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; fi

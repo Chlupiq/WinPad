@@ -927,6 +927,18 @@ static void PressTestButton(void) {
   });
 }
 
+// The Machine field of a Windows program's PE header (0x14c i386, 0x8664 x86-64), or 0.
+static unsigned PEMachine(NSString* path) {
+  NSFileHandle* f = [NSFileHandle fileHandleForReadingAtPath:path];
+  NSData* head = [f readDataOfLength:4096];
+  [f closeFile];
+  if (head.length < 64) return 0;
+  const uint8_t* b = head.bytes;
+  const uint32_t pe = b[0x3c] | b[0x3d] << 8 | b[0x3e] << 16 | (uint32_t)b[0x3f] << 24;
+  if (pe > head.length - 6 || memcmp(b + pe, "PE\0\0", 4)) return 0;
+  return b[pe + 4] | b[pe + 5] << 8;
+}
+
 // Windows path of a directory for FEX: Z: is the root, with a trailing backslash.
 static NSString* WindowsDir(NSString* path) {
   return [NSString stringWithFormat:@"Z:%@\\", [path stringByReplacingOccurrencesOfString:@"/" withString:@"\\"]];
@@ -999,10 +1011,15 @@ static NSDictionary* ReadHandoff(NSString* folder) {
 // The DirectX DLLs from Microsoft MakePrefix linked in place of Wine's (d3dx9_30...).
 static NSArray<NSString*>* directx_native;
 
-static NSString* MakePrefix(NSString* bundle) {
+// A 64-bit x86 program (x64 == YES) runs in an ARM64EC session instead: system32 (and
+// sysx64, as Madeira links it) is Madeira's arm64ec-windows set, whose ntdll hands the x86-64
+// code to FEX's ARM64EC module xtajit64.dll; syswow64 stays for the 32-bit programs it starts.
+static NSString* MakePrefix(NSString* bundle, BOOL x64) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* prefix = DocumentsPath(@"prefix");
-  NSDictionary* farms = @{@"syswow64" : @"i386-windows", @"system32" : @"aarch64-windows"};
+  const BOOL has_ec = [fm fileExistsAtPath:[bundle stringByAppendingPathComponent:@"arm64ec-windows/ntdll.dll"]];
+  NSDictionary* farms = x64 && has_ec ? @{@"syswow64" : @"i386-windows", @"system32" : @"arm64ec-windows", @"sysx64" : @"arm64ec-windows"}
+                                      : @{@"syswow64" : @"i386-windows", @"system32" : @"aarch64-windows"};
   for (NSString* farm in farms) {
     NSString* dir = [prefix stringByAppendingPathComponent:[@"drive_c/windows" stringByAppendingPathComponent:farm]];
     [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -1672,7 +1689,11 @@ static CFTimeInterval fps_shown;
   NSString* d3d_tag = d3d_tests[name];
   const BOOL cube = d3d_tag != nil, game = [name isEqualToString:@"game"];
   NSString* bundle = NSBundle.mainBundle.bundlePath;
-  NSString* prefix = MakePrefix(bundle);
+  // A 64-bit game (PE machine AMD64) runs through ARM64EC (MakePrefix), always with the JIT.
+  NSString* game_exe = game ? DocumentsPath((self.game ? self.game.exe : [NSUserDefaults.standardUserDefaults stringForKey:@"game"]) ?: @"")
+                            : nil;
+  const BOOL x64 = game_exe && PEMachine(game_exe) == 0x8664;
+  NSString* prefix = MakePrefix(bundle, x64);
   // Each game of the library keeps its code maps apart, in fexcache/<its folder>: one folder
   // per game to copy off for WinPad Translator. The test programs use fexcache itself.
   NSString* cache = self.game ? DocumentsPath([@"fexcache" stringByAppendingPathComponent:self.game.folder])
@@ -1774,6 +1795,11 @@ static CFTimeInterval fps_shown;
       game_image = nil;
       printf("WinPad Wine: the game runs with FEX's JIT, not an AOT image\n");
     }
+  }
+  if (x64) {
+    // FEX's ARM64EC module has no AOT images yet: a 64-bit game needs the JIT.
+    game_image = nil;
+    printf("WinPad Wine: 64-bit x86 program, running it through ARM64EC (arm64ec-windows) with FEX's JIT\n");
   }
   if (game_image && self.game.folderImageNote) printf("WinPad Wine: %s\n", self.game.folderImageNote.UTF8String);
   // An image in the game folder loads only if it is signed by the app's team; else the bundle's.
@@ -1947,7 +1973,7 @@ static CFTimeInterval fps_shown;
       // What the game would be started with (its winpad.json): the registry values go into the
       // prefix for real, so that the runs after this one load them.
       NSMutableArray<NSString*>* game_args = [NSMutableArray new];
-      for (NSString* line in ApplyGameSettings(game, MakePrefix(NSBundle.mainBundle.bundlePath), game_args))
+      for (NSString* line in ApplyGameSettings(game, MakePrefix(NSBundle.mainBundle.bundlePath, [game.arch isEqualToString:@"64bit"]), game_args))
         report = [report stringByAppendingFormat:@"settings: %@\n", line];
       report = [report stringByAppendingFormat:@"%@\n", FinishedMarker];
       [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];

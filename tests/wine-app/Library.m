@@ -3080,8 +3080,10 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game {
   if (self.started || self.installing) return;
   // The DLLs the game imports and no one has: Microsoft's DirectX ones are downloaded first.
-  // A 64-bit program WinPad does not run yet: its 32-bit one, when the folder has one.
+  // 64-bit programs run through ARM64EC (with the JIT), so no question for them any more;
+  // ask64BitFor stays behind the ask64Bit setting.
   if (game && !self.archChecked && [game.arch isEqualToString:@"64bit"] &&
+      [NSUserDefaults.standardUserDefaults boolForKey:@"ask64Bit"] &&
       ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
     [self ask64BitFor:game program:program];
     return;
@@ -3229,11 +3231,13 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   // Microsoft's DLLs the game's profile asks for (Proton's winetricks d3dx9_43...), which a game
   // may load by name, so its imports do not show them.
   NSArray* want_dx = [game.settings[@"nativeDirectX"] isKindOfClass:NSArray.class] ? game.settings[@"nativeDirectX"] : @[];
-  if (!missing.count && (have_directx || !want_dx.count)) return YES;
+  if (!missing.count && (have_directx || !want_dx.count || [game.arch isEqualToString:@"64bit"])) return YES;
   NSMutableArray<NSString*>* fetch = [NSMutableArray new];
   NSMutableArray<NSString*>* others = [NSMutableArray new];
-  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx ? fetch : others addObject:dll];
-  if (!have_directx)
+  // The download holds the 32-bit DirectX DLLs only: a 64-bit game gets none from it.
+  const BOOL x64 = [game.arch isEqualToString:@"64bit"];
+  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx && !x64 ? fetch : others addObject:dll];
+  if (!have_directx && !x64)
     for (id verb in want_dx)
       if ([verb isKindOfClass:NSString.class] && ![fetch containsObject:verb]) [fetch addObject:verb];
   printf("WinPad Library: %s lacks DLLs: %s\n", game.folder.UTF8String,
