@@ -1,0 +1,23 @@
+WinPad: winemetal's iOS display stubs stay out of the Mac app (Mac Catalyst).
+
+winemetal_unix.c gives iOS a CGDirectDisplayID, kCGNullDirectDisplay and a
+static CGMainDisplayID, which the iOS SDK lacks. Mac Catalyst builds it as
+iOS code (TARGET_OS_IOS) against the macOS SDK, whose CoreGraphics declares
+all three: the static definition then followed the SDK's extern one and the
+build stopped. Catalyst takes CoreGraphics' own.
+
+--- a/src/winemetal/unix/winemetal_unix.c	2026-11-26 20:35:04.550200932 +0000
++++ b/src/winemetal/unix/winemetal_unix.c	2026-11-26 20:35:04.610488062 +0000
+@@ -11,10 +11,12 @@
+ #include <TargetConditionals.h>
+ #if TARGET_OS_IOS
+ #import <UIKit/UIKit.h>
++#if !TARGET_OS_MACCATALYST
+ /* iOS lacks CGDirectDisplay: provide minimal stubs for single-display use. */
+ typedef uint32_t CGDirectDisplayID;
+ #define kCGNullDirectDisplay ((CGDirectDisplayID)0)
+ static inline CGDirectDisplayID CGMainDisplayID(void) { return 1; }
++#endif
+ #else
+ #import <Cocoa/Cocoa.h>
+ #endif
