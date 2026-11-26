@@ -33,6 +33,13 @@ spustí). Ve složce hry může být:
   `steam_appid.txt` nebo `goggame-<id>.info` ve složce hry. Profil může chtít
   DLL z DirectX od Microsoftu (`nativeDirectX`): aplikace DirectX před
   spuštěním stáhne sama.
+  Profily se aktualizují i bez nové verze aplikace: knihovna si při
+  spuštění stáhne `tools/winpad-translator/data/online/profiles.json`
+  z větve main na GitHubu (Nastavení › Profily her: vypínač, Zkontrolovat
+  teď, jiný zdroj), uloží ho do Library/Application Support a použije
+  profily novější než vlastní (vyšší `version`) a nové. Bez sítě nebo
+  s poškozeným souborem platí poslední stažený, jinak profily aplikace.
+  Online jdou jen data profilu; opravy kódu dál potřebují nový build.
   WinPad Translator do něj zapíše profil známé hry (`"profile"`: program,
   přepsání DLL, proměnné prostředí, argumenty, hodnoty registru, třeba
   rozlišení). Aplikace hru spustí s nimi; vlastní klíče v `winpad.json`

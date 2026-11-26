@@ -61,6 +61,17 @@ NSArray<NSURL*>* WinPadWaitingPackages(void);
 // and padKeys key by key (registry values by name).
 NSDictionary* WinPadGameSettings(NSDictionary* info);
 
+// Game profiles online (Library.m): the library downloads all profiles in one file from the
+// repository (WinPadOnlineProfilesURL; the "profilesURL" setting, else the main branch's
+// tools/winpad-translator/data/online/profiles.json) and uses those newer than the app's.
+// DONE runs on the main thread; CHANGED says the profiles differ, so the library reloads.
+extern NSString* const WinPadOnlineProfilesDefaultURL;
+BOOL WinPadOnlineProfilesWanted(void);
+void WinPadSetOnlineProfilesWanted(BOOL on);
+NSString* WinPadOnlineProfilesURL(void);
+NSString* WinPadOnlineProfilesStatus(void);
+void WinPadUpdateOnlineProfiles(void (^done)(BOOL changed, NSString* status));
+
 // How a game's picture fills the screen once it draws through Metal (main.m): "fit" (all of
 // it in its own shape, black bars at the sides), "stretch" (the whole screen, the picture
 // stretched to it) or "fill" (the whole screen in the picture's shape, its edges cut off). The
