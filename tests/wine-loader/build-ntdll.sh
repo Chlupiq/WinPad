@@ -31,7 +31,7 @@ trap 'git -C "$madeira" checkout -q -- build; git -C "$wine" checkout -q -- dlls
 # calls it makes on macOS, unavailable to Catalyst: the header stays out, as on an iPad, and the
 # calls stay undeclared (the host stubs them, link-host.sh).
 catalyst_flags=
-[ "$sdk_name" != maccatalyst ] || catalyst_flags=-D__MULTIPROCESSING__
+[ "$sdk_name" != maccatalyst ] || catalyst_flags="-D__MULTIPROCESSING__ -D__MULTIPROCESSINGINFO__"
 
 compile() {  # SOURCE NAME [FLAGS...]
     c_src=$1 c_name=$2
