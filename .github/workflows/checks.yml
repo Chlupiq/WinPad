@@ -745,8 +745,8 @@ jobs:
           WINEHOST_EXPECT_OUTPUT: "imports: done"
           # Both found by reading their directory (patches/madeira/0005), its own DLL in its folder.
           WINEHOST_EXPECT_LOG: |
-            /syswow64/user32.dll found by reading its directory
-            /cs/game/casetest.dll found by reading its directory
+            /syswow64/user32.dll found in the directory's kept listing
+            /cs/game/casetest.dll found in the directory's kept listing
         run: |
           # The runner's volume compares names without case, the iPad's does not.
           cs="$RUNNER_TEMP/cs"
@@ -761,6 +761,22 @@ jobs:
           cp "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe" "$RUNNER_TEMP/wine-loader/i386-windows/casetest.dll" "$cs/game/"
           # The program is not under i386-windows: run-host.sh knows it is 32-bit from its PE header.
           sh tests/wine-loader/run-host.sh "$cs/work" "$cs/game/imports.exe"
+      - name: A 32-bit x86 program on the case-sensitive volume asks for 20000 missing files in a folder of 3000, by names in another case (as Morrowind looks for loose textures), quickly (patches/madeira/0015)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "dirlookup: done"
+          WINEHOST_EXPECT_LOG: |
+            dirlookup: ok textures\tx_17.dds found in another case
+            names kept for lookups in another case
+          WINEHOST_SECONDS: 120
+        run: |
+          cs="$RUNNER_TEMP/cs"
+          mkdir -p "$cs/dirgame/TEXTURES"
+          (cd "$cs/dirgame/TEXTURES" && i=1 && while [ $i -le 3000 ]; do : >"TX_$i.DDS"; i=$((i + 1)); done)
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/dirlookup.exe" "$cs/dirgame/"
+          status=0
+          sh tests/wine-loader/run-host.sh "$cs/work" "$cs/dirgame/dirlookup.exe" || status=$?
+          grep -E '^dirlookup:|dir-cache' "$cs/work/host-dirlookup/run.log" || true
+          exit $status
       - name: A 32-bit x86 program in a game's folder reads its data by a relative path (the current directory is the program's folder, not the Wine prefix)
         env:
           WINEHOST_EXPECT_OUTPUT: "cwd: done"
@@ -773,6 +789,36 @@ jobs:
           sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$game/cwd.exe" || status=$?
           grep -E '^cwd:|current directory' "$RUNNER_TEMP/wine-loader/host-cwd/run.log" || true
           exit $status
+      - name: A 32-bit x86 program creates windows and a dialog by class atom (MAKEINTATOM, the dialog class 0x8002), as a game's launcher does, in Wine through WoW64 and FEX on an iPad simulator
+        env:
+          # wow64win.dll built with patches/wine/0005 passes the atom through instead of adding the
+          # guest window base (Morrowind Launcher.exe died in NtUserCreateWindowEx). Every check prints
+          # "atomclass: ok" or "atomclass: FAIL"; the last line only when all passed.
+          WINEHOST_EXPECT_OUTPUT: "atomclass: all passed"
+        run: |
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$RUNNER_TEMP/wine-loader/i386-windows/atomclass.exe" || status=$?
+          grep -E '^atomclass:|\[mach_exc\] sym|not in stack limits' "$RUNNER_TEMP/wine-loader/host-atomclass/run.log" | head -40 || true
+          exit $status
+      - name: A 32-bit x86 program in a game's folder that starts another program there (as a game's launcher starts the game) hands the start over to the app (patches/madeira/0014)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "spawn: handed over"
+        run: |
+          game="$RUNNER_TEMP/handoff-game"
+          rm -rf "$game"
+          mkdir -p "$game"
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/spawn.exe" "$RUNNER_TEMP/wine-loader/i386-windows/hello.exe" "$game/"
+          # As the app sets them (tests/wine-app/main.m): the file, and its Documents as a DOS path.
+          export SIMCTL_CHILD_WINPAD_HANDOFF_FILE="$game/handoff.txt"
+          export SIMCTL_CHILD_WINPAD_HANDOFF_DIR="Z:$(echo "$RUNNER_TEMP" | tr / '\\')\\"
+          status=0
+          sh tests/wine-loader/run-host.sh "$RUNNER_TEMP/wine-loader" "$game/spawn.exe" || status=$?
+          grep -E '^spawn:|\[handoff\]' "$RUNNER_TEMP/wine-loader/host-spawn/run.log" || true
+          cat "$game/handoff.txt" || true
+          [ $status = 0 ] || exit $status
+          grep -qi '^image=Z:.*handoff-game.hello\.exe$' "$game/handoff.txt" &&
+            grep -qF -- '-arg "two words"' "$game/handoff.txt" ||
+            { echo "the hand-off file does not name hello.exe and its arguments" >&2; exit 1; }
       - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for an iPad
         id: modules-iphoneos
         run: |

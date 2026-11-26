@@ -19,7 +19,7 @@
 # missing.)
 # WORK_DIR must hold the Wine tree tests/wine-loader/build.sh fetched.
 # Needs LLVM clang, llvm-dlltool and lld (Homebrew llvm, lld), bison and flex.
-# Output: WORK_DIR/i386-windows/*.dll, hello.exe, nodep.exe, hook.exe, rtcode.exe, unaligned.exe, guard.exe, simd.exe, cwd.exe, window.exe, imports.exe and
+# Output: WORK_DIR/i386-windows/*.dll, hello.exe, nodep.exe, hook.exe, rtcode.exe, unaligned.exe, guard.exe, simd.exe, cwd.exe, spawn.exe, dirlookup.exe, window.exe, atomclass.exe, imports.exe and
 # casetest.dll (imports.exe's own DLL).
 set -eu
 
@@ -247,6 +247,14 @@ clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
 clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
     -Wl,-entry:start -Wl,-subsystem:console \
     "$here/cwd.c" "$kernel32" -o "$out/cwd.exe" -fuse-ld=lld
+# Starts another program next to it, as a game's launcher starts the game (kernel32 only).
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console \
+    "$here/spawn.c" "$kernel32" -o "$out/spawn.exe" -fuse-ld=lld
+# Asks for many missing files in a large folder, by names in another case (kernel32 only).
+clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+    -Wl,-entry:start -Wl,-subsystem:console \
+    "$here/dirlookup.c" "$kernel32" -o "$out/dirlookup.exe" -fuse-ld=lld
 # The program with a window, if this build has its modules.
 if [ -f "$out/user32.dll" ] && [ -f "$out/gdi32.dll" ]; then
     user32=$(implib user32)
@@ -254,6 +262,10 @@ if [ -f "$out/user32.dll" ] && [ -f "$out/gdi32.dll" ]; then
     clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
         -Wl,-entry:start -Wl,-subsystem:windows \
         "$here/window.c" "$kernel32" "$user32" "$gdi32" -o "$out/window.exe" -fuse-ld=lld
+    # Windows and a dialog made by class atom, as a game's launcher makes them.
+    clang -target i686-windows -O2 -nostdlib -fno-builtin -ffreestanding \
+        -Wl,-entry:start -Wl,-subsystem:console \
+        "$here/atomclass.c" "$kernel32" "$user32" -o "$out/atomclass.exe" -fuse-ld=lld
 fi
 # The program with a game's imports, if this build has their DLLs.
 game_dlls="user32 advapi32 gdi32 winmm dinput8 ddraw ws2_32 shfolder shell32 tapi32 netapi32"

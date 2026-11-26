@@ -1,0 +1,56 @@
+From: WinPad
+Subject: [PATCH] wow64win: An atom or a resource id stays as it is.
+
+A 32-bit program names a window class, a menu or a dialog by an atom or a
+resource id (MAKEINTATOM, MAKEINTRESOURCE): a value below 64 KB where a
+string pointer would be, told apart by IS_INTRESOURCE(). Madeira's
+guest_ptr32() adds the guest window base B to every value, so the dialog
+class atom 0x8002 of Morrowind Launcher.exe reached NtUserCreateWindowEx
+as the UNICODE_STRING Buffer 0x7000008002. IS_INTRESOURCE() was false,
+wine_dbgstr_wn read the uncommitted bottom of the guest window, and the
+0xc0000005 could not be dispatched ("Exception frame is not in stack
+limits"): every dialog-based 32-bit launcher died before its window.
+
+get_str_or_atom() already did this for three arguments; guest_ptr32() and
+host_ptr32() now do it for every value, the Buffer of each UNICODE_STRING,
+CREATESTRUCT.lpszClass and WNDCLASS menu names included. No guest address
+is below 64 KB (Windows keeps that range free, and so does the guest
+window). With B == 0 nothing changes.
+
+Applies to willfaust/wine at 257f271 (Madeira 48f9764's wine submodule).
+Test: tests/wine-i386/atomclass.c.
+---
+diff --git a/dlls/wow64win/wow64win_private.h b/dlls/wow64win/wow64win_private.h
+index 6bf1074..ca222e0 100644
+--- a/dlls/wow64win/wow64win_private.h
++++ b/dlls/wow64win/wow64win_private.h
+@@ -74,16 +74,26 @@ static inline ULONG_PTR wow64win_guest_base(void)
+     return cached;
+ }
+ 
+-/* guest 32-bit address -> host pointer.  NULL stays NULL. */
++/* guest 32-bit address -> host pointer.  NULL stays NULL.
++ *
++ * WinPad: a value below 64 KB stays as it is too. It is no address in a
++ * Windows process (IS_INTRESOURCE is built on that) but an atom or a resource
++ * id: the class of CreateWindowEx (UNICODE_STRING Buffer = MAKEINTATOM),
++ * a menu name in WNDCLASS, lpszClass in CREATESTRUCT. With + B the class atom
++ * 0x8002 of a 32-bit game became 0x7000008002, IS_INTRESOURCE() was false and
++ * NtUserCreateWindowEx read the uncommitted bottom of the guest window
++ * (wine_dbgstr_wn+0x4c, 0xc0000005 that SEH could not dispatch). */
+ static inline void *guest_ptr32( ULONG addr )
+ {
+-    return addr ? (void *)(wow64win_guest_base() + addr) : NULL;
++    if (!(addr >> 16)) return (void *)(ULONG_PTR)addr;
++    return (void *)(wow64win_guest_base() + addr);
+ }
+ 
+ /* host pointer -> guest 32-bit address.  NULL stays 0. */
+ static inline ULONG host_ptr32( const void *addr )
+ {
+-    return addr ? (ULONG)((ULONG_PTR)addr - wow64win_guest_base()) : 0;
++    if (!((ULONG_PTR)addr >> 16)) return (ULONG)(ULONG_PTR)addr;  /* atom, id */
++    return (ULONG)((ULONG_PTR)addr - wow64win_guest_base());
+ }
+ 
+ static inline ULONG get_ulong( UINT **args ) { return *(*args)++; }

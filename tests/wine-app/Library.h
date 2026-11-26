@@ -102,6 +102,9 @@ NSString* WinPadPadLabel(int input, NSString* style);
 @interface LibraryViewController : UIViewController
 // Runs a program: "game" with the game picked, or a test program (hello, window) with nil.
 @property(nonatomic, copy) void (^start)(NSString* program, WinPadGame* game);
+// A game whose launcher started it in the last run (main.m handOff): the library starts it once
+// it shows, as Spustit does (the DLL check and StikDebug's JIT first).
+@property(nonatomic, strong) WinPadGame* handedOver;
 // Installs the packages at URLS (opened from AirDrop, Files or a share sheet) and the ones
 // waiting in Documents, then shows the game.
 - (void)openPackages:(NSArray<NSURL*>*)urls;

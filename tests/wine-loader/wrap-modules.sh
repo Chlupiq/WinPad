@@ -4,7 +4,8 @@
 # OUT/aarch64-windows/NAME next to OUT/aarch64-windows/NAME.dylib, which is
 # where patches/madeira/0001's loader looks for the dylib of a module it
 # opens. Modules pe2macho refuses (tests/pe2macho/wine-modules-expected.txt)
-# are copied as plain PE files only.
+# are copied as plain PE files only. wow64win.dll is not Madeira's but one
+# built from source with WinPad's patches (build-wow64win.sh).
 #
 # Usage: wrap-modules.sh WORK_DIR SDK [MODULE...]
 # WORK_DIR must hold the Madeira checkout build.sh made. With MODULEs (PE
@@ -24,6 +25,12 @@ shift 2
 if [ $# = 0 ]; then
     rm -rf "$work/modules-$sdk_name"
     set -- "$modules"/*.dll "$modules"/*.exe
+    # wow64win.dll is built from source with WinPad's patches
+    # (build-wow64win.sh; make rebuilds it only when a patch changed it) and
+    # taken in place of Madeira's.
+    sh "$here/build-wow64win.sh" "$work"
+    mkdir -p "$out"
+    cp "$work/wow64win/wow64win.dll" "$out/wow64win.dll"
 fi
 mkdir -p "$out" "$tmp"
 
@@ -42,6 +49,7 @@ for pe in "$@"; do
         ntdll.dll | win32u.dll)
             python3 -I "$root/tools/pe2macho/fix_syscall_stubs.py" "$pe" "$out/$name"
             ;;
+        wow64win.dll) [ "$pe" -ef "$out/$name" ] || [ -f "$out/$name" ] || cp "$pe" "$out/$name" ;;
         *) [ "$pe" -ef "$out/$name" ] || cp "$pe" "$out/$name" ;;
     esac
     if ! python3 -I "$p2m" "$out/$name" "$tmp/$name.s" 2>"$tmp/$name.err"; then
