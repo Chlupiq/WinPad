@@ -7,7 +7,7 @@
 # iOS build reuses it. Only the libraries airconv links are built
 # (dxmt/src/airconv/meson.build, llvm_deps).
 #
-# Usage: build-llvm.sh ROOT SDK   (SDK: iphoneos or iphonesimulator)
+# Usage: build-llvm.sh ROOT SDK   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # Output: ROOT/toolchains-SDK/llvm-project (the sources, llvm/include is
 # needed) and ROOT/toolchains-SDK/llvm-ios-build/{include,lib}, the layout
 # Madeira's build/dxmt-ios/build.sh expects in ROOT/toolchains
@@ -23,6 +23,7 @@ jobs=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 case $sdk_name in
     iphoneos) triple=arm64-apple-ios17.0 ;;
     iphonesimulator) triple=arm64-apple-ios17.0-simulator ;;
+    maccatalyst) triple=arm64-apple-ios17.0-macabi ;;
     *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
 esac
 
@@ -60,9 +61,15 @@ if [ ! -x "$host/bin/llvm-tblgen" ]; then
 fi
 
 b="$tc/llvm-$sdk_name-objs"
+# Mac Catalyst: a Mac build (macOS SDK) whose -target makes the objects Catalyst's.
+if [ "$sdk_name" = maccatalyst ]; then
+    set -- -DCMAKE_SYSTEM_NAME=Darwin -DCMAKE_OSX_SYSROOT=macosx \
+        "-DCMAKE_C_FLAGS=-target $triple" "-DCMAKE_CXX_FLAGS=-target $triple"
+else
+    set -- -DCMAKE_SYSTEM_NAME=iOS "-DCMAKE_OSX_SYSROOT=$sdk_name" -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0
+fi
 cmake -G Ninja -S "$src/llvm" -B "$b" -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT="$sdk_name" \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
+    "$@" -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DLLVM_HOST_TRIPLE="$triple" -DLLVM_DEFAULT_TARGET_TRIPLE="$triple" -DLLVM_TARGET_ARCH=host \
     -DLLVM_TABLEGEN="$host/bin/llvm-tblgen" \
     -DLLVM_TARGETS_TO_BUILD= -DLLVM_ENABLE_PROJECTS= -DLLVM_BUILD_TOOLS=Off -DLLVM_BUILD_UTILS=Off \

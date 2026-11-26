@@ -46,13 +46,23 @@ mkdir -p "$proj"
 d3d9=
 [ -f "$work/dxmt-iphoneos/libdxmt_combined.a" ] && [ -f "$work/dxmt-iphonesimulator/libdxmt_combined.a" ] &&
     [ -f "$work/i386-windows/d3d9-cube.exe" ] && d3d9=1
+# The Mac app (Mac Catalyst) too, when Wine's unix side, its modules and (with D3D9) DXMT were
+# built for it (SDK maccatalyst; build-ntdll.sh and the rest): its files go to lib/macosx and
+# wine/macosx, Xcode's PLATFORM_NAME for it.
+catalyst=
+[ -f "$work/ntdll-maccatalyst/libntdll_unix.a" ] && [ -f "$work/modules-maccatalyst/aarch64-windows/xtajit.dll.dylib" ] &&
+    { [ -z "$d3d9" ] || [ -f "$work/dxmt-maccatalyst/libdxmt_combined.a" ]; } && catalyst=1
+sdks="iphoneos iphonesimulator" catalyst_setting=NO
+[ -z "$catalyst" ] || { sdks="$sdks maccatalyst"; catalyst_setting=YES; }
 
-for sdk in iphoneos iphonesimulator; do
+for sdk in $sdks; do
+    dir=$sdk
+    [ "$sdk" != maccatalyst ] || dir=macosx
     test -f "$work/modules-$sdk/aarch64-windows/xtajit.dll.dylib" ||
         { echo "no xtajit.dll.dylib for $sdk in $work/modules-$sdk" >&2; exit 1; }
     sh "$root/tests/wine-loader/link-host.sh" $sdk "$work" "$out/host-$sdk"
-    mkdir -p "$proj/lib/$sdk" "$proj/wine/$sdk" "$proj/Frameworks/$sdk"
-    cp "$out/host-$sdk/winehost-lib.o" "$proj/lib/$sdk/winehost.o"
+    mkdir -p "$proj/lib/$dir" "$proj/wine/$dir" "$proj/Frameworks/$dir"
+    cp "$out/host-$sdk/winehost-lib.o" "$proj/lib/$dir/winehost.o"
     # FEX flushes the code it writes through Wine's NtFlushInstructionCache, which needs a real
     # __clear_cache (winehost.c); a stub leaves stale instructions running on an iPad.
     if grep -qx '___clear_cache' "$out/host-$sdk/stubbed"; then
@@ -60,10 +70,14 @@ for sdk in iphoneos iphonesimulator; do
         exit 1
     fi
     cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
-        "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$sdk/"
-    [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$sdk/"
-    cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$sdk/"
+        "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$dir/"
+    [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$dir/"
+    cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$dir/"
 done
+# The Mac's host may leave other hooks undefined than an iPad's: one list for all, each
+# -Wl,-U harmless where the symbol is there.
+[ -z "$catalyst" ] || sort -u "$out/host-iphoneos/weak-flags" "$out/host-maccatalyst/weak-flags" -o "$out/weak-flags-all"
+[ -n "$catalyst" ] || cp "$out/host-iphoneos/weak-flags" "$out/weak-flags-all"
 # One list of flags serves both platforms through $(PLATFORM_NAME).
 cmp "$out/host-iphoneos/weak-flags" "$out/host-iphonesimulator/weak-flags" ||
     { echo "the device and simulator builds leave different hooks undefined" >&2; exit 1; }
@@ -96,12 +110,12 @@ cp "$here/../../tools/winpad-translator/data/profiles/"*.json "$proj/profiles/"
 # And those made from Proton's umu-protonfixes (import-protonfixes.py), found by Steam or GOG id.
 cp "$here/../../tools/winpad-translator/data/protonfixes.json" "$proj/profiles/"
 # The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
-cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$proj/"
+cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$here/WinPadMac.entitlements" "$proj/"
 sh "$here/build-stikjit.sh" "$proj/StikJIT"
 # libmspack's cabinet decompressor, for Microsoft's DirectX installer (Redist.c).
 sh "$here/fetch-mspack.sh" "$proj/mspack"
 {
-    sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
+    sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/; s/@CATALYST@/$catalyst_setting/" "$here/project.yml.in"
     libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
     frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers NetworkExtension WebKit Security"
     if [ -n "$d3d9" ]; then
@@ -111,7 +125,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
     for f in $libs; do
         echo "          - \"\$(PROJECT_DIR)/lib/\$(PLATFORM_NAME)/$f\""
     done
-    for f in $(cat "$out/host-iphoneos/weak-flags"); do echo "          - \"$f\""; done
+    for f in $(cat "$out/weak-flags-all"); do echo "          - \"$f\""; done
     for f in $frameworks; do
         echo "          - \"-framework\""
         echo "          - \"$f\""
@@ -608,3 +622,4 @@ for expect in 'mouse: moving the mouse by 12,8' 'winehost: mouse flags 0x1 at 12
     grep -qF "$expect" "$log" || { echo "missing in the app's log (window-mouse): $expect" >&2; exit 1; }
 done
 echo "The app's mouse (a move and a click) reached the x86 program with a window on the iPad simulator"
+

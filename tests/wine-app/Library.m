@@ -108,7 +108,7 @@ static NSString* WinPadGameImage(NSString* folder) {
 
 // The build of this app (build-xcode.sh's winpad-build.txt), or nil.
 static NSString* AppBuild(void) {
-  NSString* path = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"winpad-build.txt"];
+  NSString* path = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"winpad-build.txt"];
   NSString* build = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
   build = [build stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
   return build.length ? build : nil;
@@ -1454,7 +1454,7 @@ static NSString* DirectXSummary(void) {
     UISwitch* toggle = [UISwitch new];
     id touch = [NSUserDefaults.standardUserDefaults objectForKey:@"touchControls"];
     // A Mac has a keyboard, a mouse and maybe a controller: no touch controller by default.
-    toggle.on = touch ? [touch boolValue] : !NSProcessInfo.processInfo.isiOSAppOnMac;
+    toggle.on = touch ? [touch boolValue] : !winpad_jit_on_mac();
     [toggle addTarget:self action:@selector(touchChanged:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
@@ -2356,7 +2356,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.addGame.layer.cornerRadius = 6;
   self.addGame.layer.masksToBounds = YES;
   // A tap picks a game's folder (on a Mac anywhere on it) and copies it into the library.
-  if (NSProcessInfo.processInfo.isiOSAppOnMac)
+  if (winpad_jit_on_mac())
     self.addGame.text = @"Přidat hru\n\nKlikni a vyber složku hry na Macu, zkopíruje se do knihovny. "
                         @"Nebo otevři soubor .winpad z převodníku.";
   self.addGame.userInteractionEnabled = YES;
@@ -2544,7 +2544,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 #if !TARGET_OS_SIMULATOR
   // The first launch on a device without the JIT: how to turn it on, once. A Mac turns it on
   // itself.
-  if (!NSProcessInfo.processInfo.isiOSAppOnMac && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+  if (!winpad_jit_on_mac() && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
       ![NSUserDefaults.standardUserDefaults boolForKey:@"jitGuideShown"] && !WinPadJITUsable() &&
       !self.installing && !self.presentedViewController) {
     [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"jitGuideShown"];

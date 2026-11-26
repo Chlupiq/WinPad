@@ -58,7 +58,8 @@ int winpad_jit_under_xcode(void);
 // else returns -1. WHY says what happened. Only the first call does anything: later ones return
 // its result.
 int winpad_jit_prepare_pool(size_t size, const char* marker, char* why, size_t why_size);
-// 1 when the app runs on a Mac (NSProcessInfo.isiOSAppOnMac; WINPAD_JIT_MAC=0/1 overrides it).
+// 1 when the app runs on a Mac: the Mac Catalyst build, or the iPad build there
+// (NSProcessInfo.isiOSAppOnMac). WINPAD_JIT_MAC=0/1 overrides it.
 int winpad_jit_on_mac(void);
 // On a Mac (WINPAD_JIT_MAC): maps the pool as winehost.c does in a simulator (one memory entry,
 // a read-write and a read-execute view) and checks that code written through the first runs from
