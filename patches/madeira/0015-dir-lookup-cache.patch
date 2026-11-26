@@ -1,0 +1,233 @@
+From: WinPad
+Subject: [PATCH] ntdll: Keep a directory's listing for lookups of names in another case on iOS.
+
+For a name that is not there as given, find_file_in_dir reads the whole
+directory and compares every name without case. Morrowind looks for a loose
+file under Data Files\Textures for every texture it loads from its archives;
+on the iPad's case-sensitive volume each of those missing names read the
+folder again, and the game sat at 100% CPU in NtQueryFullAttributesFile with
+no picture. Under WINE_IOS a directory's listing is now kept (64 directories,
+by device, inode, modification and change time), with each name's hash in
+upper case, sorted: a lookup is a stat() of the directory and a binary
+search. A directory that changed is read again; 8.3 short names still go the
+old way. A listing of 256 names or more is logged once per directory (8 in
+all) as "[dir-cache] <dir>: N names kept for lookups in another case", the
+first 16 names found as "[case-lookup] <path> found in the directory's kept
+listing".
+
+Applies to willfaust/Madeira at 48f9764 (its wine submodule, 257f271), after
+0005 and 0009.
+---
+diff --git a/wine/dlls/ntdll/unix/file.c b/wine/dlls/ntdll/unix/file.c
+index d0350c1..a273b07 100644
+--- a/wine/dlls/ntdll/unix/file.c
++++ b/wine/dlls/ntdll/unix/file.c
+@@ -2989,6 +2989,184 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
+  * The file found is appended to unix_name at pos.
+  * There must be at least MAX_DIR_ENTRY_LEN+2 chars available at pos.
+  */
++#ifdef WINE_IOS
++/* WinPad: the directories read for names in another case, kept while they do not change.
++ * Wine reads the whole directory for every name that is not there as given; a game that
++ * asks for many files that do not exist in a large folder (Morrowind looks for a loose file
++ * under Data Files\Textures for every texture it loads from its archives) read that folder
++ * thousands of times and sat at 100% CPU with no picture. A directory's listing is kept,
++ * by device, inode and change time, with each name's case-folded hash, so a lookup is a
++ * stat() and a binary search. */
++struct ios_dir_entry
++{
++    unsigned int hash;  /* of the name in upper case */
++    int length;         /* in WCHARs */
++    const char *name;   /* as on disk */
++};
++
++struct ios_dir_cache
++{
++    dev_t dev;
++    ino_t ino;
++    struct timespec mtime, ctime;
++    struct ios_dir_entry *entries;
++    char *names;
++    int count;
++};
++
++#define IOS_DIR_CACHE_SIZE 64
++static struct ios_dir_cache ios_dir_caches[IOS_DIR_CACHE_SIZE];
++static int ios_dir_cache_next;
++static pthread_mutex_t ios_dir_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++static unsigned int ios_name_hash( const WCHAR *name, int length )
++{
++    unsigned int hash = 2166136261u;
++    while (length--) hash = (hash ^ ntdll_towupper( *name++ )) * 16777619u;
++    return hash;
++}
++
++static int ios_dir_entry_cmp( const void *a, const void *b )
++{
++    unsigned int x = ((const struct ios_dir_entry *)a)->hash, y = ((const struct ios_dir_entry *)b)->hash;
++    return x < y ? -1 : x > y;
++}
++
++static BOOL ios_dir_cache_fill( struct ios_dir_cache *cache, int root_fd, const char *dir_name,
++                                const struct stat *st )
++{
++    WCHAR buffer[MAX_DIR_ENTRY_LEN];
++    size_t names_size = 0, names_used = 0;
++    int count = 0, capacity = 0, fd, ret;
++    struct ios_dir_entry *entries = NULL, *grown;
++    char *names = NULL, *more;
++    struct dirent *de;
++    DIR *dir;
++
++    if ((fd = openat( root_fd, dir_name, O_RDONLY )) == -1) return FALSE;
++    if (!(dir = fdopendir( fd )))
++    {
++        close( fd );
++        return FALSE;
++    }
++    while ((de = readdir( dir )))
++    {
++        size_t len = strlen( de->d_name ) + 1;
++        if (count == capacity)
++        {
++            capacity = capacity ? capacity * 2 : 256;
++            if (!(grown = realloc( entries, capacity * sizeof(*entries) ))) goto failed;
++            entries = grown;
++        }
++        if (names_used + len > names_size)
++        {
++            names_size = (names_size ? names_size * 2 : 16384) + len;
++            if (!(more = realloc( names, names_size ))) goto failed;
++            names = more;
++        }
++        memcpy( names + names_used, de->d_name, len );
++        ret = ntdll_umbstowcs( de->d_name, len - 1, buffer, MAX_DIR_ENTRY_LEN );
++        entries[count].hash = ios_name_hash( buffer, ret );
++        entries[count].length = ret;
++        entries[count].name = (const char *)names_used;  /* an offset until names stops moving */
++        names_used += len;
++        count++;
++    }
++    closedir( dir );
++    for (ret = 0; ret < count; ret++) entries[ret].name = names + (size_t)entries[ret].name;
++    qsort( entries, count, sizeof(*entries), ios_dir_entry_cmp );
++    free( cache->entries );
++    free( cache->names );
++    cache->dev = st->st_dev;
++    cache->ino = st->st_ino;
++    cache->mtime = st->st_mtimespec;
++    cache->ctime = st->st_ctimespec;
++    cache->entries = entries;
++    cache->names = names;
++    cache->count = count;
++    return TRUE;
++
++failed:
++    closedir( dir );
++    free( entries );
++    free( names );
++    return FALSE;
++}
++
++/* Looks NAME up without case in the directory UNIX_NAME (relative to ROOT_FD, ending at
++ * POS - 1) from its kept listing: STATUS_SUCCESS with the name on disk at UNIX_NAME + POS,
++ * STATUS_OBJECT_NAME_NOT_FOUND, or -1 when the directory could not be read this way. */
++static NTSTATUS ios_dir_cache_lookup( int root_fd, char *unix_name, int pos, const WCHAR *name, int length )
++{
++    WCHAR buffer[MAX_DIR_ENTRY_LEN];
++    struct ios_dir_cache *cache = NULL;
++    NTSTATUS status = STATUS_OBJECT_NAME_NOT_FOUND;
++    unsigned int hash = ios_name_hash( name, length );
++    struct stat st;
++    int i, lo, hi, ret;
++    static int logged;
++
++    if (fstatat( root_fd, unix_name, &st, 0 ) || !S_ISDIR( st.st_mode )) return -1;
++    pthread_mutex_lock( &ios_dir_cache_mutex );
++    for (i = 0; i < IOS_DIR_CACHE_SIZE; i++)
++    {
++        struct ios_dir_cache *c = &ios_dir_caches[i];
++        if (c->entries && c->dev == st.st_dev && c->ino == st.st_ino)
++        {
++            cache = c;
++            break;
++        }
++    }
++    if (cache && (cache->mtime.tv_sec != st.st_mtimespec.tv_sec || cache->mtime.tv_nsec != st.st_mtimespec.tv_nsec ||
++                  cache->ctime.tv_sec != st.st_ctimespec.tv_sec || cache->ctime.tv_nsec != st.st_ctimespec.tv_nsec))
++    {
++        if (!ios_dir_cache_fill( cache, root_fd, unix_name, &st )) cache->count = 0, cache->dev = 0, cache->ino = 0;
++    }
++    else if (!cache)
++    {
++        cache = &ios_dir_caches[ios_dir_cache_next];
++        if (ios_dir_cache_fill( cache, root_fd, unix_name, &st ))
++        {
++            ios_dir_cache_next = (ios_dir_cache_next + 1) % IOS_DIR_CACHE_SIZE;
++            if (logged < 8 && cache->count >= 256)
++            {
++                logged++;
++                dprintf( 2, "[dir-cache] %s: %d names kept for lookups in another case\n", unix_name, cache->count );
++            }
++        }
++        else cache = NULL;
++    }
++    if (!cache || !cache->entries)
++    {
++        pthread_mutex_unlock( &ios_dir_cache_mutex );
++        return -1;
++    }
++    /* the first entry with the hash */
++    lo = 0;
++    hi = cache->count;
++    while (lo < hi)
++    {
++        int mid = (lo + hi) / 2;
++        if (cache->entries[mid].hash < hash) lo = mid + 1;
++        else hi = mid;
++    }
++    for (i = lo; i < cache->count && cache->entries[i].hash == hash; i++)
++    {
++        if (cache->entries[i].length != length) continue;
++        ret = ntdll_umbstowcs( cache->entries[i].name, strlen( cache->entries[i].name ), buffer, MAX_DIR_ENTRY_LEN );
++        if (ret == length && !wcsnicmp( buffer, name, ret ))
++        {
++            unix_name[pos - 1] = '/';
++            strcpy( unix_name + pos, cache->entries[i].name );
++            status = STATUS_SUCCESS;
++            break;
++        }
++    }
++    pthread_mutex_unlock( &ios_dir_cache_mutex );
++    return status;
++}
++#endif
++
+ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const WCHAR *name, int length,
+                                   BOOLEAN check_case )
+ {
+@@ -3032,6 +3210,23 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
+      * without case has found the name with the stat() above already, so reading
+      * the directory costs time only for names that do not exist. */
+     if (!is_name_8_dot_3 && !get_dir_case_sensitivity( root_fd, unix_name )) ios_case_scan_reason = 1;
++    if (!is_name_8_dot_3)
++    {
++        NTSTATUS status = ios_dir_cache_lookup( root_fd, unix_name, pos, name, length );
++        if (status == STATUS_SUCCESS)
++        {
++            static int logged;
++            if (logged < 16)
++            {
++                logged++;
++                dprintf( 2, "[case-lookup] %s found in the directory's kept listing; the volume reports %s\n",
++                         unix_name, ios_case_scan_reason ? "case-insensitive" : "case-sensitive" );
++            }
++            return STATUS_SUCCESS;
++        }
++        if (status == STATUS_OBJECT_NAME_NOT_FOUND) goto not_found;
++        /* else read the directory as Wine does */
++    }
+ #else
+     if (!is_name_8_dot_3 && !get_dir_case_sensitivity( root_fd, unix_name )) goto not_found;
+ #endif

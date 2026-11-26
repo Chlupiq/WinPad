@@ -745,8 +745,8 @@ jobs:
           WINEHOST_EXPECT_OUTPUT: "imports: done"
           # Both found by reading their directory (patches/madeira/0005), its own DLL in its folder.
           WINEHOST_EXPECT_LOG: |
-            /syswow64/user32.dll found by reading its directory
-            /cs/game/casetest.dll found by reading its directory
+            /syswow64/user32.dll found in the directory's kept listing
+            /cs/game/casetest.dll found in the directory's kept listing
         run: |
           # The runner's volume compares names without case, the iPad's does not.
           cs="$RUNNER_TEMP/cs"
@@ -761,6 +761,22 @@ jobs:
           cp "$RUNNER_TEMP/wine-loader/i386-windows/imports.exe" "$RUNNER_TEMP/wine-loader/i386-windows/casetest.dll" "$cs/game/"
           # The program is not under i386-windows: run-host.sh knows it is 32-bit from its PE header.
           sh tests/wine-loader/run-host.sh "$cs/work" "$cs/game/imports.exe"
+      - name: A 32-bit x86 program on the case-sensitive volume asks for 20000 missing files in a folder of 3000, by names in another case (as Morrowind looks for loose textures), quickly (patches/madeira/0015)
+        env:
+          WINEHOST_EXPECT_OUTPUT: "dirlookup: done"
+          WINEHOST_EXPECT_LOG: |
+            dirlookup: ok textures\tx_17.dds found in another case
+            names kept for lookups in another case
+          WINEHOST_SECONDS: 120
+        run: |
+          cs="$RUNNER_TEMP/cs"
+          mkdir -p "$cs/dirgame/TEXTURES"
+          (cd "$cs/dirgame/TEXTURES" && i=1 && while [ $i -le 3000 ]; do : >"TX_$i.DDS"; i=$((i + 1)); done)
+          cp "$RUNNER_TEMP/wine-loader/i386-windows/dirlookup.exe" "$cs/dirgame/"
+          status=0
+          sh tests/wine-loader/run-host.sh "$cs/work" "$cs/dirgame/dirlookup.exe" || status=$?
+          grep -E '^dirlookup:|dir-cache' "$cs/work/host-dirlookup/run.log" || true
+          exit $status
       - name: A 32-bit x86 program in a game's folder reads its data by a relative path (the current directory is the program's folder, not the Wine prefix)
         env:
           WINEHOST_EXPECT_OUTPUT: "cwd: done"
