@@ -87,12 +87,14 @@ for sdk in $sdks; do
         # No OpenGL ES on the Mac (Mac Catalyst has no OpenGLES.framework): an empty archive
         # keeps one list of libraries for all platforms; the host there leaves opengl32's
         # unix side undefined (weak-flags), so a GL program finds no driver.
-        echo 'static int winpad_no_opengl;' > "$out/no-opengl-$sdk.c"
+        stub="$out/no-opengl-$sdk"
+        echo 'static int winpad_no_opengl;' > "$stub.c"
+        # (sdk.sh sets sdk to the SDK's path: in a subshell, so the loop's sdk stays.)
         (sdk_name=$sdk; . "$root/tests/wine-loader/sdk.sh"
             # shellcheck disable=SC2086
-            xcrun -sdk "$xcsdk" clang -target "$target" -isysroot "$sdk" $sdk_flags -c "$out/no-opengl-$sdk.c" -o "$out/no-opengl-$sdk.o")
+            xcrun -sdk "$xcsdk" clang -target "$target" -isysroot "$sdk" $sdk_flags -c "$stub.c" -o "$stub.o")
         rm -f "$proj/lib/$dir/libwinpad_opengl.a"
-        xcrun ar rcs "$proj/lib/$dir/libwinpad_opengl.a" "$out/no-opengl-$sdk.o"
+        xcrun ar rcs "$proj/lib/$dir/libwinpad_opengl.a" "$stub.o"
     fi
     cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$dir/"
 done
