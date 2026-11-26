@@ -57,7 +57,7 @@
 #import "Library.h"
 #import "WinPadJIT.h"
 #import "WinPadAuto.h"
-#include "../xinput/winpad-pad.h"
+#include "winpad-pad.h"  // tests/xinput, copied beside it into the project
 #import "WinPadRedist.h"
 
 #include <dlfcn.h>

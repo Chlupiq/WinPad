@@ -106,7 +106,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/GOG.h" "$here/GOG.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/GOG.h" "$here/GOG.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/GameDetect.h" "$here/GameDetect.c" "$here/WinPadAuto.h" "$here/WinPadAuto.m" "$here/../xinput/winpad-pad.h" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 rm -rf "$proj/profiles"
 mkdir -p "$proj/profiles"
