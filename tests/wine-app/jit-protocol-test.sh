@@ -15,5 +15,8 @@ for sdk in iphoneos iphonesimulator; do
     [ "$sdk" = iphonesimulator ] && target=arm64-apple-ios17.4-simulator
     xcrun -sdk "$sdk" clang -target "$target" -Wall -Werror -c "$here/JITPool.c" -o "$work/JITPool-$sdk.o"
     xcrun -sdk "$sdk" clang -target "$target" -fobjc-arc -Wall -Werror -c "$here/WinPadJIT.m" -o "$work/WinPadJIT-$sdk.o"
+    # The game detection and automatic settings (no UIKit), quick to check here.
+    xcrun -sdk "$sdk" clang -target "$target" -Wall -Werror -c "$here/GameDetect.c" -o "$work/GameDetect-$sdk.o"
+    xcrun -sdk "$sdk" clang -target "$target" -fobjc-arc -Wall -Werror -c "$here/WinPadAuto.m" -o "$work/WinPadAuto-$sdk.o"
 done
-echo "JITPool.c and WinPadJIT.m build for iphoneos and iphonesimulator"
+echo "JITPool.c, WinPadJIT.m, GameDetect.c and WinPadAuto.m build for iphoneos and iphonesimulator"

@@ -56,6 +56,7 @@
 
 #import "Library.h"
 #import "WinPadJIT.h"
+#import "WinPadAuto.h"
 #import "WinPadRedist.h"
 
 #include <dlfcn.h>
@@ -74,6 +75,10 @@ static NSString* const FinishedMarker = @"== finished";
 // When the app started (main), for the log's [clock] lines.
 static CFAbsoluteTime app_started;
 
+// The frames of programs that draw with GDI (a DirectDraw game through wined3d's GDI
+// renderer), for the run record (WinPadRunProgress) next to Metal's.
+static volatile long gdi_frames;
+
 // Writes a [clock] line to the log every second from now on: the seconds since
 // the app started and how many frames the program has drawn, so a log says how
 // long each part of a start took.
@@ -85,7 +90,11 @@ static void StartLogClock(void) {
   dispatch_source_set_event_handler(timer, ^{
     // Looked up each time, as the status line does: the host may not be loaded yet.
     long (*metal_frames)(void) = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
-    printf("[clock] %.1f s, %ld frames\n", CFAbsoluteTimeGetCurrent() - app_started, metal_frames ? metal_frames() : 0);
+    const long frames = metal_frames ? metal_frames() : 0;
+    printf("[clock] %.1f s, %ld frames\n", CFAbsoluteTimeGetCurrent() - app_started, frames);
+    // The game's run record, for the library's look at how it went (WinPadJudgeLastRun).
+    static int tick;
+    if (++tick % 2 == 0) WinPadRunProgress(frames + gdi_frames);
   });
   dispatch_resume(timer);
   static dispatch_source_t keep;
@@ -134,6 +143,7 @@ static UIImageView* frame_view;
 
 static void ShowFrame(void* hwnd, int width, int height, int stride, const void* bits) {
   (void)hwnd;
+  gdi_frames++;
   CFDataRef data = CFDataCreate(NULL, bits, (CFIndex)stride * height);
   CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
   CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
@@ -1137,7 +1147,10 @@ static NSString* RegValueLine(NSString* name, id v) {
 // that changes one (its resolution...) keeps its own. Wine reads a key that is in the file
 // twice as one; its server writes the file anew when it saves. A 32-bit game sees
 // HKLM\Software through Wow6432Node. Returns what it did, for the log.
-static NSArray<NSString*>* AddRegistryDefaults(NSString* prefix, NSDictionary* registry, BOOL wow64) {
+// With FORCE (the values the app's automatic settings own, WinPadAuto.m's "registryForce": a
+// game's renderer, its Windows version) a value is written also when the key has it: Wine
+// takes the last one in the file.
+static NSArray<NSString*>* AddRegistryDefaults(NSString* prefix, NSDictionary* registry, BOOL wow64, BOOL force) {
   NSMutableArray<NSString*>* said = [NSMutableArray new];
   if (![registry isKindOfClass:NSDictionary.class]) return said;
   const long stamp = (long)NSDate.date.timeIntervalSince1970;
@@ -1191,11 +1204,11 @@ static NSArray<NSString*>* AddRegistryDefaults(NSString* prefix, NSDictionary* r
       NSString* key = name.length ? [NSString stringWithFormat:@"\"%@\"", RegEscape(name)].lowercaseString : @"@";
       if (!line) {
         [said addObject:[NSString stringWithFormat:@"registry: skipped %@\\%@ (not text, a number or hex)", full, name]];
-      } else if ([have containsObject:key]) {
+      } else if ([have containsObject:key] && !force) {
         [said addObject:[NSString stringWithFormat:@"registry: %@\\%@ kept as it is", full, name]];
       } else {
         [lines appendFormat:@"%@\n", line];
-        [said addObject:[NSString stringWithFormat:@"registry: %@ in %@ [%@]", line, file, path]];
+        [said addObject:[NSString stringWithFormat:@"registry%@: %@ in %@ [%@]", force ? @" (auto)" : @"", line, file, path]];
       }
     }
     if (!lines.length) continue;
@@ -1229,6 +1242,13 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
   NSMutableArray<NSString*>* said = [NSMutableArray new];
   NSDictionary* s = game.settings ?: @{};
   if (game.profile) [said addObject:[NSString stringWithFormat:@"game profile %@", game.profile]];
+  // What the library read of the program and the automatic settings it picked (WinPadAuto.m).
+  if (game.traits)
+    [said addObject:[NSString stringWithFormat:@"detected %@, graphics %@, uses %@%@", [game.traits[@"machine"] integerValue] == 0x8664 ? @"64-bit" : @"32-bit",
+                                               game.traits[@"graphics"], [game.traits[@"uses"] componentsJoinedByString:@" "] ?: @"",
+                                               game.traits[@"installer"] ? [@", installer " stringByAppendingString:game.traits[@"installer"]] : @""]];
+  if (game.autoVariant)
+    [said addObject:[NSString stringWithFormat:@"automatic settings: variant %@ (%@)", game.autoVariant[@"id"], game.autoVariant[@"title"]]];
   NSMutableDictionary* dlls = [@{@"dinput8" : @"n,b"} mutableCopy];
   for (NSString* dll in directx_native) dlls[dll] = @"n,b";
   if (directx_native.count)
@@ -1299,7 +1319,9 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     merged[key] = values;
     registry = merged;
   }
-  [said addObjectsFromArray:AddRegistryDefaults(prefix, registry, [game.arch isEqualToString:@"32bit"])];
+  [said addObjectsFromArray:AddRegistryDefaults(prefix, registry, [game.arch isEqualToString:@"32bit"], NO)];
+  if ([s[@"registryForce"] isKindOfClass:NSDictionary.class])
+    [said addObjectsFromArray:AddRegistryDefaults(prefix, s[@"registryForce"], [game.arch isEqualToString:@"32bit"], YES)];
   // Empty folders the game writes into (Mafia's Maps): copying a game often leaves them out,
   // and then its saves fail with "path not found".
   if ([s[@"folders"] isKindOfClass:NSArray.class] && game.folder.length) {
@@ -1458,6 +1480,7 @@ static CFTimeInterval fps_shown;
   [tell addAction:[UIAlertAction actionWithTitle:@"Zavřít a spustit hru"
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction* action) {
+                                           WinPadRunEnded(@"handoff", 0);
                                            printf("WinPad Wine: closing for the handed-over program\n%s, exit 0\n",
                                                   FinishedMarker.UTF8String);
                                            fflush(stdout);
@@ -1489,6 +1512,7 @@ static CFTimeInterval fps_shown;
                 preferredStyle:UIAlertControllerStyleAlert];
   exit_now = ^{
     // The log ends as a finished run, not one that crashed (wine.log.crashed).
+    WinPadRunEnded(@"player", 0);
     printf("WinPad Wine: the player ended the game (Exit)\n%s, exit 0\n", FinishedMarker.UTF8String);
     fflush(stdout);
     exit_alert = nil;
@@ -1787,6 +1811,9 @@ static CFTimeInterval fps_shown;
     // winpad.json (its profile) may add more.
     for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))
       printf("WinPad Wine: %s\n", line.UTF8String);
+    // How this run goes, for the library's next look (a start that failed tries the next
+    // variant of the automatic settings).
+    if (self.game && !self.record) WinPadRunStarted(self.game.folder, self.game.autoVariant[@"id"], self.game.autoVariant[@"title"]);
   }
   // The game has an AOT image only where game-aot.sh put one into the
   // project on the Mac it was built on; without it the game runs with the JIT.
@@ -1888,6 +1915,18 @@ static CFTimeInterval fps_shown;
   args[argc] = NULL;
   const int status = winehost_main(argc, args);
   NSString* log = ReadLog();
+  if (game) {
+    NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"winehost: Wine process exited with code (-?\\w+)"
+                                                                        options:0
+                                                                          error:nil];
+    NSTextCheckingResult* m = [re matchesInString:log options:0 range:NSMakeRange(0, log.length)].lastObject;
+    unsigned code = status ? (unsigned)status : 0;
+    if (m) {
+      NSString* text = [log substringWithRange:[m rangeAtIndex:1]];
+      code = (unsigned)strtoul(text.UTF8String, NULL, 0);
+    }
+    WinPadRunEnded(@"exited", (int)code);
+  }
   const BOOL ok = cube   ? [log containsString:[d3d_tag stringByAppendingString:@": done, frames presented = "]] &&
                              [log containsString:@"winehost: Wine process exited with code 43"]
                   : game ? [log containsString:@"winehost: Wine process exited with code 0"]

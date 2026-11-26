@@ -75,4 +75,11 @@ int WinPadVCRedistYearOf(NSString* dll);
 // one download (of either) at a time, PROGRESS and DONE on the main queue.
 void WinPadVCRedistDownload(int year, void (^progress)(double fraction), void (^done)(NSString* _Nullable error));
 
+// NVIDIA's PhysX System Software (legacy, the PhysX 2 runtime: PhysXLoader.dll, PhysXCore.dll,
+// NxCooking.dll...), which games of 2006-2010 import and some do not carry. Whether DLL is one
+// of its DLLs; the download (NVIDIA's .msi, Redist.h WINPAD_PHYSX_URL) takes its 32-bit DLLs
+// into WinPadExtraDir, as WinPadVCRedistDownload does. "physxDownloaded" says it ran.
+BOOL WinPadPhysXProvides(NSString* dll);
+void WinPadPhysXDownload(void (^progress)(double fraction), void (^done)(NSString* _Nullable error));
+
 NS_ASSUME_NONNULL_END

@@ -406,7 +406,13 @@ for expect in 'library: 6 games' 'library: Morrowind | Morrowind/Morrowind.exe |
     'package: Zed Game.winpad -> Zed Game' 'package: broken.winpad -> Není to balíček WinPad' \
     'library: WinPad Packed | Zed Game/PACKED.EXE | 32bit | image none' \
     'own: Plain | exe Plain/GAME.EXE (auto Other.exe) | screen 800x600 | scaling stretch | programs GAME.EXE, Other.exe, Bin/Tool.exe' \
-    'own: Plain saved | exe scaling screen'; do
+    'own: Plain saved | exe scaling screen' \
+    'auto: d3d9-cube.exe | graphics d3d9 |' 'auto variant: d3d9-cube.exe base | Výchozí: širokoúhlý monitor' \
+    'auto variant: d3d9-cube.exe ms-directx' 'auto variant: d3d9-cube.exe screen-4-3' 'auto variant: d3d9-cube.exe rwx' \
+    'judge: Morrowind | skončila s chybou 0xc0000005 po 0 s | next rwx | own rwx' 'judge: Morrowind | worked | rwx | own rwx' \
+    'share: https://github.com/Chlupiq/WinPad/issues/new?title=Profil%20hry' \
+    'settings: detected 32-bit, graphics unknown' 'settings: automatic settings: variant base (Výchozí)' \
+    'settings: registry (auto): "Version"="win10" in user.reg [Software\Wine\AppDefaults\TEST.EXE]'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
 [ -f "$docs/Zed Game/DATA/level1.dat" ] && [ ! -e "$docs/Inbox/Zed Game.winpad" ] ||

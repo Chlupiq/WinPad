@@ -163,6 +163,8 @@ NSArray<NSString*>* WinPadDirectXLink(NSString* syswow64, NSString* bundleI386) 
 @property(nonatomic, copy) void (^unpack)(NSString* file);
 // A link that redirects (aka.ms): only a Microsoft host may serve the file.
 @property(nonatomic) BOOL microsoftOnly;
+// The same for NVIDIA's PhysX: only an nvidia.com host.
+@property(nonatomic) BOOL nvidiaOnly;
 @property(nonatomic, copy) void (^done)(NSString* _Nullable);
 @property(nonatomic, strong) NSURLSession* session;
 @end
@@ -238,6 +240,10 @@ static void Unpack(NSString* exe) {
   NSString* host = response.URL.host.lowercaseString;
   if (self.microsoftOnly && !([host isEqualToString:@"microsoft.com"] || [host hasSuffix:@".microsoft.com"])) {
     Finish([NSString stringWithFormat:@"Soubor nepřišel od Microsoftu (%@).", host ?: @"?"]);
+    return;
+  }
+  if (self.nvidiaOnly && !([host isEqualToString:@"nvidia.com"] || [host hasSuffix:@".nvidia.com"])) {
+    Finish([NSString stringWithFormat:@"Soubor nepřišel od NVIDIE (%@).", host ?: @"?"]);
     return;
   }
   // The file at LOCATION is gone after this method returns: move it first.
@@ -350,7 +356,7 @@ NSArray<NSString*>* WinPadExtraLink(NSString* syswow64, NSString* bundleI386) {
 static BOOL InstallerFolder(NSString* name) {
   NSString* lower = name.lowercaseString;
   for (NSString* word in @[ @"redist", @"directx", @"dxsetup", @"vcredist", @"vc_redist", @"msvc", @"support", @"prereq",
-                            @"installer", @"3rdparty", @"__installer" ])
+                            @"installer", @"3rdparty", @"__installer", @"physx" ])
     if ([lower containsString:word]) return YES;
   return NO;
 }
@@ -374,7 +380,8 @@ NSArray<NSString*>* WinPadGameInstallers(NSString* gameFolder) {
     for (NSString* part in path.stringByDeletingLastPathComponent.pathComponents)
       if (InstallerFolder(part)) in_installers = YES;
     const BOOL redist_name = [lower containsString:@"vcredist"] || [lower containsString:@"vc_redist"] ||
-                             [lower containsString:@"directx"] || [lower hasPrefix:@"dxsetup"];
+                             [lower containsString:@"directx"] || [lower hasPrefix:@"dxsetup"] ||
+                             [lower containsString:@"physx"];
     // DirectX's cabinets (Jun2010_d3dx9_43_x86.cab...), .msi files and programs, in an installer
     // folder or named like one; not the game's own data cabinets (some are hundreds of MB).
     const BOOL package = [ext isEqualToString:@"cab"] || [ext isEqualToString:@"msi"] || [ext isEqualToString:@"exe"];
@@ -446,4 +453,40 @@ void WinPadVCRedistDownload(int year, void (^progress)(double fraction), void (^
                                                   delegate:current
                                              delegateQueue:nil];
   [[current.session downloadTaskWithURL:[NSURL URLWithString:@(vc->url)]] resume];
+}
+
+BOOL WinPadPhysXProvides(NSString* dll) {
+  NSString* lower = dll.lowercaseString;
+  return [lower isEqualToString:@"physxloader.dll"] || [lower isEqualToString:@"physxcore.dll"] ||
+         [lower isEqualToString:@"physxcooking.dll"] || [lower isEqualToString:@"nxcooking.dll"] ||
+         [lower isEqualToString:@"cudart32_30_9.dll"] || [lower hasPrefix:@"physxdevice"];
+}
+
+void WinPadPhysXDownload(void (^progress)(double fraction), void (^done)(NSString* _Nullable error)) {
+  if (current) return;
+  current = [WinPadDirectXDownloader new];
+  current.progress = progress;
+  current.done = done;
+  current.file = DocumentsFile(@".redist/physx-legacy.msi");
+  current.nvidiaOnly = YES;
+  current.unpack = ^(NSString* file) {
+    NSString* dir = WinPadExtraDir();
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    char err[512] = "";
+    int count = 0;
+    NSString* error = nil;
+    if (winpad_redist_extract_dlls(file.fileSystemRepresentation, dir.fileSystemRepresentation, 0x14c, &count, err,
+                                   sizeof(err)))
+      error = [NSString stringWithFormat:@"Rozbalení se nepovedlo: %s", err];
+    else
+      printf("WinPad Wine: PhysX from NVIDIA: %d new DLLs in %s\n", count, dir.UTF8String);
+    // Once: what the package lacks, another download would not bring.
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"physxDownloaded"];
+    [NSFileManager.defaultManager removeItemAtPath:file error:nil];
+    Finish(error);
+  };
+  current.session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration
+                                                  delegate:current
+                                             delegateQueue:nil];
+  [[current.session downloadTaskWithURL:[NSURL URLWithString:@WINPAD_PHYSX_URL]] resume];
 }

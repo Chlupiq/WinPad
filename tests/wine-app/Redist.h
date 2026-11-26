@@ -20,6 +20,10 @@ extern "C" {
   "directx_Jun2010_redist.exe"
 #define WINPAD_DIRECTX_SHA256 "053f76dcbb28802e23341b6a787e3b0791c0fa5c8d4d011b1044172dbf89c73b"
 
+// NVIDIA's legacy PhysX System Software (PhysX 2.x runtime, PhysXLoader.dll), as NVIDIA serves it.
+// Its checksum is not pinned: the app only takes it from an nvidia.com host.
+#define WINPAD_PHYSX_URL "https://us.download.nvidia.com/Windows/9.13.0604/PhysX-9.13.0604-SystemSoftware-Legacy.msi"
+
 // The SHA-256 of the file PATH as 64 lowercase hex digits into HEX (65 bytes). 0 when
 // done, else -1 with why in ERR.
 int winpad_redist_sha256(const char* path, char hex[65], char* err, size_t errlen);
