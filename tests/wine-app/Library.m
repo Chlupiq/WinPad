@@ -60,8 +60,10 @@
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include <dirent.h>
 #include <math.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 
 static NSString* Documents(void) {
@@ -597,10 +599,107 @@ NSArray<NSString*>* WinPadGamePrograms(NSString* folder) {
   return found;
 }
 
+// ---- The scan cache ----
+// Matching a game folder against the profiles (FilesAnyCase, three folders deep) and finding its
+// program (BestProgram, up to 5000 entries) stat each file of the game: for a library of big
+// games that took seconds at every launch, and the app launches anew after each game. What they
+// found is kept in Library/Caches/WinPad/games.json by folder, with the folder's signature
+// (FolderSignature) and the profiles' (ProfilesSignature); a folder whose signature is the same
+// is not walked again.
+
+static uint64_t Fnv(uint64_t h, const void* data, size_t n) {
+  const uint8_t* b = data;
+  for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001b3ULL;
+  return h;
+}
+
+// The names and change times of PATH's folders down to DEPTH levels: a file added, removed or
+// renamed anywhere FilesAnyCase and BestProgram look changes one of them. readdir's d_type, no
+// stat of the files.
+static uint64_t TreeSignature(const char* path, int depth, uint64_t h) {
+  struct stat st;
+  if (stat(path, &st)) return Fnv(h, "-", 1);
+  h = Fnv(h, &st.st_mtimespec, sizeof st.st_mtimespec);
+  h = Fnv(h, &st.st_ino, sizeof st.st_ino);
+  if (depth <= 0) return h;
+  DIR* dir = opendir(path);
+  if (!dir) return h;
+  NSMutableArray<NSString*>* subdirs = [NSMutableArray new];
+  for (struct dirent* e; (e = readdir(dir));) {
+    if (e->d_type != DT_DIR || !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    [subdirs addObject:@(e->d_name)];
+  }
+  closedir(dir);
+  // readdir's order is the file system's: sorted, so the same tree is the same signature.
+  [subdirs sortUsingSelector:@selector(compare:)];
+  for (NSString* name in subdirs) {
+    h = Fnv(h, name.UTF8String, strlen(name.UTF8String) + 1);
+    h = TreeSignature([NSString stringWithFormat:@"%s/%@", path, name].fileSystemRepresentation, depth - 1, h);
+  }
+  return h;
+}
+
+// The game folder DIR as the scan saw it: its folders three levels deep and its winpad.json.
+static NSString* FolderSignature(NSString* dir) {
+  uint64_t h = TreeSignature(dir.fileSystemRepresentation, 3, 0xcbf29ce484222325ULL);
+  struct stat st;
+  if (!stat([dir stringByAppendingPathComponent:@"winpad.json"].fileSystemRepresentation, &st)) {
+    h = Fnv(h, &st.st_mtimespec, sizeof st.st_mtimespec);
+    h = Fnv(h, &st.st_size, sizeof st.st_size);
+  }
+  return [NSString stringWithFormat:@"%016llx", (unsigned long long)h];
+}
+
+// The profiles the scan matched against (AppProfiles: the app's, and online ones when there are).
+static NSString* ProfilesSignature(void) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (NSDictionary* p in AppProfiles()) {
+    NSString* line = [NSString stringWithFormat:@"%@ %@", p[@"id"], p[@"version"] ?: @0];
+    h = Fnv(h, line.UTF8String, strlen(line.UTF8String) + 1);
+  }
+  return [NSString stringWithFormat:@"%016llx-%lu", (unsigned long long)h, (unsigned long)AppProfiles().count];
+}
+
+static NSString* ScanCachePath(void) {
+  NSString* dir = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject
+      stringByAppendingPathComponent:@"WinPad"];
+  [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+  return [dir stringByAppendingPathComponent:@"games.json"];
+}
+
+// The cache: {"format": 1, "profiles": ProfilesSignature, "games": {folder: {"sig", "info",
+// "fromApp", "best"}}}; empty when it is for other profiles. With the "noScanCache" setting it is
+// neither read nor written.
+static NSMutableDictionary* LoadScanCache(NSString* profiles) {
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"noScanCache"]) return [NSMutableDictionary new];
+  NSData* data = [NSData dataWithContentsOfFile:ScanCachePath()];
+  id obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![obj isKindOfClass:NSDictionary.class] || ![obj[@"format"] isEqual:@1] || ![obj[@"profiles"] isEqual:profiles] ||
+      ![obj[@"games"] isKindOfClass:NSDictionary.class])
+    return [NSMutableDictionary new];
+  return [obj[@"games"] mutableCopy];
+}
+
+static void SaveScanCache(NSString* profiles, NSDictionary* games) {
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"noScanCache"]) return;
+  NSData* json = [NSJSONSerialization dataWithJSONObject:@{@"format" : @1, @"profiles" : profiles, @"games" : games}
+                                                 options:0
+                                                   error:nil];
+  [json writeToFile:ScanCachePath() atomically:YES];
+}
+
+// What the last WinPadFindGames did: games found, and folders it walked (not in the cache).
+static NSUInteger last_scan_games, last_scan_walked;
+
 NSArray<WinPadGame*>* WinPadFindGames(void) {
+  const CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* docs = Documents();
   NSMutableArray<WinPadGame*>* games = [NSMutableArray new];
+  NSString* profiles_sig = ProfilesSignature();
+  NSMutableDictionary* cache = LoadScanCache(profiles_sig);
+  NSMutableDictionary* fresh_cache = [NSMutableDictionary new];
+  NSUInteger walked = 0;
   NSArray* folders = [[fm contentsOfDirectoryAtPath:docs error:nil] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
   for (NSString* folder in folders) {
     // The app's own folders (main.m): the Wine prefix, FEX's caches, the window's frames.
@@ -610,19 +709,40 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     BOOL is_dir = NO;
     if (![fm fileExistsAtPath:dir isDirectory:&is_dir] || !is_dir) continue;
     NSArray* files = [fm contentsOfDirectoryAtPath:dir error:nil];
+    NSString* sig = FolderSignature(dir);
+    NSDictionary* cached = [cache[folder] isKindOfClass:NSDictionary.class] ? cache[folder] : nil;
+    if (![cached[@"sig"] isEqual:sig]) cached = nil;
     NSDictionary* info = nil;
-    NSData* json = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"winpad.json"]];
-    if (json) {
-      id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
-      if ([obj isKindOfClass:NSDictionary.class]) info = obj;
-    }
     BOOL profile_from_app = NO;
-    info = WithAppProfile(dir, info, &profile_from_app);
+    if (cached) {
+      info = [cached[@"info"] isKindOfClass:NSDictionary.class] ? cached[@"info"] : nil;
+      profile_from_app = [cached[@"fromApp"] boolValue];
+    } else {
+      walked++;
+      NSData* json = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"winpad.json"]];
+      if (json) {
+        id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
+        if ([obj isKindOfClass:NSDictionary.class]) info = obj;
+      }
+      info = WithAppProfile(dir, info, &profile_from_app);
+    }
+    NSMutableDictionary* entry = [@{@"sig" : sig, @"info" : info ?: [NSNull null], @"fromApp" : @(profile_from_app)} mutableCopy];
     NSDictionary* settings = WinPadGameSettings(info);
     NSDictionary* own_settings = WinPadOwnGameSettings(folder);
     NSString* exe = [settings[@"exe"] isKindOfClass:NSString.class] ? settings[@"exe"] : nil;
     if (exe && ([exe containsString:@".."] || ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:exe]])) exe = nil;
-    if (!exe) exe = BestProgram(dir, folder);
+    if (!exe) {
+      // The program the last scan found, while it is there; else the walk (an empty "best": none).
+      NSString* best = [cached[@"best"] isKindOfClass:NSString.class] ? cached[@"best"] : nil;
+      if (best && (!best.length || [fm fileExistsAtPath:[dir stringByAppendingPathComponent:best]])) {
+        exe = best.length ? best : nil;
+      } else {
+        if (cached) walked++;
+        exe = BestProgram(dir, folder);
+      }
+      entry[@"best"] = exe ?: @"";
+    }
+    if ([NSJSONSerialization isValidJSONObject:entry]) fresh_cache[folder] = entry;
     // The program the user picked (Nastavení hry, a long press on its tile) wins, while it is there.
     NSString* auto_exe = exe;
     NSString* own_exe = [own_settings[@"exe"] isKindOfClass:NSString.class] ? own_settings[@"exe"] : nil;
@@ -666,6 +786,12 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     CountMaps(game);
     [games addObject:game];
   }
+  // Only the folders there are now: a removed game's entry goes.
+  if (walked || ![fresh_cache isEqualToDictionary:cache]) SaveScanCache(profiles_sig, fresh_cache);
+  last_scan_games = games.count;
+  last_scan_walked = walked;
+  NSLog(@"[launch] library scan: %lu games, %lu walked, %.0f ms", (unsigned long)games.count, (unsigned long)walked,
+        (CFAbsoluteTimeGetCurrent() - began) * 1000);
   return games;
 }
 
@@ -2234,6 +2360,8 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 @property(nonatomic, strong) NSMutableArray* observers;
 @property(nonatomic) unsigned pad;  // the controller buttons held at the last change (Nav*)
 @property(nonatomic) BOOL started;
+// offerDirectX is looking into the last run's log.
+@property(nonatomic) BOOL scanningLog;
 @property(nonatomic, readonly) BOOL compact;  // an iPhone's height: smaller, no hints or info card
 // Packages to install (openPackages:), whether one is being installed, and what the
 // installs said (for libraryTest's report).
@@ -2261,6 +2389,7 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 - (void)refreshJIT;
 - (void)openJITGuide;
 - (void)offerDirectX;
+- (void)offerDirectXForChild:(NSString*)child dll:(NSString*)dll date:(NSDate*)date;
 - (void)downloadDirectXFor:(NSString*)dll;
 - (BOOL)checkDLLsOf:(NSString*)program game:(WinPadGame*)game;
 - (void)ask64BitFor:(WinPadGame*)game program:(NSString*)program;
@@ -2537,6 +2666,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 
 - (void)viewDidAppear:(BOOL)animated {
   [super viewDidAppear:animated];
+  static BOOL appeared;
+  if (!appeared) WinPadLogLaunch(@"library on screen");
+  appeared = YES;
   [self becomeFirstResponder];
   [self openPackages:@[]];
   if (self.handedOver && !self.installing) {
@@ -2564,8 +2696,9 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   static BOOL tested;
   if (tested || ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
   tested = YES;
-  NSMutableString* report = [NSMutableString stringWithFormat:@"%@library: %lu games\n", self.installReport,
-                                                             (unsigned long)self.games.count];
+  NSMutableString* report = [NSMutableString stringWithFormat:@"%@library: %lu games\nscan: %lu games, %lu walked\n",
+                                                             self.installReport, (unsigned long)self.games.count,
+                                                             (unsigned long)last_scan_games, (unsigned long)last_scan_walked];
   for (WinPadGame* game in self.games)
     [report appendFormat:@"library: %@ | %@ | %@ | image %@%@%@\n", game.title, game.exe, game.arch ?: @"?",
                          game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @"",
@@ -3152,15 +3285,54 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 
 // The last game run stopped because a DLL of Microsoft's DirectX was missing (Wine has no
 // file of it): offers the download, once for that run.
+// The log is looked into off the main thread (a game's log can be large), once per log: what
+// it found is kept by the log's time and size ("lastRunScan"), so a launch after a launch
+// reads nothing.
 - (void)offerDirectX {
   if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] || self.presentedViewController ||
       self.installing || WinPadDirectXDownloading())
     return;
   NSString* log = [Documents() stringByAppendingPathComponent:@"wine.log"];
-  NSDate* date = [NSFileManager.defaultManager attributesOfItemAtPath:log error:nil].fileModificationDate;
+  NSString* crashed = [Documents() stringByAppendingPathComponent:@"wine.log.crashed"];
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSDictionary* attrs = [fm attributesOfItemAtPath:log error:nil];
+  NSDictionary* crashed_attrs = [fm attributesOfItemAtPath:crashed error:nil];
+  NSDate* date = attrs.fileModificationDate;
+  if (!attrs && !crashed_attrs) return;
+  NSString* key = [NSString stringWithFormat:@"%.3f %llu %.3f %llu", date.timeIntervalSince1970, attrs.fileSize,
+                                             crashed_attrs.fileModificationDate.timeIntervalSince1970, crashed_attrs.fileSize];
+  NSDictionary* scan = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"lastRunScan"];
+  if ([scan[@"key"] isEqual:key]) {
+    NSString* child = [scan[@"child"] isKindOfClass:NSString.class] ? scan[@"child"] : nil;
+    NSString* dll = [scan[@"dll"] isKindOfClass:NSString.class] ? scan[@"dll"] : nil;
+    [self offerDirectXForChild:child dll:dll date:date];
+    return;
+  }
+  if (self.scanningLog) return;
+  self.scanningLog = YES;
+  __weak LibraryViewController* weak = self;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    const CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
+    NSString* child = WinPadFailedChildOfLastRun();
+    NSString* dll = WinPadMissingDLLOfLastRun();
+    NSLog(@"[launch] last run's log looked into: %.0f ms", (CFAbsoluteTimeGetCurrent() - began) * 1000);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSMutableDictionary* found = [NSMutableDictionary dictionaryWithObject:key forKey:@"key"];
+      if (child) found[@"child"] = child;
+      if (dll) found[@"dll"] = dll;
+      [NSUserDefaults.standardUserDefaults setObject:found forKey:@"lastRunScan"];
+      LibraryViewController* me = weak;
+      if (!me) return;
+      me.scanningLog = NO;
+      if (me.presentedViewController || me.installing || me.started || WinPadDirectXDownloading()) return;
+      [me offerDirectXForChild:child dll:dll date:date];
+    });
+  });
+}
+
+- (void)offerDirectXForChild:(NSString*)child dll:(NSString*)dll date:(NSDate*)date {
   // A second program the game started, which cannot start on iPad (only one 32-bit program
   // runs): SafeDisc's helper (~e5.0001, ~df*.tmp) means a copy protection Wine cannot run.
-  NSString* child = WinPadFailedChildOfLastRun();
   NSString* child_key = [NSString stringWithFormat:@"child %@ %.0f", child, date.timeIntervalSince1970];
   if (child && ![[NSUserDefaults.standardUserDefaults stringForKey:@"childOffered"] isEqualToString:child_key]) {
     [NSUserDefaults.standardUserDefaults setObject:child_key forKey:@"childOffered"];
@@ -3181,7 +3353,6 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [self presentViewController:said animated:YES completion:nil];
     return;
   }
-  NSString* dll = WinPadMissingDLLOfLastRun();
   if (!dll || [WinPadDirectXDLLs() containsObject:dll]) return;
   NSString* key = [NSString stringWithFormat:@"%@ %.0f", dll, date.timeIntervalSince1970];
   if ([[NSUserDefaults.standardUserDefaults stringForKey:@"directXOffered"] isEqualToString:key]) return;

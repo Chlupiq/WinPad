@@ -37,7 +37,9 @@ BOOL WinPadDirectXProvides(NSString* dll) {
   return NO;
 }
 
-static NSString* LastRunLog(void) {
+// The last run's log (wine.log, or wine.log.crashed when that is newer), mapped, not read: a
+// game's log can grow to many megabytes, and the library looks into it at every launch.
+static NSData* LastRunLog(void) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* newest = nil;
   NSDate* newest_date = nil;
@@ -49,44 +51,60 @@ static NSString* LastRunLog(void) {
       newest_date = date;
     }
   }
-  return newest ? [NSString stringWithContentsOfFile:newest encoding:NSUTF8StringEncoding error:nil] : nil;
+  return newest ? [NSData dataWithContentsOfFile:newest options:NSDataReadingMappedIfSafe error:nil] : nil;
+}
+
+// The text of LEN bytes at BYTES (UTF-8, else Latin-1, which takes any bytes).
+static NSString* LogText(const char* bytes, size_t len) {
+  return [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding]
+             ?: [[NSString alloc] initWithBytes:bytes length:len encoding:NSISOLatin1StringEncoding];
+}
+
+// The line of LOG (SIZE bytes) that the byte at AT is on, without its newline.
+static NSString* LogLine(const char* log, size_t size, const char* at) {
+  const char* begin = at;
+  while (begin > log && begin[-1] != '\n') begin--;
+  const char* end = memchr(at, '\n', size - (size_t)(at - log));
+  return LogText(begin, (size_t)((end ? end : log + size) - begin));
 }
 
 NSString* WinPadFailedChildOfLastRun(void) {
-  NSString* log = LastRunLog();
-  const NSRange failed = log ? [log rangeOfString:@"BOOT FAILED at stage 'guest-window-reserve'"] : NSMakeRange(NSNotFound, 0);
-  if (failed.location == NSNotFound) return nil;
+  NSData* data = LastRunLog();
+  if (!data.length) return nil;
+  const char* log = data.bytes;
+  static const char failed_text[] = "BOOT FAILED at stage 'guest-window-reserve'";
+  const char* failed = memmem(log, data.length, failed_text, sizeof failed_text - 1);
+  if (!failed) return nil;
   // NtCreateUserProcess: image=L"C:\\windows\\~e5.0001" cmdline=...: the last one before it.
-  NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"NtCreateUserProcess: image=L\"([^\"]*)\""
-                                                                      options:0
-                                                                        error:nil];
-  NSArray<NSTextCheckingResult*>* found = [re matchesInString:log options:0 range:NSMakeRange(0, failed.location)];
-  if (!found.count) return @"";
-  NSString* image = [log substringWithRange:[found.lastObject rangeAtIndex:1]];
-  image = [image stringByReplacingOccurrencesOfString:@"\\\\" withString:@"\\"];
-  return [image componentsSeparatedByString:@"\\"].lastObject;
+  static const char create_text[] = "NtCreateUserProcess: image=L\"";
+  const char* image = NULL;
+  for (const char* at = log; (at = memmem(at, (size_t)(failed - at), create_text, sizeof create_text - 1));
+       at += sizeof create_text - 1)
+    image = at + sizeof create_text - 1;
+  if (!image) return @"";
+  const char* quote = memchr(image, '"', (size_t)(failed - image));
+  if (!quote) return @"";
+  NSString* path = [LogText(image, (size_t)(quote - image)) stringByReplacingOccurrencesOfString:@"\\\\" withString:@"\\"];
+  return [path componentsSeparatedByString:@"\\"].lastObject;
 }
 
 NSString* WinPadMissingDLLOfLastRun(void) {
-  NSFileManager* fm = NSFileManager.defaultManager;
-  NSString* newest = nil;
-  NSDate* newest_date = nil;
-  for (NSString* name in @[ @"wine.log", @"wine.log.crashed" ]) {
-    NSString* path = DocumentsFile(name);
-    NSDate* date = [fm attributesOfItemAtPath:path error:nil].fileModificationDate;
-    if (date && (!newest_date || [date compare:newest_date] == NSOrderedDescending)) {
-      newest = path;
-      newest_date = date;
-    }
-  }
-  NSString* log = newest ? [NSString stringWithContentsOfFile:newest encoding:NSUTF8StringEncoding error:nil] : nil;
-  if (!log) return nil;
+  NSData* data = LastRunLog();
+  if (!data.length) return nil;
+  const char* log = data.bytes;
+  const size_t size = data.length;
   // err:module:import_dll Library d3dx9_30.dll (which is needed by L"Z:\\...\\NFSC.exe") not found
-  NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"Library ([^ ()]+\\.dll) \\(which is needed by [^\\n]*\\) not found"
+  NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"Library ([^ ()]+\\.dll) \\(which is needed by .*\\) not found"
                                                                       options:NSRegularExpressionCaseInsensitive
                                                                         error:nil];
-  NSTextCheckingResult* m = [re firstMatchInString:log options:0 range:NSMakeRange(0, log.length)];
-  return m ? [log substringWithRange:[m rangeAtIndex:1]].lowercaseString : nil;
+  static const char needed_text[] = "(which is needed by ";
+  for (const char* at = log; (at = memmem(at, size - (size_t)(at - log), needed_text, sizeof needed_text - 1));
+       at += sizeof needed_text - 1) {
+    NSString* line = LogLine(log, size, at);
+    NSTextCheckingResult* m = [re firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+    if (m) return [line substringWithRange:[m rangeAtIndex:1]].lowercaseString;
+  }
+  return nil;
 }
 
 static void AddImport(const char* dll, void* ctx) {

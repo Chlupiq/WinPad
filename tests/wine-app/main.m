@@ -63,6 +63,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 int winehost_main(int argc, char* argv[]);
@@ -96,6 +98,24 @@ static void PressTestButton(void);
 static BOOL mouse_test;  // "mouseTest": CI moves the mouse and clicks the window through winehost_post_mouse
 static void ClickTest(void);
 
+void WinPadLogLaunch(NSString* what) {
+  static double started;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    struct kinfo_proc info;
+    size_t size = sizeof info;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    started = !sysctl(mib, 4, &info, &size, NULL, 0) && info.kp_proc.p_starttime.tv_sec
+                  ? info.kp_proc.p_starttime.tv_sec + info.kp_proc.p_starttime.tv_usec / 1e6
+                  : now.tv_sec + now.tv_usec / 1e6;
+  });
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  NSLog(@"[launch] %@: %.0f ms since the process started", what, (now.tv_sec + now.tv_usec / 1e6 - started) * 1000);
+}
+
 static NSString* DocumentsPath(NSString* name) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
   return [docs stringByAppendingPathComponent:name];
@@ -105,17 +125,21 @@ static NSString* ReadLog(void) {
   return [NSString stringWithContentsOfFile:DocumentsPath(@"wine.log") encoding:NSUTF8StringEncoding error:nil] ?: @"";
 }
 
-// The end of the log, for the screen: a game's log grows for as long as it runs.
-static NSString* ReadLogTail(void) {
+// The end of the log, KEEP bytes, for the screen: a game's log grows for as long as it runs.
+static NSString* ReadLogEnd(unsigned long long keep) {
   NSFileHandle* f = [NSFileHandle fileHandleForReadingAtPath:DocumentsPath(@"wine.log")];
   if (!f) return @"";
-  const unsigned long long size = [f seekToEndOfFile], keep = 64 * 1024;
+  const unsigned long long size = [f seekToEndOfFile];
   [f seekToFileOffset:size > keep ? size - keep : 0];
   NSData* data = [f readDataToEndOfFile];
   [f closeFile];
   NSString* tail = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?:
                    [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
   return size > keep ? [@"…\n" stringByAppendingString:tail] : tail;
+}
+
+static NSString* ReadLogTail(void) {
+  return ReadLogEnd(64 * 1024);
 }
 
 // The program to run: WINPAD_PROGRAM (set by an Xcode scheme), else the
@@ -1408,8 +1432,11 @@ static CFTimeInterval fps_shown;
   mouse_test = [self.program isEqualToString:@"window"] && !gamepad_test &&
                [NSUserDefaults.standardUserDefaults boolForKey:@"mouseTest"];
 
-  NSString* previous = ReadLog();
+  // Whether the last run finished: its log's end has the marker (only the end is read: a game's
+  // log can be large, and this is on the main thread before the game starts).
+  NSString* previous = ReadLogEnd(1 << 20);
   if (previous.length && ![previous containsString:FinishedMarker]) {
+    if (![self.program isEqualToString:@"game"]) previous = ReadLog();
     [NSFileManager.defaultManager removeItemAtPath:DocumentsPath(@"wine.log.crashed") error:nil];
     [NSFileManager.defaultManager moveItemAtPath:DocumentsPath(@"wine.log")
                                           toPath:DocumentsPath(@"wine.log.crashed")
@@ -1921,6 +1948,7 @@ static CFTimeInterval fps_shown;
 
 @implementation WineSceneDelegate
 - (void)scene:(UIScene*)scene willConnectToSession:(UISceneSession*)session options:(UISceneConnectionOptions*)options {
+  WinPadLogLaunch(@"scene");
   self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene*)scene];
   if (![ProgramName() isEqualToString:@"library"]) {
     self.window.rootViewController = [WineViewController new];
@@ -2056,6 +2084,7 @@ static CFTimeInterval fps_shown;
 int main(int argc, char* argv[]) {
   app_started = CFAbsoluteTimeGetCurrent();
   @autoreleasepool {
+    WinPadLogLaunch(@"main");
     return UIApplicationMain(argc, argv, nil, NSStringFromClass([WineAppDelegate class]));
   }
 }

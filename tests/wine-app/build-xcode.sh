@@ -409,6 +409,26 @@ for expect in 'library: 6 games' 'library: Morrowind | Morrowind/Morrowind.exe |
     'own: Plain saved | exe scaling screen'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
+# Again: the library now takes what it found from its scan cache (Library/Caches/WinPad/games.json)
+# and walks no game folder, and finds the same.
+cp "$docs/library.txt" "$out/library-first.txt"
+rm -f "$docs/library.txt"
+xcrun simctl launch "$udid" "$bundle" -libraryTest YES -lastGame Plain
+for _ in $(seq 60); do
+    grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
+    sleep 1
+done
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+echo "--- the library's report, launched again ---"
+grep '^scan: ' "$out/library-first.txt" "$docs/library.txt" || true
+grep '^library: ' "$out/library-first.txt" >"$out/library-first.games"
+grep '^library: ' "$docs/library.txt" >"$out/library-again.games" || true
+if ! diff "$out/library-first.games" "$out/library-again.games"; then
+    echo "the library found other games from its scan cache" >&2
+    exit 1
+fi
+grep -q '^scan: 6 games, 0 walked' "$docs/library.txt" ||
+    { echo "the library walked game folders again although none changed" >&2; exit 1; }
 [ -f "$docs/Zed Game/DATA/level1.dat" ] && [ ! -e "$docs/Inbox/Zed Game.winpad" ] ||
     { echo "the package was not unpacked into Documents/Zed Game, or is still in the Inbox" >&2; exit 1; }
 # In the prefix as Wine writes keys; the next runs (window.exe) start Wine's server on it.

@@ -99,6 +99,10 @@ NSString* WinPadPadStyle(void);
 // An input's short label in STYLE (a button's face, "L" for the left stick), for the touch controller.
 NSString* WinPadPadLabel(int input, NSString* style);
 
+// Logs "[launch] WHAT: N ms since the process started" (main.m), for how long a launch takes:
+// the process start is the kernel's, so what dyld does before main counts too.
+void WinPadLogLaunch(NSString* what);
+
 @interface LibraryViewController : UIViewController
 // Runs a program: "game" with the game picked, or a test program (hello, window) with nil.
 @property(nonatomic, copy) void (^start)(NSString* program, WinPadGame* game);

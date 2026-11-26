@@ -119,15 +119,48 @@ targets:
         script: |
           set -e
           app="$TARGET_BUILD_DIR/$WRAPPER_NAME"
-          rm -rf "$app/aarch64-windows" "$app/arm64ec-windows" "$app/i386-windows" "$app/nls" "$app/fonts"
-          cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/"
+          # Only what changed is copied and signed again: Wine's files are hundreds of
+          # megabytes, and a file copied anew is one Xcode installs on the iPad anew. A file
+          # is copied when its time differs from the copy's (cp -p keeps it; a signed copy gets
+          # its source's time back), and the copies the source no longer has go.
+          changed="$TARGET_TEMP_DIR/winpad-changed-dylibs"
+          : > "$changed"
+          sync_dir() {
+            mkdir -p "$2"
+            (cd "$2" && find . -mindepth 1 -depth) | while IFS= read -r rel; do
+              if [ ! -e "$1/$rel" ] && [ ! -L "$1/$rel" ]; then rm -rf "$2/$rel"; fi
+            done
+            (cd "$1" && find . -mindepth 1) | while IFS= read -r rel; do
+              rel="${rel#./}"; s="$1/$rel"; d="$2/$rel"
+              if [ -L "$s" ]; then
+                if [ ! -L "$d" ] || [ "$(readlink "$s")" != "$(readlink "$d")" ]; then rm -rf "$d"; ln -s "$(readlink "$s")" "$d"; fi
+              elif [ -d "$s" ]; then
+                if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then rm -rf "$d"; fi
+                mkdir -p "$d"
+              elif [ ! -f "$d" ] || [ -L "$d" ] || [ "$s" -nt "$d" ] || [ "$d" -nt "$s" ]; then
+                rm -rf "$d"
+                cp -p "$s" "$d"
+                case "$d" in *.dylib) echo "$d" >> "$changed" ;; esac
+              fi
+            done
+          }
+          sync_dir "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/aarch64-windows"
           # 64-bit x86 programs: Madeira's ARM64EC modules (plain PE files, both platforms).
-          if [ -d "$PROJECT_DIR/wine/arm64ec-windows" ]; then cp -R "$PROJECT_DIR/wine/arm64ec-windows" "$app/"; fi
-          cp -R "$PROJECT_DIR/wine/i386-windows" "$PROJECT_DIR/wine/nls" "$PROJECT_DIR/wine/fonts" "$app/"
-          cp "$PROJECT_DIR/wine/system.reg" "$app/"
-          if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; fi
-          mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
-          cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          if [ -d "$PROJECT_DIR/wine/arm64ec-windows" ]; then sync_dir "$PROJECT_DIR/wine/arm64ec-windows" "$app/arm64ec-windows"
+          else rm -rf "$app/arm64ec-windows"; fi
+          for dir in i386-windows nls fonts; do sync_dir "$PROJECT_DIR/wine/$dir" "$app/$dir"; done
+          cp -p "$PROJECT_DIR/wine/system.reg" "$app/"
+          if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp -p "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; else rm -f "$app/winpad-build.txt"; fi
+          frameworks="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
+          mkdir -p "$frameworks"
+          for image in "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib; do
+            [ -f "$image" ] || continue
+            d="$frameworks/$(basename "$image")"
+            if [ ! -f "$d" ] || [ "$image" -nt "$d" ] || [ "$d" -nt "$image" ]; then
+              cp -pf "$image" "$d"
+              echo "$d" >> "$changed"
+            fi
+          done
           # The app's own VPN only when it is signed for it (WinPad.xcconfig).
           # (signed by its own target with its entitlement; the app's signature seals it).
           rm -rf "$app/PlugIns/WinPadVPN.appex"
@@ -136,9 +169,28 @@ targets:
             cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$app/PlugIns/"
           fi
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
-            for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib; do
+            # The dylibs copied now; all of them when the identity is another than last time's.
+            stamp="$TARGET_TEMP_DIR/winpad-signed-identity"
+            if [ "$(cat "$stamp" 2>/dev/null)" != "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
+              ls "$app"/aarch64-windows/*.dylib "$frameworks"/fexaot*.dylib > "$changed" 2>/dev/null || true
+            fi
+            signed=0
+            while IFS= read -r dylib; do
+              # Wine's host libraries (aarch64-windows/*.dylib) and the AOT images, as before.
+              case "$dylib" in
+                "$app"/aarch64-windows/*/*) continue ;;
+                "$app"/aarch64-windows/*.dylib | "$frameworks"/fexaot*.dylib) [ -f "$dylib" ] || continue ;;
+                *) continue ;;
+              esac
               codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
-            done
+              case "$dylib" in
+                "$frameworks"/*) touch -r "$PROJECT_DIR/Frameworks/$PLATFORM_NAME/$(basename "$dylib")" "$dylib" ;;
+                *) touch -r "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows/${dylib#"$app/aarch64-windows/"}" "$dylib" ;;
+              esac
+              signed=$((signed + 1))
+            done < "$changed"
+            echo "$EXPANDED_CODE_SIGN_IDENTITY" > "$stamp"
+            echo "WinPad: signed $signed dylibs (the others are as the last build signed them)"
           fi
     settings:
       base:
