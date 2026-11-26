@@ -381,9 +381,27 @@ PY
 : >"$maps/1234.133456790.bin"
 echo code >"$maps/runtime/rtcode-1.fexrc"
 echo 'AFP=1' >"$maps/hostprobe.txt"
+# Game profiles online (Library.m, WinPadUpdateOnlineProfiles): a downloaded file with a newer
+# Mafia profile wins over the app's (v4); one in a format the app does not know is refused and
+# leaves it as it is; Kingdoms of Amalur, which the file lacks, keeps the app's profile.
+read -r profiles_url profiles_broken_url <<URLS
+$(python3 -I - "$root/tools/winpad-translator/data/profiles/mafia.json" "$docs" <<'PY'
+import json, os, pathlib, sys
+mafia = json.load(open(sys.argv[1], encoding="utf-8"))
+mafia["version"] = 99
+other = {"id": "online-only", "version": 1, "title": "Online", "match": [{"exe": "NOSUCH.EXE"}]}
+good = os.path.join(sys.argv[2], ".online-profiles-test.json")
+bad = os.path.join(sys.argv[2], ".broken-profiles.json")
+json.dump({"format": 1, "profiles": [mafia, other]}, open(good, "w"))
+json.dump({"format": 2, "profiles": [dict(mafia, version=100)]}, open(bad, "w"))
+print(pathlib.Path(good).as_uri(), pathlib.Path(bad).as_uri())
+PY
+)
+URLS
 # The test presses right and A from the focused game: start from Plain, so right is Test Game
 # whatever folders sort before it (Mafia does).
-xcrun simctl launch "$udid" "$bundle" -libraryTest YES -lastGame Plain
+xcrun simctl launch "$udid" "$bundle" -libraryTest YES -lastGame Plain \
+    -profilesURL "$profiles_url" -profilesBrokenURL "$profiles_broken_url"
 for _ in $(seq 60); do
     grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
     sleep 1
@@ -394,7 +412,7 @@ xcrun simctl io "$udid" screenshot "$out/library-screens/ipad.png" >/dev/null 2>
 xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
 echo "--- the library's report ---"
 cat "$docs/library.txt" || true
-for expect in 'library: 6 games' 'library: Morrowind | Morrowind/Morrowind.exe | 32bit | image none' 'library: Kingdoms of Amalur: Re-Reckoning | Deep/Bin/Deep.exe | 32bit | image none | profile pf-1041720 v1 (app)' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v4 (app)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
+for expect in 'library: 6 games' 'library: Morrowind | Morrowind/Morrowind.exe | 32bit | image none' 'library: Kingdoms of Amalur: Re-Reckoning | Deep/Bin/Deep.exe | 32bit | image none | profile pf-1041720 v1 (app)' 'library: Mafia | Mafia/Game.exe | 32bit | image none | profile mafia v99 (online)' 'library: Plain | Plain/GAME.EXE | 32bit | image fexaot.dylib (game folder)' \
     'library: WinPad Test | Test Game/TEST.EXE | 32bit | image none | profile test v3' \
     'start: game Test Game/TEST.EXE, image none' 'settings: game profile test v3' \
     'settings: WINEDLLOVERRIDES=d3d8=b;dinput8=n,b;dsound=n' 'settings: WINPAD_TEST=1' \
@@ -406,7 +424,9 @@ for expect in 'library: 6 games' 'library: Morrowind | Morrowind/Morrowind.exe |
     'package: Zed Game.winpad -> Zed Game' 'package: broken.winpad -> Není to balíček WinPad' \
     'library: WinPad Packed | Zed Game/PACKED.EXE | 32bit | image none' \
     'own: Plain | exe Plain/GAME.EXE (auto Other.exe) | screen 800x600 | scaling stretch | programs GAME.EXE, Other.exe, Bin/Tool.exe' \
-    'own: Plain saved | exe scaling screen'; do
+    'own: Plain saved | exe scaling screen' \
+    'online profiles: .online-profiles-test.json -> uloženo 2 profilů' \
+    'online profiles: .broken-profiles.json -> odmítnuto: formát 2 (aplikace umí 1)'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
 [ -f "$docs/Zed Game/DATA/level1.dat" ] && [ ! -e "$docs/Inbox/Zed Game.winpad" ] ||

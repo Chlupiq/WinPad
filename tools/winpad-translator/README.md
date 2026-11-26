@@ -205,6 +205,17 @@ none` takes it out of `winpad.json`, `--list-profiles` lists them, and
 Each profile names its sources (PCGamingWiki, forums). A new profile is one
 JSON file; `tests/test_profiles.py` checks the shipped ones.
 
+### Profiles online
+
+The iPad app also downloads all profiles in one file,
+`data/online/profiles.json`, from this repository's main branch
+(raw.githubusercontent.com) when the library opens, and uses those newer than
+its own (a higher `version`) or new. So a fixed or added profile reaches the
+app without a new build: change the profile, bump its `version`, run
+`make-online-profiles.py` and merge. `tests/test_profiles.py` fails while the
+file is stale. Only profile data travels this way; fixes in the app's code
+still need a new signed build.
+
 ### Profiles from Proton (umu-protonfixes)
 
 `data/protonfixes.json` holds profiles made from Proton's per-game fixes,

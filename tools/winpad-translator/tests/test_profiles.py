@@ -34,6 +34,22 @@ class ShippedProfilesTest(unittest.TestCase):
             self.assertTrue(prof.get("sources"), f"{prof['id']} names no sources")
 
 
+class OnlineProfilesTest(unittest.TestCase):
+    """data/online/profiles.json, which the iPad app downloads, is made from the profiles as they are."""
+
+    def test_online_file_current(self):
+        import subprocess
+        tool = os.path.join(here, "..", "make-online-profiles.py")
+        run = subprocess.run([sys.executable, tool, "--check"], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        with open(os.path.join(here, "..", "data", "online", "profiles.json"), encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["format"], 1)
+        ids = [p["id"] for p in data["profiles"]]
+        self.assertEqual(ids[:3], ["cod4", "mafia", "nfsu2"])
+        self.assertEqual(len(ids), len(set(ids)))
+
+
 class DetectTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
