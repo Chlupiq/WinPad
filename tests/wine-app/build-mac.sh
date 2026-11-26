@@ -7,6 +7,8 @@
 #
 # Usage: build-mac.sh OUT_DIR   (build-xcode.sh's OUT_DIR, with WinPadWine-xcode in it)
 set -eu
+# The iPad's extensions (JIT helper, VPN) are iOS targets the scheme still builds for an iPad
+# alongside; they stay unsigned (ad hoc signing is the Mac's only).
 
 out=$1
 proj="$out/WinPadWine-xcode"
@@ -17,6 +19,7 @@ d3d9=
 xcodebuild -project "$proj/WinPadWine.xcodeproj" -scheme WinPadWine -configuration Debug \
     -destination 'generic/platform=macOS,variant=Mac Catalyst' -derivedDataPath "$out/xcode-derived" \
     CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
+    'CODE_SIGNING_ALLOWED[sdk=iphoneos*]=NO' \
     build >"$out/xcodebuild-maccatalyst.log" 2>&1 ||
     { tail -80 "$out/xcodebuild-maccatalyst.log" >&2; exit 1; }
 mac_app="$out/xcode-derived/Build/Products/Debug-maccatalyst/WinPadWine.app"
