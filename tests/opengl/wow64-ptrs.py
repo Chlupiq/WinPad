@@ -9,9 +9,14 @@ host pointer with ULongToPtr(), which assumes B = 0. This turns those into
 ios_wow_host_ptr(), and the pointers the thunks write back for the guest
 (PtrToUlong) into ios_wow_guest_ptr32().
 
-Left as they are: handles (HDC, HGLRC, HPBUFFER... are not addresses), GLsync
-objects and debug callbacks with their user parameter (values the guest only
-hands back), and the GLintptr / GLsizeiptr casts (offsets and sizes).
+HGLRC, HPBUFFERARB and GLsync are not handles at this boundary: opengl32.dll
+passes the address of its client object (struct opengl_client_context...),
+which the unix side writes its own handle into, so they are converted too,
+and the client object a create call hands back is returned as a guest address.
+
+Left as they are: HDCs, debug callbacks with their user parameter and OpenCL
+objects (values the guest only hands back), and the GLintptr / GLsizeiptr
+casts (offsets and sizes).
 
 Usage: wow64-ptrs.py IN OUT
 """
@@ -19,10 +24,8 @@ import re
 import sys
 
 KEEP = {
-    'hdc', 'hDC', 'hDc', 'hDrawDC', 'hReadDC', 'hPbuffer', 'hglrc', 'hglrcSrc', 'hglrcDst',
-    'hShareContext', 'hrcSrvShare', 'hrcSrvSource', 'handle', 'dc', 'context', 'oldContext',
-    'newContext', 'sync', 'event', 'external_sync', 'callback', 'userParam', 'vdpDevice',
-    'vdpSurface', 'getProcAddress',
+    'hdc', 'hDC', 'hDc', 'hDrawDC', 'hReadDC', 'handle', 'dc', 'context', 'event',
+    'external_sync', 'callback', 'userParam', 'vdpDevice', 'vdpSurface', 'getProcAddress',
 }
 
 src = open(sys.argv[1]).read()
@@ -77,6 +80,18 @@ src = re.sub(r'(\w+) = copy_wow64_ptr32s\( params->(\w+)', str_arrays, src)
 if counts.get('strs', 0) < 5:
     sys.exit('wow64-ptrs: expected the string arrays (glShaderSource...) in unix_thunks.c, found %d'
              % counts.get('strs', 0))
+
+# Create calls get the client object to fill in: UlongToHandle( params->ret ),
+# and return it; the guest gets its own address back.
+def create_ret(m):
+    counts['host'] += 1
+    counts['guest'] += 1
+    return 'params->ret = ios_wow_guest_ptr32( %sios_wow_host_ptr(params->ret) ) );' % m.group(1)
+
+
+src, n = re.subn(r'params->ret = \(UINT_PTR\)([^;]*?)UlongToHandle\( params->ret \) \);', create_ret, src)
+assert n >= 6, 'expected the create calls of contexts, pbuffers and syncs, found %d' % n
+assert 'UlongToHandle( params->ret )' not in src
 
 left = re.findall(r'U[Ll]ongToPtr\(params->(\w+)\)', src)
 unexpected = sorted(set(n for n in left if n not in KEEP))
