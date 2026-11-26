@@ -57,9 +57,12 @@
 #import "Library.h"
 #import "WinPadJIT.h"
 #import "WinPadAuto.h"
+#include "../xinput/winpad-pad.h"
 #import "WinPadRedist.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -522,10 +525,81 @@ static BOOL pad_in[2][PadCount];  // what the controllers and the touch controll
 static BOOL pad_down[256];        // the keys the controllers hold down
 static BOOL pad_sent;             // a controller has sent a key
 
+// A game that reads an Xbox controller (its "padMode" "xinput", WinPadAuto.m for games that
+// import XInput): the controllers go to it as one, through winpad-xinput.dll (tests/xinput),
+// instead of as keys. The app writes their state into Documents/.winpad-pad (winpad-pad.h),
+// which the DLL reads.
+static BOOL pad_xinput;
+static int pad_fd = -1;
+static struct winpad_pad pad_state;
+static float pad_analog[6];       // the controller's left x, y, right x, y, left and right trigger
+static BOOL pad_thumb[2];         // its stick buttons
+static BOOL pad_controller;       // a controller is connected
+static BOOL pad_touch;            // the touch controller is on the screen
+
+static int16_t PadAxis(float value, BOOL minus, BOOL plus) {
+  if (plus && !minus) return 32767;
+  if (minus && !plus) return -32768;
+  const float v = value > 1 ? 1 : value < -1 ? -1 : value;
+  return (int16_t)(v < 0 ? v * 32768 : v * 32767);
+}
+
+// Writes the state of both controllers as one Xbox controller (ApplyPad's PAD_IN, with the
+// controller's sticks and triggers as they are).
+static void WriteXInput(void) {
+  if (pad_fd < 0) return;
+  const BOOL* c = pad_in[PadFromController];
+  const BOOL* t = pad_in[PadFromTouch];
+#define HELD(i) (c[i] || t[i])
+  static const struct {
+    int input;
+    uint16_t bit;
+  } map[] = {{PadUp, 0x0001},   {PadDown, 0x0002}, {PadLeft, 0x0004}, {PadRight, 0x0008}, {PadMenu, 0x0010},
+             {PadOptions, 0x0020}, {PadL1, 0x0100}, {PadR1, 0x0200}, {PadA, 0x1000},   {PadB, 0x2000},
+             {PadX, 0x4000},    {PadY, 0x8000}};
+  struct winpad_pad p = pad_state;
+  p.magic = WINPAD_PAD_MAGIC;
+  p.connected = pad_controller || pad_touch;
+  uint16_t buttons = 0;
+  for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+    if (HELD(map[i].input)) buttons |= map[i].bit;
+  if (pad_thumb[0]) buttons |= 0x0040;
+  if (pad_thumb[1]) buttons |= 0x0080;
+  p.buttons = buttons;
+  // The touch controller's sticks and triggers are all or nothing; a controller's as they are.
+  p.thumb_lx = PadAxis(pad_analog[0], t[PadLLeft], t[PadLRight]);
+  p.thumb_ly = PadAxis(pad_analog[1], t[PadLDown], t[PadLUp]);
+  p.thumb_rx = PadAxis(pad_analog[2], t[PadRLeft], t[PadRRight]);
+  p.thumb_ry = PadAxis(pad_analog[3], t[PadRDown], t[PadRUp]);
+  p.left_trigger = t[PadL2] ? 255 : (uint8_t)(pad_analog[4] * 255);
+  p.right_trigger = t[PadR2] ? 255 : (uint8_t)(pad_analog[5] * 255);
+#undef HELD
+  if (p.connected == pad_state.connected && p.buttons == pad_state.buttons && p.left_trigger == pad_state.left_trigger &&
+      p.right_trigger == pad_state.right_trigger && p.thumb_lx == pad_state.thumb_lx && p.thumb_ly == pad_state.thumb_ly &&
+      p.thumb_rx == pad_state.thumb_rx && p.thumb_ry == pad_state.thumb_ry && pad_state.magic)
+    return;
+  if (p.buttons != pad_state.buttons || p.connected != pad_state.connected)
+    printf("gamepad: XInput buttons %#x%s\n", p.buttons, p.connected ? "" : " (not connected)");
+  p.packet = pad_state.packet + 1;
+  // Odd while written, as winpad-xinput.dll expects (it reads again).
+  p.seq = pad_state.seq + 1;
+  p.seq_end = 0;
+  pwrite(pad_fd, &p, sizeof(p), 0);
+  p.seq++;
+  p.seq_end = p.seq;
+  pwrite(pad_fd, &p, sizeof(p), 0);
+  pad_state = p;
+}
+
 // Sends the keys whose state changed with this snapshot of a controller's
 // inputs; a key is down while either controller holds an input that is it.
 static void ApplyPad(int from, const BOOL in[PadCount]) {
   memcpy(pad_in[from], in, sizeof pad_in[from]);
+  if (pad_xinput) {
+    pad_sent = YES;
+    WriteXInput();
+    return;
+  }
   BOOL want[256] = {NO};
   for (int i = 0; i < PadCount; i++) {
     // The stick that moves the mouse is no keys.
@@ -601,6 +675,16 @@ static void ReadPad(GCExtendedGamepad* pad) {
       [PadRLeft] = right.xAxis.value < -tilt,
       [PadRRight] = right.xAxis.value > tilt,
   };
+  pad_analog[0] = stick.xAxis.value;
+  pad_analog[1] = stick.yAxis.value;
+  pad_analog[2] = right.xAxis.value;
+  pad_analog[3] = right.yAxis.value;
+  pad_analog[4] = pad.leftTrigger.value;
+  pad_analog[5] = pad.rightTrigger.value;
+  if (@available(iOS 12.1, *)) {
+    pad_thumb[0] = pad.leftThumbstickButton.pressed;
+    pad_thumb[1] = pad.rightThumbstickButton.pressed;
+  }
   GCControllerDirectionPad* mouse_stick = pad_mouse_stick == PadLUp ? stick : right;
   pad_stick[0] = CGPointMake(mouse_stick.xAxis.value, mouse_stick.yAxis.value);
   ApplyPad(PadFromController, in);
@@ -888,6 +972,8 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
   void (^attach)(GCController*) = ^(GCController* c) {
     if (!c.extendedGamepad) return;
     printf("gamepad: %s connected\n", (c.vendorName ?: @"a controller").UTF8String);
+    pad_controller = YES;
+    WriteXInput();
     // The Xbox/Home button ends the game (RequestExit) instead of opening the system's menu.
     if (@available(iOS 14.0, *)) c.extendedGamepad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
@@ -899,6 +985,8 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
     touch_pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [view addSubview:touch_pad];
     printf("gamepad: the touch controller connected\n");
+    pad_touch = YES;
+    WriteXInput();
   }
   for (GCController* c in GCController.controllers) attach(c);
   NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
@@ -913,6 +1001,12 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
                        queue:NSOperationQueue.mainQueue
                   usingBlock:^(NSNotification* note) {
                     const BOOL none[PadCount] = {NO};
+                    BOOL any = NO;
+                    for (GCController* c in GCController.controllers)
+                      if (c.extendedGamepad && c != note.object) any = YES;
+                    pad_controller = any;
+                    memset(pad_analog, 0, sizeof(pad_analog));
+                    pad_thumb[0] = pad_thumb[1] = NO;
                     ApplyPad(PadFromController, none);  // no key stays held by a controller that left
                   }];
 }
@@ -1267,6 +1361,35 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     [said addObject:[NSString stringWithFormat:@"the game's profile wants DirectX from Microsoft (%@), which is not "
                                                @"downloaded",
                                                [want_dx componentsJoinedByString:@" "]]];
+  // A game that reads an Xbox controller (padMode "xinput", 32-bit): winpad-xinput.dll as
+  // its XInput, native first, and the file the app writes the controllers' state into.
+  NSString* pad_mode = [s[@"padMode"] isKindOfClass:NSString.class] ? s[@"padMode"] : @"keys";
+  NSString* bundle_xinput = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"i386-windows/winpad-xinput.dll"];
+  if ([pad_mode isEqualToString:@"xinput"] && [game.arch isEqualToString:@"32bit"] &&
+      [NSFileManager.defaultManager fileExistsAtPath:bundle_xinput]) {
+    NSFileManager* fm = NSFileManager.defaultManager;
+    NSString* syswow64 = [prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"];
+    for (NSString* name in @[ @"xinput1_1", @"xinput1_2", @"xinput1_3", @"xinput1_4", @"xinput9_1_0" ]) {
+      NSString* path = [syswow64 stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"dll"]];
+      NSDictionary* attrs = [fm attributesOfItemAtPath:path error:nil];
+      // Only the app's own links (MakePrefix's, to Wine's DLL): a file a program put there stays.
+      if (attrs && ![attrs.fileType isEqualToString:NSFileTypeSymbolicLink]) continue;
+      [fm removeItemAtPath:path error:nil];
+      if ([fm createSymbolicLinkAtPath:path withDestinationPath:bundle_xinput error:nil]) dlls[name] = @"n";
+    }
+    NSString* file = DocumentsPath(@".winpad-pad");
+    if (pad_fd >= 0) close(pad_fd);
+    pad_fd = open(file.fileSystemRepresentation, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    memset(&pad_state, 0, sizeof(pad_state));
+    pad_xinput = pad_fd >= 0;
+    WriteXInput();
+    NSString* windows = [@"Z:" stringByAppendingString:[file stringByReplacingOccurrencesOfString:@"/" withString:@"\\"]];
+    setenv("WINPAD_PAD_FILE", windows.UTF8String, 1);
+    [said addObject:[NSString stringWithFormat:@"controller: as an Xbox controller (XInput, winpad-xinput.dll), state in %@",
+                                               windows]];
+  } else {
+    [said addObject:@"controller: as keys"];
+  }
   NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
   NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
   if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {

@@ -232,6 +232,12 @@ NSArray<NSDictionary*>* WinPadAutoVariants(NSDictionary* traits, NSString* exeNa
     base[@"padMouse"] = @"right";
     [said addObject:@"pravá páčka ovládá myš"];
   }
+  // A game that reads an Xbox controller gets the controllers as one (winpad-xinput.dll),
+  // not as keys; 32-bit games for now.
+  if (x86 && Uses(traits, @"xinput") && !settings[@"padMode"]) {
+    base[@"padMode"] = @"xinput";
+    [said addObject:@"ovladač jako Xbox"];
+  }
   if (force.count) base[@"registryForce"] = force;
   NSMutableArray* variants = [NSMutableArray new];
   [variants addObject:@{

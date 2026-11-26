@@ -639,7 +639,7 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     // So do its resolution and picture: main.m reads them from the settings as winpad.json's.
     if (own_settings.count) {
       NSMutableDictionary* mine = [settings mutableCopy];
-      for (NSString* key in @[ @"screen", @"scaling" ])
+      for (NSString* key in @[ @"screen", @"scaling", @"padMode" ])
         if ([own_settings[key] isKindOfClass:NSString.class]) mine[key] = own_settings[key];
       settings = mine;
     }
@@ -2075,7 +2075,7 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameAutoSection
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
-  return section == GamePictureSection ? 2 : section == GameAutoSection ? 4 : 1;
+  return section == GamePictureSection ? 2 : section == GameAutoSection ? 5 : 1;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
@@ -2255,11 +2255,17 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameAutoSection
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ (%@)", variant[@"title"] ?: @"Výchozí", state];
         cell.accessoryType = UITableViewCellAccessoryNone;
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
+      } else if (path.row == 2) {
+        NSString* mine = [self own:@"padMode"];
+        NSString* mode = mine ?: self.variant[@"settings"][@"padMode"] ?: @"keys";
+        cell.textLabel.text = @"Ovladač";
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@%@", [mode isEqualToString:@"xinput"] ? @"Jako ovladač Xbox" : @"Jako klávesy",
+                                                               mine ? @"" : @" (automaticky)"];
       } else {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
-        cell.textLabel.text = path.row == 2 ? @"Zkusit automatické nastavení znovu" : @"Sdílet funkční nastavení na GitHubu";
+        cell.textLabel.text = path.row == 3 ? @"Zkusit automatické nastavení znovu" : @"Sdílet funkční nastavení na GitHubu";
         cell.textLabel.textColor = self.view.tintColor;
-        if (path.row == 3 && !own[@"autoWorked"]) {
+        if (path.row == 4 && !own[@"autoWorked"]) {
           cell.textLabel.textColor = UIColor.secondaryLabelColor;
           cell.textLabel.text = @"Sdílet nastavení (až hra jednou poběží)";
         }
@@ -2323,6 +2329,23 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameAutoSection
   [self.navigationController pushViewController:list animated:YES];
 }
 
+- (void)pickPadMode {
+  WinPadChoiceViewController* list = [WinPadChoiceViewController new];
+  list.title = @"Ovladač";
+  list.choices = @[
+    @[ @"Automaticky", @"Jako ovladač Xbox, když ho hra umí (XInput), jinak jako klávesy", NSNull.null ],
+    @[ @"Jako ovladač Xbox", @"Hra dostane ovladač přímo (XInput); jen 32bitové hry", @"xinput" ],
+    @[ @"Jako klávesy", @"Tlačítka a páčky jsou klávesy podle Nastavení › Ovladač", @"keys" ],
+  ];
+  list.chosen = [self own:@"padMode"];
+  list.footer = @"Platí pro herní ovladač i dotykový ovladač na displeji.";
+  __weak WinPadGameSettingsViewController* weak = self;
+  list.picked = ^(id value) {
+    [weak set:@"padMode" to:value];
+  };
+  [self.navigationController pushViewController:list animated:YES];
+}
+
 - (void)pickScaling {
   NSMutableArray* choices = [NSMutableArray arrayWithObject:@[ @"Výchozí", @"Podle Nastavení › Obraz hry", NSNull.null ]];
   for (NSString* scaling in PictureScalings()) [choices addObject:@[ PictureScalingName(scaling), @"", scaling ]];
@@ -2348,10 +2371,12 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameAutoSection
       break;
     case GameAutoSection:
       if (path.row == 2) {
+        [self pickPadMode];
+      } else if (path.row == 3) {
         WinPadSetOwnGameSetting(self.game.folder, @"autoWorked", nil);
         WinPadSetOwnGameSetting(self.game.folder, @"autoExhausted", nil);
         [self set:@"autoVariant" to:nil];
-      } else if (path.row == 3 && WinPadOwnGameSettings(self.game.folder)[@"autoWorked"]) {
+      } else if (path.row == 4 && WinPadOwnGameSettings(self.game.folder)[@"autoWorked"]) {
         [self share];
       }
       break;
