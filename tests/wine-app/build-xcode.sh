@@ -54,8 +54,7 @@ opengl=
 # wine/macosx, Xcode's PLATFORM_NAME for it.
 catalyst=
 [ -f "$work/ntdll-maccatalyst/libntdll_unix.a" ] && [ -f "$work/modules-maccatalyst/aarch64-windows/xtajit.dll.dylib" ] &&
-    { [ -z "$d3d9" ] || [ -f "$work/dxmt-maccatalyst/libdxmt_combined.a" ]; } &&
-    { [ -z "$opengl" ] || [ -f "$work/opengl-maccatalyst/libwinpad_opengl.a" ]; } && catalyst=1
+    { [ -z "$d3d9" ] || [ -f "$work/dxmt-maccatalyst/libdxmt_combined.a" ]; } && catalyst=1
 sdks="iphoneos iphonesimulator" catalyst_setting=NO
 [ -z "$catalyst" ] || { sdks="$sdks maccatalyst"; catalyst_setting=YES; }
 
@@ -82,7 +81,19 @@ for sdk in $sdks; do
     cp "$out/host-$sdk/stubs.o" "$out/host-$sdk/gamepad.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$dir/"
     [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$dir/"
-    [ -z "$opengl" ] || cp "$work/opengl-$sdk/libwinpad_opengl.a" "$proj/lib/$dir/"
+    if [ -n "$opengl" ] && [ -f "$work/opengl-$sdk/libwinpad_opengl.a" ]; then
+        cp "$work/opengl-$sdk/libwinpad_opengl.a" "$proj/lib/$dir/"
+    elif [ -n "$opengl" ]; then
+        # No OpenGL ES on the Mac (Mac Catalyst has no OpenGLES.framework): an empty archive
+        # keeps one list of libraries for all platforms; the host there leaves opengl32's
+        # unix side undefined (weak-flags), so a GL program finds no driver.
+        echo 'static int winpad_no_opengl;' > "$out/no-opengl-$sdk.c"
+        (sdk_name=$sdk; . "$root/tests/wine-loader/sdk.sh"
+            # shellcheck disable=SC2086
+            xcrun -sdk "$xcsdk" clang -target "$target" -isysroot "$sdk" $sdk_flags -c "$out/no-opengl-$sdk.c" -o "$out/no-opengl-$sdk.o")
+        rm -f "$proj/lib/$dir/libwinpad_opengl.a"
+        xcrun ar rcs "$proj/lib/$dir/libwinpad_opengl.a" "$out/no-opengl-$sdk.o"
+    fi
     cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$dir/"
 done
 # The Mac's host may leave other hooks undefined than an iPad's: one list for all, each
