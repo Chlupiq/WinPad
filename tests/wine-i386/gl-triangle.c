@@ -12,11 +12,15 @@
  * glBegin/glEnd, then SwapBuffers. After the first frame it reads the
  * pixel in the middle of the quad back with glReadPixels: green (the
  * texture's colour), which says that drawing happened, not just the clear.
+ * It compiles a GLSL vertex shader handed over in two strings (glShaderSource
+ * takes an array of string pointers: a 32-bit program's are guest addresses,
+ * wined3d does this for every Direct3D/DirectDraw game; Medal of Honor's
+ * Configure.exe died there).
  * It runs for WINPAD_GL_SECONDS of wall-clock time and exits with 43.
  *
  * The log lines start with WINPAD-GL. Exit statuses: 20 no pixel format,
  * 21 no context, 22 MakeCurrent failed, 24 SwapBuffers failed, 25 no window,
- * 27 the quad did not draw, 43 done.
+ * 27 the quad did not draw, 28 the shader did not compile, 43 done.
  */
 #include <stddef.h>
 #include <windows.h>
@@ -124,6 +128,44 @@ static void log_uint( const char *what, unsigned int v )
     *p++ = '\n';
     *p = 0;
     out_str( buf );
+}
+
+/* GL 2.0 entry points, from wglGetProcAddress. */
+typedef unsigned int (APIENTRY *create_shader_fn)( unsigned int );
+typedef void (APIENTRY *shader_source_fn)( unsigned int, int, const char *const *, const int * );
+typedef void (APIENTRY *compile_shader_fn)( unsigned int );
+typedef void (APIENTRY *get_shaderiv_fn)( unsigned int, unsigned int, int * );
+#define WINPAD_GL_VERTEX_SHADER 0x8B31
+#define WINPAD_GL_COMPILE_STATUS 0x8B81
+
+static void compile_shader( void )
+{
+    static const char *const parts[2] = {
+        "attribute vec4 pos;\n",
+        "void main() { gl_Position = pos; }\n",
+    };
+    create_shader_fn create = (create_shader_fn)wglGetProcAddress( "glCreateShader" );
+    shader_source_fn source = (shader_source_fn)wglGetProcAddress( "glShaderSource" );
+    compile_shader_fn compile = (compile_shader_fn)wglGetProcAddress( "glCompileShader" );
+    get_shaderiv_fn get = (get_shaderiv_fn)wglGetProcAddress( "glGetShaderiv" );
+    unsigned int shader;
+    int status = 0;
+
+    if (!create || !source || !compile || !get)
+    {
+        log_line( "no GLSL shaders (glCreateShader missing)" );
+        ExitProcess( 28 );
+    }
+    shader = create( WINPAD_GL_VERTEX_SHADER );
+    source( shader, 2, parts, NULL );
+    compile( shader );
+    get( shader, WINPAD_GL_COMPILE_STATUS, &status );
+    if (!status)
+    {
+        log_line( "the shader did not compile" );
+        ExitProcess( 28 );
+    }
+    log_line( "the shader from two strings compiled" );
 }
 
 static void log_swap( unsigned int frame, unsigned int ok )
@@ -340,6 +382,8 @@ void start( void )
     log_str( "GL_VERSION", (const char *)glGetString( GL_VERSION ) );
     log_str( "glActiveTextureARB", wglGetProcAddress( "glActiveTextureARB" ) ? "found" : "missing" );
     log_str( "wglSwapIntervalEXT", wglGetProcAddress( "wglSwapIntervalEXT" ) ? "found" : "missing" );
+
+    compile_shader();
 
     tex = make_texture();
     log_hex( "texture", tex );
