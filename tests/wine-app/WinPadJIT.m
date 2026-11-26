@@ -26,7 +26,7 @@ static size_t PoolSize(void) {
 }
 
 // Written just before the check that code in the pool runs, removed after it (JITPool.c).
-static NSString* Marker(void) {
+static NSString* JITMarkerPath(void) {
   NSString* docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
   return [docs stringByAppendingPathComponent:@".jit-check"];
 }
@@ -46,7 +46,7 @@ BOOL WinPadJITPrepare(NSString** note) {
   // Once per launch: the check of the launch before this one stopped the app.
   if (!failed_before_checked) {
     failed_before_checked = YES;
-    failed_before = winpad_jit_failed_before(Marker().fileSystemRepresentation);
+    failed_before = winpad_jit_failed_before(JITMarkerPath().fileSystemRepresentation);
   }
   const enum winpad_jit_kind kind = winpad_jit_kind(why, sizeof(why));
   NSString* line = @(why);
@@ -60,10 +60,10 @@ BOOL WinPadJITPrepare(NSString** note) {
   } else if (failed_before && !winpad_jit_pool_ready()) {
     line = @"the JIT check stopped the app last time: this launch runs without the JIT";
   } else if (kind == WINPAD_JIT_MAC) {
-    ready = !winpad_jit_prepare_mac_pool(PoolSize(), Marker().fileSystemRepresentation, why, sizeof(why));
+    ready = !winpad_jit_prepare_mac_pool(PoolSize(), JITMarkerPath().fileSystemRepresentation, why, sizeof(why));
     line = [@"Mac: " stringByAppendingString:@(why)];
   } else {
-    ready = !winpad_jit_prepare_pool(PoolSize(), Marker().fileSystemRepresentation, why, sizeof(why));
+    ready = !winpad_jit_prepare_pool(PoolSize(), JITMarkerPath().fileSystemRepresentation, why, sizeof(why));
     line = @(why);
   }
   if (note) *note = line;
