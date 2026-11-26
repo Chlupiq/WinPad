@@ -691,7 +691,11 @@ static void SaveScanCache(NSString* profiles, NSDictionary* games) {
 // What the last WinPadFindGames did: games found, and folders it walked (not in the cache).
 static NSUInteger last_scan_games, last_scan_walked;
 
-NSArray<WinPadGame*>* WinPadFindGames(void) {
+// TRUST: the cache's entry of a folder is taken without the folder's signature (no readdir at
+// all): what the library shows at once, before the full scan (WinPadFindGames) on a background
+// queue checks it. A folder the cache does not have is walked either way; the cache is not
+// written.
+static NSArray<WinPadGame*>* FindGames(BOOL trust) {
   const CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* docs = Documents();
@@ -709,8 +713,8 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     BOOL is_dir = NO;
     if (![fm fileExistsAtPath:dir isDirectory:&is_dir] || !is_dir) continue;
     NSArray* files = [fm contentsOfDirectoryAtPath:dir error:nil];
-    NSString* sig = FolderSignature(dir);
     NSDictionary* cached = [cache[folder] isKindOfClass:NSDictionary.class] ? cache[folder] : nil;
+    NSString* sig = trust && [cached[@"sig"] isKindOfClass:NSString.class] ? cached[@"sig"] : FolderSignature(dir);
     if (![cached[@"sig"] isEqual:sig]) cached = nil;
     NSDictionary* info = nil;
     BOOL profile_from_app = NO;
@@ -787,12 +791,28 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     [games addObject:game];
   }
   // Only the folders there are now: a removed game's entry goes.
+  if (trust) {
+    NSLog(@"[launch] library from its cache: %lu games, %lu walked, %.0f ms", (unsigned long)games.count,
+          (unsigned long)walked, (CFAbsoluteTimeGetCurrent() - began) * 1000);
+    return games;
+  }
   if (walked || ![fresh_cache isEqualToDictionary:cache]) SaveScanCache(profiles_sig, fresh_cache);
   last_scan_games = games.count;
   last_scan_walked = walked;
   NSLog(@"[launch] library scan: %lu games, %lu walked, %.0f ms", (unsigned long)games.count, (unsigned long)walked,
         (CFAbsoluteTimeGetCurrent() - began) * 1000);
   return games;
+}
+
+NSArray<WinPadGame*>* WinPadFindGames(void) {
+  return FindGames(NO);
+}
+
+// What the library shows of GAME: when the full scan finds the same for each game, the tiles stay.
+static NSString* GameSummary(WinPadGame* g) {
+  return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%d|%d|%ld|%ld|%@|%@", g.folder, g.exe, g.autoExe, g.title, g.profile,
+                                    g.arch, g.image, g.imageInFolder, g.cover != nil, (long)g.maps, (long)g.newMaps,
+                                    g.settings, g.own];
 }
 
 // A folder name a package may unpack into: one name, not one of the app's own folders.
@@ -2362,6 +2382,9 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 @property(nonatomic) BOOL started;
 // offerDirectX is looking into the last run's log.
 @property(nonatomic) BOOL scanningLog;
+// reload: the games were shown once (from the scan cache), and which scan is the latest.
+@property(nonatomic) BOOL shownOnce;
+@property(nonatomic) NSUInteger scanGeneration;
 @property(nonatomic, readonly) BOOL compact;  // an iPhone's height: smaller, no hints or info card
 // Packages to install (openPackages:), whether one is being installed, and what the
 // installs said (for libraryTest's report).
@@ -2373,6 +2396,8 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 @property(nonatomic) BOOL archChecked;  // a 64-bit game's question was answered for this start
 @property(nonatomic, strong) NSMutableString* installReport;
 - (void)reload;
+- (void)reloadSoon;
+- (void)showGames:(NSArray<WinPadGame*>*)games;
 - (void)showFocus;
 - (void)tick;
 - (void)moveFocusBy:(NSInteger)by;
@@ -2573,7 +2598,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                             object:nil
                                                                              queue:NSOperationQueue.mainQueue
                                                                         usingBlock:^(NSNotification* note) {
-                                                                          [weak reload];
+                                                                          [weak reloadSoon];
                                                                           [weak openPackages:@[]];
                                                                         }]];
   [self.observers addObject:[NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification
@@ -2661,7 +2686,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
       [self.installReport appendFormat:@"package: %@ -> %@\n", url.lastPathComponent, folder ?: error];
     }
   }
-  [self reload];
+  [self reloadSoon];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -2817,10 +2842,55 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   });
 }
 
+// After a change made in the app (a game added, its settings): the scan, now.
 - (void)reload {
   if (self.started) return;
+  self.scanGeneration++;
+  self.shownOnce = YES;
+  [self showGames:WinPadFindGames()];
+}
+
+// At launch and back from the background: the games at once from the scan cache (FindGames
+// trusting it), then the full scan on a background queue, whose games replace them only when
+// they differ (a folder changed in Files or Finder). CI's tests, which look at the games right
+// after, scan on the main thread.
+- (void)reloadSoon {
+  if (self.started) return;
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  if ([d boolForKey:@"libraryTest"] || [d stringForKey:@"gameSettingsTest"] || [d stringForKey:@"coverTest"] ||
+      [d stringForKey:@"gogTest"]) {
+    [self reload];
+    return;
+  }
+  // The first time from the cache; later (back from the background, a game added) the tiles
+  // there are stay until the scan says otherwise.
+  if (!self.shownOnce) [self showGames:FindGames(YES)];
+  self.shownOnce = YES;
+  const NSUInteger generation = ++self.scanGeneration;
+  static dispatch_queue_t queue;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    queue = dispatch_queue_create("winpad.library.scan", DISPATCH_QUEUE_SERIAL);
+  });
+  __weak LibraryViewController* weak = self;
+  dispatch_async(queue, ^{
+    NSArray<WinPadGame*>* games = WinPadFindGames();
+    dispatch_async(dispatch_get_main_queue(), ^{
+      LibraryViewController* me = weak;
+      if (!me || me.started || generation != me.scanGeneration) return;
+      BOOL same = games.count == me.games.count;
+      for (NSUInteger i = 0; same && i < games.count; i++)
+        same = [GameSummary(games[i]) isEqualToString:GameSummary(me.games[i])];
+      if (same) return;
+      NSLog(@"[launch] library: the scan found other games than the cache, the tiles are made again");
+      [me showGames:games];
+    });
+  });
+}
+
+- (void)showGames:(NSArray<WinPadGame*>*)games {
   NSString* focused = self.games.count ? self.games[self.focus].folder : [NSUserDefaults.standardUserDefaults stringForKey:@"lastGame"];
-  self.games = WinPadFindGames();
+  self.games = games;
   self.focus = 0;
   for (NSUInteger i = 0; i < self.games.count; i++)
     if ([self.games[i].folder isEqualToString:focused]) self.focus = (NSInteger)i;
