@@ -2,7 +2,7 @@
 # Links host/winehost.c with the libntdll_unix.a, libwin32u_unix.a and
 # libwineserver.a that build-ntdll.sh, build-win32u.sh and build-wineserver.sh
 # built for SDK. What the app around Madeira's Wine would provide
-# (Swift bridges, the gamepad, DXMT, FEX) is not linked: every symbol the
+# (Swift bridges, DXMT, FEX) is not linked: every symbol the
 # linker reports missing gets a stub that logs its first call and returns 0.
 # Except the weak winios_* hooks of win32u's display driver: those stay
 # undefined (NULL), so the driver falls back to Wine's null driver,
@@ -12,6 +12,8 @@
 # When WORK_DIR/dxmt-SDK/libdxmt_combined.a is there (DXMT's unix side,
 # tests/wine-i386/build-dxmt-unix.sh), it is linked too, with
 # host/metal-display.m, which gives DXMT a CAMetalLayer for each window.
+# So is WORK_DIR/opengl-SDK/libwinpad_opengl.a (OpenGL: opengl32's unix side,
+# gl4es and WinPad's EGL, tests/opengl/build.sh) when it is there.
 #
 # Usage: link-host.sh SDK WORK_DIR OUT_DIR   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # Writes OUT_DIR/winehost (the command-line host), OUT_DIR/stubs.o, the
@@ -37,6 +39,17 @@ if [ -f "$work/dxmt-$sdk_name/libdxmt_combined.a" ]; then
     $cc -O1 -g -Wall -fobjc-arc -c "$here/host/metal-display.m" -o "$out/metal-display.o"
     objs="$objs $out/metal-display.o"
 fi
+
+if [ -f "$work/opengl-$sdk_name/libwinpad_opengl.a" ]; then
+    libs="$libs $work/opengl-$sdk_name/libwinpad_opengl.a"
+fi
+
+# Madeira's controller bridge (WiniosGamepad.c): the snapshot win32u's ios_gamepad_query
+# hands Wine's xinput, and the HID pad the wineserver serves (hidpad_ios.c) to DirectInput.
+# The app writes the iPad's controllers into it (tests/wine-app/main.m).
+# shellcheck disable=SC2086
+$cc -O1 -g -Wall -c "$work/madeira/app/Madeira/Winios/WiniosGamepad.c" -o "$out/gamepad.o"
+objs="$objs $out/gamepad.o"
 
 # shellcheck disable=SC2086 # $cc and $libs are lists
 $cc -O1 -g -Wall -c "$here/host/winehost.c" -o "$out/winehost.o"

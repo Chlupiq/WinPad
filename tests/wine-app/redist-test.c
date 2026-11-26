@@ -4,6 +4,7 @@
 #include "Redist.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // The machine field of a PE file, or 0.
@@ -37,6 +38,33 @@ int main(int argc, char** argv) {
       return 1;
     }
     return 0;
+  }
+  // A Visual C++ installer's URL and SHA-256 (winpad_vcredist_for_year): "URL SHA" or "URL -".
+  if (argc == 3 && !strcmp(argv[1], "--vc-url")) {
+    const struct winpad_vcredist* vc = winpad_vcredist_for_year(atoi(argv[2]));
+    if (!vc) return 1;
+    printf("%s %s\n", vc->url, vc->sha256 ? vc->sha256 : "-");
+    return 0;
+  }
+  // The 32-bit DLLs of any installer (winpad_redist_extract_dlls), then checks the named ones.
+  if (argc >= 4 && !strcmp(argv[1], "--dlls")) {
+    char err[512] = "";
+    int count = 0;
+    if (winpad_redist_extract_dlls(argv[2], argv[3], 0x14c, &count, err, sizeof(err))) {
+      fprintf(stderr, "%s\n", err);
+      return 1;
+    }
+    printf("%d DLLs\n", count);
+    int bad = !count;
+    for (int i = 4; i < argc; i++) {
+      char path[1024];
+      snprintf(path, sizeof(path), "%s/%s", argv[3], argv[i]);
+      const unsigned m = pe_machine(path);
+      printf("%s: %s (year %d)\n", argv[i], m == 0x14c ? "i386" : m ? "another machine" : "missing",
+             winpad_vcredist_year_of(argv[i]));
+      if (m != 0x14c) bad = 1;
+    }
+    return bad;
   }
   if (argc != 3) {
     fprintf(stderr, "usage: redist-test INSTALLER DEST\n");

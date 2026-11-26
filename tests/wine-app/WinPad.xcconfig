@@ -8,3 +8,14 @@ WINPAD_VPN = NO
 
 WINPAD_VPN_ENTITLEMENTS_YES = VPN/WinPadVPN.entitlements
 WINPAD_VPN_ENTITLEMENTS_NO =
+
+// WINPAD_MEMORY = YES: the app asks for iPadOS's increased memory limit
+// (com.apple.developer.kernel.increased-memory-limit), so a game may use more of the iPad's
+// RAM before iPadOS ends it. If Xcode says the signing team does not support it, set NO.
+WINPAD_MEMORY = YES
+
+// The app's entitlements: WINPAD_APP_ENTITLEMENTS_<VPN>_<MEMORY>.
+WINPAD_APP_ENTITLEMENTS_NO_NO =
+WINPAD_APP_ENTITLEMENTS_NO_YES = WinPadMemory.entitlements
+WINPAD_APP_ENTITLEMENTS_YES_NO = VPN/WinPadVPN.entitlements
+WINPAD_APP_ENTITLEMENTS_YES_YES = VPN/WinPadVPN+Memory.entitlements

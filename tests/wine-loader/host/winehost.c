@@ -111,6 +111,7 @@ static double now(void) {
 static int input_state;
 static double state_time;
 static void* first_window;
+static int first_visible;  // whether the first window is still shown
 static int menu_x, menu_y;  // a point in the first window's menu bar
 static int client_x, client_y, client_w, client_h;  // the first window's client area
 static unsigned char* before_click;  // the first window's last frame before the click
@@ -153,7 +154,7 @@ int winios_surface_present(void* hwnd, int dirty_x, int dirty_y, int dirty_w, in
   // window (below), its client area only: the surface covers the whole window and can be
   // larger (640x512 for a 638x471 dialog), and taps are fractions of the client area.
   if (winehost_frame_hook && hwnd && surf_w > 0 && surf_h > 0) {
-    if (first_window) {
+    if (first_window && first_visible) {
       if (hwnd == first_window) winehost_frame_hook(hwnd, surf_w, surf_h, stride, bits);
     } else if (hwnd == picture_window()) {
       int ox, oy, w, h;
@@ -260,7 +261,13 @@ static struct known_window* known_window(void* hwnd, int add) {
   for (int i = 0; i < known_count; i++)
     if (known[i].hwnd == hwnd) return &known[i];
   if (!add) return NULL;
-  struct known_window* k = &known[known_count < 64 ? known_count++ : 63];
+  struct known_window* k = known_count < 64 ? &known[known_count++] : NULL;
+  // Full: a hidden window's slot, else one that never drew, else none.
+  for (int i = 0; !k && i < 64; i++)
+    if (!known[i].visible) k = &known[i];
+  for (int i = 0; !k && i < 64; i++)
+    if (!known[i].presented && known[i].hwnd != main_window) k = &known[i];
+  if (!k) return NULL;
   memset(k, 0, sizeof(*k));
   k->hwnd = hwnd;
   return k;
@@ -290,12 +297,15 @@ static struct known_window* picture_known(void) {
   struct known_window* m = main ? known_window(main, 0) : NULL;
   if (m && m->presented) return m;
   if (metal_frames() > 0) return m;
+  // A window at least 320x200 first; a smaller one (a game's settings dialog) when that is all
+  // there is.
   struct known_window* best = NULL;
-  for (int i = 0; i < known_count; i++) {
-    struct known_window* k = &known[i];
-    if (!k->presented || !k->visible || k->w < 320 || k->h < 200) continue;
-    if (!best || (long)k->w * k->h > (long)best->w * best->h) best = k;
-  }
+  for (int big = 1; big >= 0 && !best; big--)
+    for (int i = 0; i < known_count; i++) {
+      struct known_window* k = &known[i];
+      if (!k->presented || !k->visible || (big && (k->w < 320 || k->h < 200))) continue;
+      if (!best || (long)k->w * k->h > (long)best->w * best->h) best = k;
+    }
   return best ? best : m;
 }
 
@@ -314,11 +324,14 @@ static void client_in_surface(void* hwnd, int surf_w, int surf_h, int* ox, int* 
   if (*oy < 0 || *oy >= surf_h) *oy = 0;
   *w = k->cw < surf_w - *ox ? k->cw : surf_w - *ox;
   *h = k->ch < surf_h - *oy ? k->ch : surf_h - *oy;
+  // The app copies stride * h bytes from the client's first pixel: with a left offset the last
+  // row would run past the surface.
+  if (*ox && *oy + *h == surf_h) --*h;
 }
 
 // The client area taps are fractions of: the picture window's, else the main window's.
 static int tap_area(int* x, int* y, int* w, int* h) {
-  struct known_window* k = first_window ? NULL : picture_known();
+  struct known_window* k = first_window && first_visible ? NULL : picture_known();
   void* main = __atomic_load_n(&main_window, __ATOMIC_ACQUIRE);
   if (k && k->hwnd != main && k->cw > 0 && k->ch > 0) {
     *x = k->cx, *y = k->cy, *w = k->cw, *h = k->ch;
@@ -332,13 +345,20 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
                          int cw, int ch) {
   fprintf(stderr, "winehost: window %p at %d,%d %dx%d, visible %d, client %d,%d %dx%d\n", hwnd, x,
           y, w, h, visible, cx, cy, cw, ch);
-  struct known_window* k = known_window(hwnd, 1);
-  k->x = x, k->y = y, k->w = w, k->h = h, k->visible = visible;
-  k->cx = cx, k->cy = cy, k->cw = cw, k->ch = ch;
+  // Only windows that can be the picture (child controls, tooltips and menus are smaller; a
+  // settings dialog can be smaller than 320x200).
+  struct known_window* k = known_window(hwnd, w >= 200 && h >= 120);
+  if (k) {
+    k->x = x, k->y = y, k->w = w, k->h = h, k->visible = visible;
+    k->cx = cx, k->cy = cy, k->cw = cw, k->ch = ch;
+  }
   if (visible && w >= 320 && h >= 200 && (hwnd == main_window || (long)w * h > main_area)) {
     main_area = (long)w * h;
     __atomic_store_n(&main_window, hwnd, __ATOMIC_RELEASE);
   }
+  // A program's first window with a menu or a tall caption (a splash, a settings dialog) can go
+  // away: the app then shows the picture window.
+  if (hwnd == first_window) first_visible = visible && w > 1 && h > 1;
   if (hwnd == main_window && cw > 0 && ch > 0) {
     main_cx = cx;
     main_cy = cy;
@@ -351,6 +371,7 @@ void winios_window_frame(void* hwnd, int x, int y, int w, int h, int visible, in
     menu_x = cx + 12;
     menu_y = cy - 9;
     first_window = hwnd;
+    first_visible = 1;
     state_time = now();
     __atomic_store_n(&input_state, 1, __ATOMIC_RELEASE);
   }
@@ -858,6 +879,20 @@ int winehost_main(int argc, char* argv[]) {
     const char* aot = getenv("WINEHOST_AOT_IMAGE");
     if (aot && *aot && publish_aot_image(aot)) return 1;
     printf("winehost: 32-bit x86 program, running it through WoW64\n");
+  }
+  else if (pe_machine(argv[2]) == 0x8664) {
+    // A 64-bit x86 program runs in an ARM64EC session (Madeira's main mode): the unix
+    // side sees an AMD64 main image on an ARM64 core, takes ntdll and every system DLL
+    // from arm64ec-windows (get_pe_dir in loader_ios.c), and ntdll hands the x86-64 code
+    // to FEX's ARM64EC module (xtajit64.dll). Those DLLs are plain PE files, loaded into
+    // the JIT pool like Madeira loads them, so this needs a JIT: no AOT image yet.
+    publish_host_probe();
+    if (publish_jit_pool(512 << 20)) return 1;
+    // Every image through the JIT pool and its x18 patcher, as on an iPad with TXM, also
+    // where mprotect could make a file view executable (a simulator):
+    // patches/madeira/0013-exec-via-jit-pool.
+    setenv("WINE_IOS_EXEC_VIA_POOL", "1", 0);
+    printf("winehost: 64-bit x86 program, running it through ARM64EC and FEX\n");
   }
   else if (getenv("WINEHOST_JIT") && !strcmp(getenv("WINEHOST_JIT"), "1")) {
     /* A 64-bit program that generates code itself (FEX's offline compiler). */

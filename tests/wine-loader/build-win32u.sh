@@ -4,7 +4,9 @@
 # does, Madeira's *_ios.c files in place of Wine's, into libwin32u_unix.a for
 # SDK. FreeType is built statically from its own source (as Madeira's
 # build/freetype-ios does) and merged into the library, so win32u can load
-# Wine's TrueType fonts and draw text.
+# Wine's TrueType fonts and draw text. OpenGL goes through Wine's EGL path,
+# with patches/wine/0004 taking EGL from the host (tests/opengl); a host
+# without it has no OpenGL, as before.
 #
 # Usage: build-win32u.sh WORK_DIR SDK   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # WORK_DIR must hold the trees build.sh fetched and configured. win32u needs
@@ -96,6 +98,18 @@ for f in "$wine"/dlls/win32u/*.c "$wine"/dlls/win32u/dibdrv/*.c; do
             cp "$f" "$out/src/window.c"
             patch -s "$out/src/window.c" "$root/patches/wine/0002-ios-server-made-desktop-window.patch"
             f="$out/src/window.c" ;;
+        opengl)
+            # OpenGL through WinPad's EGL (tests/opengl): Wine's EGL path with
+            # patches/wine/0004, which takes EGL from the host. Madeira's
+            # config_ios.h undefines SONAME_LIBEGL; it is defined again after it.
+            mkdir -p "$out/src"
+            cp "$f" "$out/src/opengl.c"
+            patch -s "$out/src/opengl.c" "$root/patches/wine/0004-ios-opengl-egl.patch"
+            # A 32-bit program's context and pbuffer objects are at guest addresses.
+            python3 -I "$root/tests/opengl/client-ptrs.py" "$wine" "$out/src"
+            printf '#define SONAME_LIBEGL "winpad-egl"\n' >"$out/src/egl_ios.h"
+            compile "$out/src/opengl.c" "$name" -include "$out/src/egl_ios.h"
+            continue ;;
         freetype)
             # Madeira's wrapper turns FreeType on for this file only and
             # resolves its dlsym calls against the static library.

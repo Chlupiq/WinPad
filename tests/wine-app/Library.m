@@ -53,6 +53,7 @@
 #import "Covers.h"
 #import "GOG.h"
 #import "Package.h"
+#import "WinPadAuto.h"
 #import "WinPadJIT.h"
 #import "WinPadRedist.h"
 
@@ -60,10 +61,12 @@
 #import <PhotosUI/PhotosUI.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#include <dirent.h>
 #include "JITPool.h"
 
 #include <math.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 
 static NSString* Documents(void) {
@@ -190,7 +193,7 @@ static NSString* BestProgram(NSString* dir, NSString* folder) {
   NSDirectoryEnumerator* walk = [fm enumeratorAtPath:dir];
   NSString* want = Letters(folder);
   NSString* best = nil;
-  long long best_score[6] = {0};
+  long long best_score[7] = {0};
   NSUInteger seen = 0;
   for (NSString* path; (path = walk.nextObject) && seen < 5000; seen++) {
     const BOOL is_dir = [walk.fileAttributes.fileType isEqualToString:NSFileTypeDirectory];
@@ -201,6 +204,10 @@ static NSString* BestProgram(NSString* dir, NSString* folder) {
     }
     if ([name hasPrefix:@"."] || ![name.pathExtension.lowercaseString isEqualToString:@"exe"]) continue;
     NSString* arch = ProgramArch([dir stringByAppendingPathComponent:path]);
+    // What it imports and whether it is an installer (GameDetect.c): a program that draws with
+    // Direct3D, OpenGL or DirectDraw or reads controllers is the game's, before a settings tool or
+    // a launcher whose names tell nothing (Configure.exe, Play.exe...).
+    NSDictionary* traits = WinPadQuickTraits([dir stringByAppendingPathComponent:path]);
     NSString* stem = Letters(name.stringByDeletingPathExtension);
     const BOOL named = want.length >= 3 && stem.length >= 3 && ([want containsString:stem] || [stem containsString:want]);
     // A launcher word only in what the name has beyond the folder's: "StarCraft.exe" in StarCraft
@@ -210,16 +217,17 @@ static NSString* BestProgram(NSString* dir, NSString* folder) {
         named ? [want containsString:stem] ? NO : LauncherProgram([stem stringByReplacingOccurrencesOfString:want withString:@""])
               : LauncherProgram(name);
     // Higher wins, field by field.
-    const long long score[6] = {
-        HelperProgram(name) ? 0 : 1,
+    const long long score[7] = {
+        HelperProgram(name) || WinPadInstallerName(traits) ? 0 : 1,
         launcher ? 0 : 1,
         [arch isEqualToString:@"32bit"] ? 2 : [arch isEqualToString:@"64bit"] ? 1 : 0,
         named ? 1 : 0,
+        WinPadTraitsLookLikeGame(traits) ? 1 : 0,
         (long long)walk.fileAttributes.fileSize,
         -(long long)walk.level,
     };
     BOOL better = best == nil;
-    for (int i = 0; !better && i < 6 && score[i] >= best_score[i]; i++)
+    for (int i = 0; !better && i < 7 && score[i] >= best_score[i]; i++)
       if (score[i] > best_score[i]) better = YES;
     if (!better) continue;
     best = path;
@@ -599,10 +607,111 @@ NSArray<NSString*>* WinPadGamePrograms(NSString* folder) {
   return found;
 }
 
-NSArray<WinPadGame*>* WinPadFindGames(void) {
+// ---- The scan cache ----
+// Matching a game folder against the profiles (FilesAnyCase, three folders deep) and finding its
+// program (BestProgram, up to 5000 entries) stat each file of the game: for a library of big
+// games that took seconds at every launch, and the app launches anew after each game. What they
+// found is kept in Library/Caches/WinPad/games.json by folder, with the folder's signature
+// (FolderSignature) and the profiles' (ProfilesSignature); a folder whose signature is the same
+// is not walked again.
+
+static uint64_t Fnv(uint64_t h, const void* data, size_t n) {
+  const uint8_t* b = data;
+  for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 0x100000001b3ULL;
+  return h;
+}
+
+// The names and change times of PATH's folders down to DEPTH levels: a file added, removed or
+// renamed anywhere FilesAnyCase and BestProgram look changes one of them. readdir's d_type, no
+// stat of the files.
+static uint64_t TreeSignature(const char* path, int depth, uint64_t h) {
+  struct stat st;
+  if (stat(path, &st)) return Fnv(h, "-", 1);
+  h = Fnv(h, &st.st_mtimespec, sizeof st.st_mtimespec);
+  h = Fnv(h, &st.st_ino, sizeof st.st_ino);
+  if (depth <= 0) return h;
+  DIR* dir = opendir(path);
+  if (!dir) return h;
+  NSMutableArray<NSString*>* subdirs = [NSMutableArray new];
+  for (struct dirent* e; (e = readdir(dir));) {
+    if (e->d_type != DT_DIR || !strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    [subdirs addObject:@(e->d_name)];
+  }
+  closedir(dir);
+  // readdir's order is the file system's: sorted, so the same tree is the same signature.
+  [subdirs sortUsingSelector:@selector(compare:)];
+  for (NSString* name in subdirs) {
+    h = Fnv(h, name.UTF8String, strlen(name.UTF8String) + 1);
+    h = TreeSignature([NSString stringWithFormat:@"%s/%@", path, name].fileSystemRepresentation, depth - 1, h);
+  }
+  return h;
+}
+
+// The game folder DIR as the scan saw it: its folders three levels deep and its winpad.json.
+static NSString* FolderSignature(NSString* dir) {
+  uint64_t h = TreeSignature(dir.fileSystemRepresentation, 3, 0xcbf29ce484222325ULL);
+  struct stat st;
+  if (!stat([dir stringByAppendingPathComponent:@"winpad.json"].fileSystemRepresentation, &st)) {
+    h = Fnv(h, &st.st_mtimespec, sizeof st.st_mtimespec);
+    h = Fnv(h, &st.st_size, sizeof st.st_size);
+  }
+  return [NSString stringWithFormat:@"%016llx", (unsigned long long)h];
+}
+
+// The profiles the scan matched against (AppProfiles: the app's, and online ones when there are).
+static NSString* ProfilesSignature(void) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  for (NSDictionary* p in AppProfiles()) {
+    NSString* line = [NSString stringWithFormat:@"%@ %@", p[@"id"], p[@"version"] ?: @0];
+    h = Fnv(h, line.UTF8String, strlen(line.UTF8String) + 1);
+  }
+  return [NSString stringWithFormat:@"%016llx-%lu", (unsigned long long)h, (unsigned long)AppProfiles().count];
+}
+
+static NSString* ScanCachePath(void) {
+  NSString* dir = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject
+      stringByAppendingPathComponent:@"WinPad"];
+  [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+  return [dir stringByAppendingPathComponent:@"games.json"];
+}
+
+// The cache: {"format": 1, "profiles": ProfilesSignature, "games": {folder: {"sig", "info",
+// "fromApp", "best"}}}; empty when it is for other profiles. With the "noScanCache" setting it is
+// neither read nor written.
+static NSMutableDictionary* LoadScanCache(NSString* profiles) {
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"noScanCache"]) return [NSMutableDictionary new];
+  NSData* data = [NSData dataWithContentsOfFile:ScanCachePath()];
+  id obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![obj isKindOfClass:NSDictionary.class] || ![obj[@"format"] isEqual:@1] || ![obj[@"profiles"] isEqual:profiles] ||
+      ![obj[@"games"] isKindOfClass:NSDictionary.class])
+    return [NSMutableDictionary new];
+  return [obj[@"games"] mutableCopy];
+}
+
+static void SaveScanCache(NSString* profiles, NSDictionary* games) {
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"noScanCache"]) return;
+  NSData* json = [NSJSONSerialization dataWithJSONObject:@{@"format" : @1, @"profiles" : profiles, @"games" : games}
+                                                 options:0
+                                                   error:nil];
+  [json writeToFile:ScanCachePath() atomically:YES];
+}
+
+// What the last WinPadFindGames did: games found, and folders it walked (not in the cache).
+static NSUInteger last_scan_games, last_scan_walked;
+
+// TRUST: the cache's entry of a folder is taken without the folder's signature (no readdir at
+// all): what the library shows at once, before the full scan (WinPadFindGames) on a background
+// queue checks it. A folder the cache does not have is walked either way; the cache is not
+// written.
+static NSArray<WinPadGame*>* FindGames(BOOL trust) {
+  const CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* docs = Documents();
   NSMutableArray<WinPadGame*>* games = [NSMutableArray new];
+  NSString* profiles_sig = ProfilesSignature();
+  NSMutableDictionary* cache = LoadScanCache(profiles_sig);
+  NSMutableDictionary* fresh_cache = [NSMutableDictionary new];
+  NSUInteger walked = 0;
   NSArray* folders = [[fm contentsOfDirectoryAtPath:docs error:nil] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
   for (NSString* folder in folders) {
     // The app's own folders (main.m): the Wine prefix, FEX's caches, the window's frames.
@@ -612,19 +721,40 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     BOOL is_dir = NO;
     if (![fm fileExistsAtPath:dir isDirectory:&is_dir] || !is_dir) continue;
     NSArray* files = [fm contentsOfDirectoryAtPath:dir error:nil];
+    NSDictionary* cached = [cache[folder] isKindOfClass:NSDictionary.class] ? cache[folder] : nil;
+    NSString* sig = trust && [cached[@"sig"] isKindOfClass:NSString.class] ? cached[@"sig"] : FolderSignature(dir);
+    if (![cached[@"sig"] isEqual:sig]) cached = nil;
     NSDictionary* info = nil;
-    NSData* json = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"winpad.json"]];
-    if (json) {
-      id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
-      if ([obj isKindOfClass:NSDictionary.class]) info = obj;
-    }
     BOOL profile_from_app = NO;
-    info = WithAppProfile(dir, info, &profile_from_app);
+    if (cached) {
+      info = [cached[@"info"] isKindOfClass:NSDictionary.class] ? cached[@"info"] : nil;
+      profile_from_app = [cached[@"fromApp"] boolValue];
+    } else {
+      walked++;
+      NSData* json = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"winpad.json"]];
+      if (json) {
+        id obj = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
+        if ([obj isKindOfClass:NSDictionary.class]) info = obj;
+      }
+      info = WithAppProfile(dir, info, &profile_from_app);
+    }
+    NSMutableDictionary* entry = [@{@"sig" : sig, @"info" : info ?: [NSNull null], @"fromApp" : @(profile_from_app)} mutableCopy];
     NSDictionary* settings = WinPadGameSettings(info);
     NSDictionary* own_settings = WinPadOwnGameSettings(folder);
     NSString* exe = [settings[@"exe"] isKindOfClass:NSString.class] ? settings[@"exe"] : nil;
     if (exe && ([exe containsString:@".."] || ![fm fileExistsAtPath:[dir stringByAppendingPathComponent:exe]])) exe = nil;
-    if (!exe) exe = BestProgram(dir, folder);
+    if (!exe) {
+      // The program the last scan found, while it is there; else the walk (an empty "best": none).
+      NSString* best = [cached[@"best"] isKindOfClass:NSString.class] ? cached[@"best"] : nil;
+      if (best && (!best.length || [fm fileExistsAtPath:[dir stringByAppendingPathComponent:best]])) {
+        exe = best.length ? best : nil;
+      } else {
+        if (cached) walked++;
+        exe = BestProgram(dir, folder);
+      }
+      entry[@"best"] = exe ?: @"";
+    }
+    if ([NSJSONSerialization isValidJSONObject:entry]) fresh_cache[folder] = entry;
     // The program the user picked (Nastavení hry, a long press on its tile) wins, while it is there.
     NSString* auto_exe = exe;
     NSString* own_exe = [own_settings[@"exe"] isKindOfClass:NSString.class] ? own_settings[@"exe"] : nil;
@@ -635,7 +765,7 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     // So do its resolution and picture: main.m reads them from the settings as winpad.json's.
     if (own_settings.count) {
       NSMutableDictionary* mine = [settings mutableCopy];
-      for (NSString* key in @[ @"screen", @"scaling" ])
+      for (NSString* key in @[ @"screen", @"scaling", @"padMode" ])
         if ([own_settings[key] isKindOfClass:NSString.class]) mine[key] = own_settings[key];
       settings = mine;
     }
@@ -668,7 +798,29 @@ NSArray<WinPadGame*>* WinPadFindGames(void) {
     CountMaps(game);
     [games addObject:game];
   }
+  // Only the folders there are now: a removed game's entry goes.
+  if (trust) {
+    NSLog(@"[launch] library from its cache: %lu games, %lu walked, %.0f ms", (unsigned long)games.count,
+          (unsigned long)walked, (CFAbsoluteTimeGetCurrent() - began) * 1000);
+    return games;
+  }
+  if (walked || ![fresh_cache isEqualToDictionary:cache]) SaveScanCache(profiles_sig, fresh_cache);
+  last_scan_games = games.count;
+  last_scan_walked = walked;
+  NSLog(@"[launch] library scan: %lu games, %lu walked, %.0f ms", (unsigned long)games.count, (unsigned long)walked,
+        (CFAbsoluteTimeGetCurrent() - began) * 1000);
   return games;
+}
+
+NSArray<WinPadGame*>* WinPadFindGames(void) {
+  return FindGames(NO);
+}
+
+// What the library shows of GAME: when the full scan finds the same for each game, the tiles stay.
+static NSString* GameSummary(WinPadGame* g) {
+  return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%d|%d|%ld|%ld|%@|%@", g.folder, g.exe, g.autoExe, g.title, g.profile,
+                                    g.arch, g.image, g.imageInFolder, g.cover != nil, (long)g.maps, (long)g.newMaps,
+                                    g.settings, g.own];
 }
 
 // A folder name a package may unpack into: one name, not one of the app's own folders.
@@ -1244,6 +1396,8 @@ CGSize WinPadGameScreen(NSDictionary* settings, CGSize display) {
   id own = settings[@"screen"];
   NSString* want = [own isKindOfClass:NSString.class] ? [own lowercaseString]
                                                      : [NSUserDefaults.standardUserDefaults stringForKey:@"gameScreen"];
+  // Neither the game nor the user said: what the program's graphics API suits (WinPadAuto.m).
+  if (!want.length && [settings[@"autoScreen"] isKindOfClass:NSString.class]) want = settings[@"autoScreen"];
   if (!want.length || [want isEqualToString:@"4:3"]) return CGSizeZero;
   if ([want isEqualToString:@"wide"]) {
     const CGFloat across = MAX(display.width, display.height), down = MIN(display.width, display.height);
@@ -2015,9 +2169,10 @@ static NSString* ProgramDetail(NSString* folder, NSString* exe) {
 @property(nonatomic, strong) WinPadGame* game;
 @property(nonatomic, copy) void (^changed)(void);
 @property(nonatomic, copy) void (^coverChanged)(void);
+- (NSURL*)shareURL;
 @end
 
-enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSection, GameSections };
+enum { GameCoverSection, GameProgramSection, GamePictureSection, GameAutoSection, GameResetSection, GameSections };
 
 @implementation WinPadGameSettingsViewController
 - (instancetype)initWithGame:(WinPadGame*)game {
@@ -2057,6 +2212,7 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
     self.game.settings = game.settings;
     self.game.own = game.own;
     self.game.arch = game.arch;
+    self.game.plainSettings = nil;
   }
   [self.tableView reloadData];
   if (self.changed) self.changed();
@@ -2067,11 +2223,117 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
-  return section == GamePictureSection ? 2 : 1;
+  return section == GamePictureSection ? 2 : section == GameAutoSection ? 5 : 1;
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
-  return @[ @"Obal", @"Spouštěcí program", @"Obraz", @"" ][(NSUInteger)section];
+  return @[ @"Obal", @"Spouštěcí program", @"Obraz", @"Automatické nastavení", @"" ][(NSUInteger)section];
+}
+
+// What the game's program is and the automatic settings variant of its next run (WinPadAuto.m).
+- (NSDictionary*)traits {
+  return WinPadProgramTraits([Documents() stringByAppendingPathComponent:self.game.exe]);
+}
+
+- (NSDictionary*)variant {
+  NSDictionary* variant = nil;
+  WinPadSettingsWithAuto(self.traits ?: @{}, self.game.exe.lastPathComponent, self.game.plainSettings ?: self.game.settings ?: @{},
+                         WinPadOwnGameSettings(self.game.folder), &variant);
+  return variant;
+}
+
+// "DirectX 9 · 32bit · DirectInput, XInput"
+- (NSString*)traitsText {
+  NSDictionary* t = self.traits;
+  if (!t) return @"Není to program pro Windows";
+  NSMutableArray* parts = [NSMutableArray new];
+  NSString* installer = WinPadInstallerName(t);
+  if (installer) [parts addObject:[NSString stringWithFormat:@"Instalačka (%@)", installer]];
+  [parts addObject:WinPadGraphicsName(t) ?: @"Grafika neznámá"];
+  [parts addObject:[t[@"machine"] integerValue] == 0x8664 ? @"64bit" : @"32bit"];
+  NSMutableArray* uses = [NSMutableArray new];
+  NSDictionary* names = @{
+    @"dinput" : @"DirectInput", @"xinput" : @"ovladač Xbox", @"dotnet" : @".NET", @"physx" : @"PhysX",
+    @"steam" : @"Steam", @"openal" : @"OpenAL", @"xaudio" : @"XAudio2"
+  };
+  for (NSString* u in t[@"uses"])
+    if (names[u]) [uses addObject:names[u]];
+  if (uses.count) [parts addObject:[uses componentsJoinedByString:@", "]];
+  return [parts componentsJoinedByString:@" · "];
+}
+
+// A new GitHub issue with the game's working settings filled in as a game profile
+// (tools/winpad-translator/data/profiles), for WinPad's online profiles.
+- (NSURL*)shareURL {
+  NSDictionary* variant = self.variant;
+  NSDictionary* own = WinPadOwnGameSettings(self.game.folder);
+  NSMutableDictionary* settings = [NSMutableDictionary new];
+  NSDictionary* auto_settings = variant[@"settings"] ?: @{};
+  for (NSString* key in auto_settings) {
+    if ([key isEqualToString:@"autoScreen"]) settings[@"screen"] = auto_settings[key];
+    else if ([key isEqualToString:@"registryForce"]) {
+      // Wine's own Windows version needs no profile.
+      NSMutableDictionary* reg = [NSMutableDictionary new];
+      for (NSString* k in auto_settings[key]) {
+        NSMutableDictionary* values = [auto_settings[key][k] mutableCopy];
+        if ([values[@"Version"] isEqual:@"win10"]) [values removeObjectForKey:@"Version"];
+        if (values.count) reg[k] = values;
+      }
+      if (reg.count) settings[@"registry"] = reg;
+    } else settings[key] = auto_settings[key];
+  }
+  for (NSString* key in @[ @"screen", @"scaling" ])
+    if ([own[key] isKindOfClass:NSString.class]) settings[key] = own[key];
+  NSString* exe = [self.game.exe substringFromIndex:MIN(self.game.exe.length, self.game.folder.length + 1)];
+  // A file or two next to the program, so the profile matches this game and not any GAME.EXE.
+  NSMutableArray* files = [NSMutableArray new];
+  NSString* exe_dir = [Documents() stringByAppendingPathComponent:self.game.exe].stringByDeletingLastPathComponent;
+  for (NSString* name in [[NSFileManager.defaultManager contentsOfDirectoryAtPath:exe_dir error:nil]
+           sortedArrayUsingSelector:@selector(compare:)])
+    if ([name.pathExtension.lowercaseString isEqualToString:@"dll"] && files.count < 2) [files addObject:name];
+  NSMutableDictionary* match = [@{@"exe" : exe} mutableCopy];
+  if (files.count) match[@"files"] = files;
+  NSString* slug = Letters(self.game.title);
+  NSDictionary* profile = @{
+    @"id" : slug.length ? slug : @"game",
+    @"version" : @1,
+    @"title" : self.game.title,
+    @"match" : @[ match ],
+    @"settings" : settings,
+    @"notes" : @[ [NSString stringWithFormat:@"Sdíleno z aplikace WinPad (%@), funguje s automatickým nastavením „%@“.",
+                                             AppBuild(), variant[@"title"] ?: @"Výchozí"] ],
+  };
+  NSData* json = [NSJSONSerialization dataWithJSONObject:profile
+                                                 options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys |
+                                                         NSJSONWritingWithoutEscapingSlashes
+                                                   error:nil];
+  NSString* body = [NSString
+      stringWithFormat:@"Profil hry ze sdíleného nastavení aplikace WinPad.\n\nHra: %@\nProgram: %@\nZjištěno: %@\n\n```json\n%@\n```\n",
+                       self.game.title, exe, self.traitsText, [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding]];
+  NSURLComponents* url = [NSURLComponents componentsWithString:@"https://github.com/Chlupiq/WinPad/issues/new"];
+  url.queryItems = @[
+    [NSURLQueryItem queryItemWithName:@"title" value:[@"Profil hry: " stringByAppendingString:self.game.title]],
+    [NSURLQueryItem queryItemWithName:@"body" value:body]
+  ];
+  return url.URL;
+}
+
+// Opens shareURL after saying what it holds: nothing is sent until the user sends it on GitHub.
+- (void)share {
+  NSURL* url = self.shareURL;
+  UIAlertController* ask = [UIAlertController
+      alertControllerWithTitle:@"Sdílet nastavení"
+                       message:@"Otevře se GitHub s předvyplněným hlášením pro repozitář WinPad. Bude v něm název hry, název "
+                               @"jejího programu a nastavení, se kterým běží; žádné soubory ani cesty z iPadu. Nic se "
+                               @"neodešle, dokud ho na GitHubu sám neodešleš. Z hlášení pak vznikne online profil."
+                preferredStyle:UIAlertControllerStyleAlert];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Otevřít GitHub"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* action) {
+                                          [UIApplication.sharedApplication openURL:url options:@{} completionHandler:nil];
+                                        }]];
+  [self presentViewController:ask animated:YES completion:nil];
 }
 
 - (NSString*)tableView:(UITableView*)tableView titleForFooterInSection:(NSInteger)section {
@@ -2081,6 +2343,9 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
   if (section == GamePictureSection)
     return @"Rozlišení je monitor, který hra uvidí: nabídne režimy až do této velikosti. Konkrétní režim pak vybereš "
            @"v nastavení hry, pokud ho hra nemá pevný.";
+  if (section == GameAutoSection)
+    return @"Aplikace pozná podle programu hry, jak ji spustit. Když hra spadne hned po startu, zkusí příště jiné "
+           @"nastavení, a to, se kterým hra běží, si zapamatuje. Profil hry a tvoje volby výše mají vždy přednost.";
   if (section == GameResetSection) return @"Nastavení se ukládají jen pro tuto hru a platí od příštího spuštění.";
   return nil;
 }
@@ -2121,6 +2386,42 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
         cell.detailTextLabel.text = own ? PictureScalingName(own) ?: own : @"Výchozí";
       }
       break;
+    case GameAutoSection: {
+      NSDictionary* own = WinPadOwnGameSettings(self.game.folder);
+      if (path.row == 0) {
+        cell.textLabel.text = @"Program";
+        cell.detailTextLabel.text = self.traitsText;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+      } else if (path.row == 1) {
+        NSDictionary* variant = self.variant;
+        cell.textLabel.text = @"Nastavení";
+        NSString* state = [own[@"autoWorked"] isEqual:variant[@"id"]] ? @"funguje"
+                          : [own[@"autoExhausted"] boolValue]          ? @"žádné nepomohlo"
+                          : [variant[@"id"] isEqual:@"base"]            ? @"zatím nevyzkoušeno"
+                                                                        : @"zkouší se";
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ (%@)", variant[@"title"] ?: @"Výchozí", state];
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+      } else if (path.row == 2) {
+        NSString* mine = [self own:@"padMode"];
+        NSString* mode = mine ?: self.variant[@"settings"][@"padMode"] ?: @"keys";
+        cell.textLabel.text = @"Ovladač";
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@%@", [mode isEqualToString:@"xinput"] ? @"Jako ovladač Xbox"
+                                                               : [mode isEqualToString:@"hid"] ? @"Jako herní ovladač (DirectInput)"
+                                                                                               : @"Jako klávesy",
+                                                               mine ? @"" : @" (automaticky)"];
+      } else {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+        cell.textLabel.text = path.row == 3 ? @"Zkusit automatické nastavení znovu" : @"Sdílet funkční nastavení na GitHubu";
+        cell.textLabel.textColor = self.view.tintColor;
+        if (path.row == 4 && !own[@"autoWorked"]) {
+          cell.textLabel.textColor = UIColor.secondaryLabelColor;
+          cell.textLabel.text = @"Sdílet nastavení (až hra jednou poběží)";
+        }
+      }
+      break;
+    }
     default:
       cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
       cell.textLabel.text = @"Obnovit výchozí nastavení hry";
@@ -2178,6 +2479,24 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
   [self.navigationController pushViewController:list animated:YES];
 }
 
+- (void)pickPadMode {
+  WinPadChoiceViewController* list = [WinPadChoiceViewController new];
+  list.title = @"Ovladač";
+  list.choices = @[
+    @[ @"Automaticky", @"Jako ovladač Xbox, když ho hra umí (XInput), jinak jako klávesy", NSNull.null ],
+    @[ @"Jako ovladač Xbox", @"Hra dostane ovladač přímo (XInput), i s analogovými páčkami a spouštěmi", @"xinput" ],
+    @[ @"Jako herní ovladač (DirectInput)", @"Pro starší hry, které umí joystick nebo gamepad přes DirectInput; ve hře ho pak vyber v nastavení ovládání", @"hid" ],
+    @[ @"Jako klávesy", @"Tlačítka a páčky jsou klávesy podle Nastavení › Ovladač", @"keys" ],
+  ];
+  list.chosen = [self own:@"padMode"];
+  list.footer = @"Platí pro herní ovladač i dotykový ovladač na displeji.";
+  __weak WinPadGameSettingsViewController* weak = self;
+  list.picked = ^(id value) {
+    [weak set:@"padMode" to:value];
+  };
+  [self.navigationController pushViewController:list animated:YES];
+}
+
 - (void)pickScaling {
   NSMutableArray* choices = [NSMutableArray arrayWithObject:@[ @"Výchozí", @"Podle Nastavení › Obraz hry", NSNull.null ]];
   for (NSString* scaling in PictureScalings()) [choices addObject:@[ PictureScalingName(scaling), @"", scaling ]];
@@ -2200,6 +2519,17 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
     case GamePictureSection:
       if (path.row == 0) [self pickScreen];
       else [self pickScaling];
+      break;
+    case GameAutoSection:
+      if (path.row == 2) {
+        [self pickPadMode];
+      } else if (path.row == 3) {
+        WinPadSetOwnGameSetting(self.game.folder, @"autoWorked", nil);
+        WinPadSetOwnGameSetting(self.game.folder, @"autoExhausted", nil);
+        [self set:@"autoVariant" to:nil];
+      } else if (path.row == 4 && WinPadOwnGameSettings(self.game.folder)[@"autoWorked"]) {
+        [self share];
+      }
       break;
     default: [self set:nil to:nil]; break;
   }
@@ -2236,6 +2566,11 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 @property(nonatomic, strong) NSMutableArray* observers;
 @property(nonatomic) unsigned pad;  // the controller buttons held at the last change (Nav*)
 @property(nonatomic) BOOL started;
+// offerDirectX is looking into the last run's log.
+@property(nonatomic) BOOL scanningLog;
+// reload: the games were shown once (from the scan cache), and which scan is the latest.
+@property(nonatomic) BOOL shownOnce;
+@property(nonatomic) NSUInteger scanGeneration;
 @property(nonatomic, readonly) BOOL compact;  // an iPhone's height: smaller, no hints or info card
 // Packages to install (openPackages:), whether one is being installed, and what the
 // installs said (for libraryTest's report).
@@ -2245,8 +2580,12 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 @property(nonatomic) BOOL jitAsked;
 @property(nonatomic) BOOL dllsChecked;
 @property(nonatomic) BOOL archChecked;  // a 64-bit game's question was answered for this start
+@property(nonatomic) BOOL installerAsked;  // the "this is an installer" question was answered for this start
+@property(nonatomic, copy) NSString* judgeReport;  // CI: what judgeLastRun did
 @property(nonatomic, strong) NSMutableString* installReport;
 - (void)reload;
+- (void)reloadSoon;
+- (void)showGames:(NSArray<WinPadGame*>*)games;
 - (void)showFocus;
 - (void)tick;
 - (void)moveFocusBy:(NSInteger)by;
@@ -2263,10 +2602,13 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameResetSectio
 - (void)refreshJIT;
 - (void)openJITGuide;
 - (void)offerDirectX;
+- (void)offerDirectXForChild:(NSString*)child dll:(NSString*)dll date:(NSDate*)date;
 - (void)downloadDirectXFor:(NSString*)dll;
 - (BOOL)checkDLLsOf:(NSString*)program game:(WinPadGame*)game;
 - (void)ask64BitFor:(WinPadGame*)game program:(NSString*)program;
 - (void)askToStartWithout:(NSString*)text start:(void (^)(void))start cancel:(void (^)(void))cancel;
+- (BOOL)prepareAuto:(WinPadGame*)game program:(NSString*)program;
+- (BOOL)judgeLastRun;
 - (void)openSettings;
 - (void)openGOG;
 - (void)gogInstalled:(NSNotification*)note;
@@ -2446,7 +2788,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                                                             object:nil
                                                                              queue:NSOperationQueue.mainQueue
                                                                         usingBlock:^(NSNotification* note) {
-                                                                          [weak reload];
+                                                                          [weak reloadSoon];
                                                                           [weak openPackages:@[]];
                                                                         }]];
   [self.observers addObject:[NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification
@@ -2534,13 +2876,23 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
       [self.installReport appendFormat:@"package: %@ -> %@\n", url.lastPathComponent, folder ?: error];
     }
   }
-  [self reload];
+  [self reloadSoon];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
   [super viewDidAppear:animated];
+  static BOOL appeared;
+  if (!appeared) WinPadLogLaunch(@"library on screen");
+  appeared = YES;
   [self becomeFirstResponder];
   [self openPackages:@[]];
+  if (self.handedOver && !self.installing) {
+    WinPadGame* game = self.handedOver;
+    self.handedOver = nil;
+    [self focusFolder:game.folder];
+    [self startProgram:@"game" game:game];
+    return;
+  }
 #if !TARGET_OS_SIMULATOR
   // The first launch on a device without the JIT: how to turn it on, once. A Mac turns it on
   // itself.
@@ -2568,12 +2920,13 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   NSString* settings_test = [NSUserDefaults.standardUserDefaults stringForKey:@"gameSettingsTest"];
   for (WinPadGame* game in settings_test ? self.games : @[])
     if ([game.folder isEqualToString:settings_test]) [self openGameSettingsFor:game];
-  [self offerDirectX];
+  if (![self judgeLastRun]) [self offerDirectX];
   static BOOL tested;
   if (tested || ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return;
   tested = YES;
-  NSMutableString* report = [NSMutableString stringWithFormat:@"%@library: %lu games\n", self.installReport,
-                                                             (unsigned long)self.games.count];
+  NSMutableString* report = [NSMutableString stringWithFormat:@"%@library: %lu games\nscan: %lu games, %lu walked\n",
+                                                             self.installReport, (unsigned long)self.games.count,
+                                                             (unsigned long)last_scan_games, (unsigned long)last_scan_walked];
   for (WinPadGame* game in self.games)
     [report appendFormat:@"library: %@ | %@ | %@ | image %@%@%@\n", game.title, game.exe, game.arch ?: @"?",
                          game.image.lastPathComponent ?: @"none", game.imageInFolder ? @" (game folder)" : @"",
@@ -2593,6 +2946,39 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [report appendFormat:@"own: %@ saved | %@\n", game.folder,
                          [[own.allKeys sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@" "]];
   }
+  // The automatic settings (WinPadAuto.m): what the D3D9 cube is (alone in a folder, as a game's
+  // program), and the variants tried for it.
+  NSString* cube_dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"auto-test"];
+  NSString* cube = [cube_dir stringByAppendingPathComponent:@"d3d9-cube.exe"];
+  [NSFileManager.defaultManager removeItemAtPath:cube_dir error:nil];
+  [NSFileManager.defaultManager createDirectoryAtPath:cube_dir withIntermediateDirectories:YES attributes:nil error:nil];
+  [NSFileManager.defaultManager copyItemAtPath:[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"i386-windows/d3d9-cube.exe"]
+                                        toPath:cube
+                                         error:nil];
+  NSDictionary* cube_traits = WinPadProgramTraits(cube);
+  [report appendFormat:@"auto: d3d9-cube.exe | graphics %@ | uses %@ | os %@\n", cube_traits[@"graphics"] ?: @"-",
+                       [cube_traits[@"uses"] componentsJoinedByString:@" "] ?: @"-", cube_traits[@"os"] ?: @"-"];
+  for (NSDictionary* v in WinPadAutoVariants(cube_traits ?: @{}, @"d3d9-cube.exe", @{}))
+    [report appendFormat:@"auto variant: d3d9-cube.exe %@ | %@\n", v[@"id"], v[@"title"]];
+  // A start that failed moves on to the next variant; one that ran keeps its variant; and the
+  // settings it worked with go into a GitHub issue to share.
+  WinPadSetOwnGameSetting(@"Morrowind", nil, nil);
+  WinPadRunStarted(@"Morrowind", @"base", @"Výchozí");
+  WinPadRunEnded(@"exited", (int)0xc0000005);
+  [self judgeLastRun];
+  [report appendFormat:@"%@ | own %@\n", self.judgeReport ?: @"judge: nothing", WinPadOwnGameSettings(@"Morrowind")[@"autoVariant"] ?: @"-"];
+  NSDictionary* ran = @{@"folder" : @"Morrowind", @"variant" : @"rwx", @"variantTitle" : @"", @"state" : @"running",
+                        @"started" : @0, @"seconds" : @120, @"frames" : @5000};
+  [[NSJSONSerialization dataWithJSONObject:ran options:0 error:nil]
+      writeToFile:[Documents() stringByAppendingPathComponent:@".winpad-lastrun.json"]
+       atomically:YES];
+  self.judgeReport = nil;
+  [self judgeLastRun];
+  [report appendFormat:@"%@ | own %@\n", self.judgeReport ?: @"judge: nothing", WinPadOwnGameSettings(@"Morrowind")[@"autoWorked"] ?: @"-"];
+  for (WinPadGame* game in self.games)
+    if ([game.folder isEqualToString:@"Morrowind"])
+      [report appendFormat:@"share: %@\n", [[WinPadGameSettingsViewController alloc] initWithGame:game].shareURL.absoluteString];
+  WinPadSetOwnGameSetting(@"Morrowind", nil, nil);
   // What "Exportovat pro převodník" shares, without the share sheet: Documents/export-FOLDER.zip.
   for (WinPadGame* game in self.games) {
     if (!game.maps) continue;
@@ -2692,10 +3078,55 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   });
 }
 
+// After a change made in the app (a game added, its settings): the scan, now.
 - (void)reload {
   if (self.started) return;
+  self.scanGeneration++;
+  self.shownOnce = YES;
+  [self showGames:WinPadFindGames()];
+}
+
+// At launch and back from the background: the games at once from the scan cache (FindGames
+// trusting it), then the full scan on a background queue, whose games replace them only when
+// they differ (a folder changed in Files or Finder). CI's tests, which look at the games right
+// after, scan on the main thread.
+- (void)reloadSoon {
+  if (self.started) return;
+  NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+  if ([d boolForKey:@"libraryTest"] || [d stringForKey:@"gameSettingsTest"] || [d stringForKey:@"coverTest"] ||
+      [d stringForKey:@"gogTest"]) {
+    [self reload];
+    return;
+  }
+  // The first time from the cache; later (back from the background, a game added) the tiles
+  // there are stay until the scan says otherwise.
+  if (!self.shownOnce) [self showGames:FindGames(YES)];
+  self.shownOnce = YES;
+  const NSUInteger generation = ++self.scanGeneration;
+  static dispatch_queue_t queue;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    queue = dispatch_queue_create("winpad.library.scan", DISPATCH_QUEUE_SERIAL);
+  });
+  __weak LibraryViewController* weak = self;
+  dispatch_async(queue, ^{
+    NSArray<WinPadGame*>* games = WinPadFindGames();
+    dispatch_async(dispatch_get_main_queue(), ^{
+      LibraryViewController* me = weak;
+      if (!me || me.started || generation != me.scanGeneration) return;
+      BOOL same = games.count == me.games.count;
+      for (NSUInteger i = 0; same && i < games.count; i++)
+        same = [GameSummary(games[i]) isEqualToString:GameSummary(me.games[i])];
+      if (same) return;
+      NSLog(@"[launch] library: the scan found other games than the cache, the tiles are made again");
+      [me showGames:games];
+    });
+  });
+}
+
+- (void)showGames:(NSArray<WinPadGame*>*)games {
   NSString* focused = self.games.count ? self.games[self.focus].folder : [NSUserDefaults.standardUserDefaults stringForKey:@"lastGame"];
-  self.games = WinPadFindGames();
+  self.games = games;
   self.focus = 0;
   for (NSUInteger i = 0; i < self.games.count; i++)
     if ([self.games[i].folder isEqualToString:focused]) self.focus = (NSInteger)i;
@@ -3094,9 +3525,13 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 
 - (void)startProgram:(NSString*)program game:(WinPadGame*)game {
   if (self.started || self.installing) return;
+  // What the program is and the automatic settings for it (WinPadAuto.m), under the game's own.
+  if (game && ![self prepareAuto:game program:program]) return;
   // The DLLs the game imports and no one has: Microsoft's DirectX ones are downloaded first.
-  // A 64-bit program WinPad does not run yet: its 32-bit one, when the folder has one.
+  // 64-bit programs run through ARM64EC (with the JIT), so no question for them any more;
+  // ask64BitFor stays behind the ask64Bit setting.
   if (game && !self.archChecked && [game.arch isEqualToString:@"64bit"] &&
+      [NSUserDefaults.standardUserDefaults boolForKey:@"ask64Bit"] &&
       ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
     [self ask64BitFor:game program:program];
     return;
@@ -3133,6 +3568,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.started = YES;
   self.dllsChecked = NO;
   self.archChecked = NO;
+  self.installerAsked = NO;
   if (game) [NSUserDefaults.standardUserDefaults setObject:game.folder forKey:@"lastGame"];
   // The game reads the controllers itself (main.m's Gamepads).
   for (id observer in self.observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
@@ -3158,15 +3594,54 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 
 // The last game run stopped because a DLL of Microsoft's DirectX was missing (Wine has no
 // file of it): offers the download, once for that run.
+// The log is looked into off the main thread (a game's log can be large), once per log: what
+// it found is kept by the log's time and size ("lastRunScan"), so a launch after a launch
+// reads nothing.
 - (void)offerDirectX {
   if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] || self.presentedViewController ||
       self.installing || WinPadDirectXDownloading())
     return;
   NSString* log = [Documents() stringByAppendingPathComponent:@"wine.log"];
-  NSDate* date = [NSFileManager.defaultManager attributesOfItemAtPath:log error:nil].fileModificationDate;
+  NSString* crashed = [Documents() stringByAppendingPathComponent:@"wine.log.crashed"];
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSDictionary* attrs = [fm attributesOfItemAtPath:log error:nil];
+  NSDictionary* crashed_attrs = [fm attributesOfItemAtPath:crashed error:nil];
+  NSDate* date = attrs.fileModificationDate;
+  if (!attrs && !crashed_attrs) return;
+  NSString* key = [NSString stringWithFormat:@"%.3f %llu %.3f %llu", date.timeIntervalSince1970, attrs.fileSize,
+                                             crashed_attrs.fileModificationDate.timeIntervalSince1970, crashed_attrs.fileSize];
+  NSDictionary* scan = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"lastRunScan"];
+  if ([scan[@"key"] isEqual:key]) {
+    NSString* child = [scan[@"child"] isKindOfClass:NSString.class] ? scan[@"child"] : nil;
+    NSString* dll = [scan[@"dll"] isKindOfClass:NSString.class] ? scan[@"dll"] : nil;
+    [self offerDirectXForChild:child dll:dll date:date];
+    return;
+  }
+  if (self.scanningLog) return;
+  self.scanningLog = YES;
+  __weak LibraryViewController* weak = self;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    const CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
+    NSString* child = WinPadFailedChildOfLastRun();
+    NSString* dll = WinPadMissingDLLOfLastRun();
+    NSLog(@"[launch] last run's log looked into: %.0f ms", (CFAbsoluteTimeGetCurrent() - began) * 1000);
+    dispatch_async(dispatch_get_main_queue(), ^{
+      NSMutableDictionary* found = [NSMutableDictionary dictionaryWithObject:key forKey:@"key"];
+      if (child) found[@"child"] = child;
+      if (dll) found[@"dll"] = dll;
+      [NSUserDefaults.standardUserDefaults setObject:found forKey:@"lastRunScan"];
+      LibraryViewController* me = weak;
+      if (!me) return;
+      me.scanningLog = NO;
+      if (me.presentedViewController || me.installing || me.started || WinPadDirectXDownloading()) return;
+      [me offerDirectXForChild:child dll:dll date:date];
+    });
+  });
+}
+
+- (void)offerDirectXForChild:(NSString*)child dll:(NSString*)dll date:(NSDate*)date {
   // A second program the game started, which cannot start on iPad (only one 32-bit program
   // runs): SafeDisc's helper (~e5.0001, ~df*.tmp) means a copy protection Wine cannot run.
-  NSString* child = WinPadFailedChildOfLastRun();
   NSString* child_key = [NSString stringWithFormat:@"child %@ %.0f", child, date.timeIntervalSince1970];
   if (child && ![[NSUserDefaults.standardUserDefaults stringForKey:@"childOffered"] isEqualToString:child_key]) {
     [NSUserDefaults.standardUserDefaults setObject:child_key forKey:@"childOffered"];
@@ -3187,7 +3662,6 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     [self presentViewController:said animated:YES completion:nil];
     return;
   }
-  NSString* dll = WinPadMissingDLLOfLastRun();
   if (!dll || [WinPadDirectXDLLs() containsObject:dll]) return;
   NSString* key = [NSString stringWithFormat:@"%@ %.0f", dll, date.timeIntervalSince1970];
   if ([[NSUserDefaults.standardUserDefaults stringForKey:@"directXOffered"] isEqualToString:key]) return;
@@ -3244,17 +3718,47 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   // Microsoft's DLLs the game's profile asks for (Proton's winetricks d3dx9_43...), which a game
   // may load by name, so its imports do not show them.
   NSArray* want_dx = [game.settings[@"nativeDirectX"] isKindOfClass:NSArray.class] ? game.settings[@"nativeDirectX"] : @[];
-  if (!missing.count && (have_directx || !want_dx.count)) return YES;
+  if (!missing.count && (have_directx || !want_dx.count || [game.arch isEqualToString:@"64bit"])) return YES;
+  // The download holds the 32-bit DirectX DLLs only: a 64-bit game gets none from it.
+  const BOOL x64 = [game.arch isEqualToString:@"64bit"];
+  __weak LibraryViewController* weak = self;
+  // First the game's own installers (_CommonRedist, DirectX, vcredist...), with no download:
+  // what they hold goes into the app's shared folder, then the check runs again.
+  NSString* game_dir = [Documents() stringByAppendingPathComponent:game.folder];
+  NSString* scanned_key = [@"installersScanned." stringByAppendingString:game.folder];
+  if (missing.count && !x64 &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:scanned_key] &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] && WinPadGameInstallers(game_dir).count) {
+    UIAlertController* busy =
+        [UIAlertController alertControllerWithTitle:@"Hledám chybějící DLL"
+                                            message:[NSString stringWithFormat:@"Hra potřebuje %@. Hledám je "
+                                                                               @"v instalačkách ve složce hry…",
+                                                                               [missing componentsJoinedByString:@", "]]
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:busy animated:YES completion:nil];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      const int count = WinPadTakeDLLsFromGameInstallers(game_dir);
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [NSUserDefaults.standardUserDefaults setBool:YES forKey:scanned_key];
+        printf("WinPad Library: %d DLLs out of %s's installers\n", count, game.folder.UTF8String);
+        [busy dismissViewControllerAnimated:YES completion:^{
+          LibraryViewController* me = weak;
+          me.dllsChecked = NO;
+          [me startProgram:program game:game];
+        }];
+      });
+    });
+    return NO;
+  }
   NSMutableArray<NSString*>* fetch = [NSMutableArray new];
   NSMutableArray<NSString*>* others = [NSMutableArray new];
-  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx ? fetch : others addObject:dll];
-  if (!have_directx)
+  for (NSString* dll in missing) [WinPadDirectXProvides(dll) && !have_directx && !x64 ? fetch : others addObject:dll];
+  if (!have_directx && !x64)
     for (id verb in want_dx)
       if ([verb isKindOfClass:NSString.class] && ![fetch containsObject:verb]) [fetch addObject:verb];
   printf("WinPad Library: %s lacks DLLs: %s\n", game.folder.UTF8String,
          [missing componentsJoinedByString:@", "].UTF8String);
   if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return YES;
-  __weak LibraryViewController* weak = self;
   void (^start)(void) = ^{
     [weak startProgram:program game:game];
   };
@@ -3289,6 +3793,20 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
               start();
               return;
             }
+            // DirectX came, the rest may be Visual C++'s: the check runs again.
+            if (!error) {
+              BOOL vc = NO;
+              for (NSString* dll in others)
+                if (WinPadVCRedistYearOf(dll) &&
+                    ![NSUserDefaults.standardUserDefaults
+                        boolForKey:[NSString stringWithFormat:@"vcredist%d", WinPadVCRedistYearOf(dll)]])
+                  vc = YES;
+              if (vc) {
+                me.dllsChecked = NO;
+                start();
+                return;
+              }
+            }
             NSString* text = error ? [NSString stringWithFormat:@"DirectX se nestáhl: %@\n\nChybí: %@", error,
                                                                 [still componentsJoinedByString:@", "]]
                                    : [NSString stringWithFormat:@"Tyhle DLL nemá ani DirectX od Microsoftu: %@",
@@ -3299,15 +3817,99 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
     return NO;
   }
   if (!missing.count) return YES;
+  // Microsoft's Visual C++ runtime (MFC above all, Wine has its own C runtimes): its installer
+  // for the year of the first such DLL, once per year; then the check runs again.
+  int year = 0;
+  for (NSString* dll in missing) {
+    const int y = x64 ? 0 : WinPadVCRedistYearOf(dll);
+    if (y && ![NSUserDefaults.standardUserDefaults boolForKey:[NSString stringWithFormat:@"vcredist%d", y]]) {
+      year = y;
+      break;
+    }
+  }
+  if (year && !WinPadDirectXDownloading()) {
+    NSMutableArray* names = [NSMutableArray new];
+    for (NSString* dll in missing)
+      if (WinPadVCRedistYearOf(dll) == year) [names addObject:dll];
+    UIAlertController* busy = [UIAlertController
+        alertControllerWithTitle:@"Stahuji chybějící DLL"
+                         message:[NSString stringWithFormat:@"Hra potřebuje %@ z Visual C++ %d. Stahuji ho přímo od "
+                                                            @"Microsoftu…",
+                                                            [names componentsJoinedByString:@", "], year]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    NSString* intro = busy.message;
+    [self presentViewController:busy animated:YES completion:nil];
+    WinPadVCRedistDownload(
+        year,
+        ^(double fraction) {
+          busy.message = fraction < 1 ? [NSString stringWithFormat:@"%@\n%d %%", intro, (int)(fraction * 100)]
+                                      : [intro stringByAppendingString:@"\nRozbaluji…"];
+        },
+        ^(NSString* error) {
+          [busy dismissViewControllerAnimated:YES completion:^{
+            LibraryViewController* me = weak;
+            if (!me) return;
+            if (error) {
+              [me askToStartWithout:[NSString stringWithFormat:@"Visual C++ %d se nestáhl: %@\n\nChybí: %@", year, error,
+                                                               [names componentsJoinedByString:@", "]]
+                              start:start
+                             cancel:cancel];
+              return;
+            }
+            me.dllsChecked = NO;
+            start();
+          }];
+        });
+    return NO;
+  }
+  // NVIDIA's PhysX runtime (PhysXLoader.dll...), which games of 2006-2010 import: its legacy
+  // package from NVIDIA, once; then the check runs again.
+  NSMutableArray* physx = [NSMutableArray new];
+  for (NSString* dll in missing)
+    if (WinPadPhysXProvides(dll)) [physx addObject:dll];
+  if (physx.count && !x64 && ![NSUserDefaults.standardUserDefaults boolForKey:@"physxDownloaded"] &&
+      !WinPadDirectXDownloading()) {
+    UIAlertController* busy = [UIAlertController
+        alertControllerWithTitle:@"Stahuji chybějící DLL"
+                         message:[NSString stringWithFormat:@"Hra potřebuje %@ z PhysX. Stahuji ho přímo od NVIDIE…",
+                                                            [physx componentsJoinedByString:@", "]]
+                  preferredStyle:UIAlertControllerStyleAlert];
+    NSString* intro = busy.message;
+    [self presentViewController:busy animated:YES completion:nil];
+    WinPadPhysXDownload(
+        ^(double fraction) {
+          busy.message = fraction < 1 ? [NSString stringWithFormat:@"%@\n%d %%", intro, (int)(fraction * 100)]
+                                      : [intro stringByAppendingString:@"\nRozbaluji…"];
+        },
+        ^(NSString* error) {
+          [busy dismissViewControllerAnimated:YES completion:^{
+            LibraryViewController* me = weak;
+            if (!me) return;
+            if (error) {
+              [me askToStartWithout:[NSString stringWithFormat:@"PhysX se nestáhl: %@\n\nChybí: %@", error,
+                                                               [physx componentsJoinedByString:@", "]]
+                              start:start
+                             cancel:cancel];
+              return;
+            }
+            me.dllsChecked = NO;
+            start();
+          }];
+        });
+    return NO;
+  }
   // Only DLLs the app cannot get: said once for this game and these names.
   NSString* key = [@"dllsMissing." stringByAppendingString:game.folder];
   NSString* names = [missing componentsJoinedByString:@", "];
   if ([[NSUserDefaults.standardUserDefaults stringForKey:key] isEqualToString:names]) return YES;
   [NSUserDefaults.standardUserDefaults setObject:names forKey:key];
+  NSString* why = [missing containsObject:@"mscoree.dll"]
+                      ? @" Hra je pro .NET (mscoree.dll), a ten WinPad zatím neumí."
+                      : @"";
   [self askToStartWithout:[NSString stringWithFormat:@"Hra importuje DLL, které WinPad nemá a neumí stáhnout: %@. "
                                                      @"Pokud je hra opravdu načte, nespustí se. Můžeš je nakopírovat "
-                                                     @"do složky hry.",
-                                                     names]
+                                                     @"do složky hry.%@",
+                                                     names, why]
                     start:start
                    cancel:cancel];
   return NO;
@@ -3350,6 +3952,121 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
                                         }]];
   [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
   [self presentViewController:ask animated:YES completion:nil];
+}
+
+// Before a game starts: what its program is (WinPadProgramTraits) and the settings variant of
+// this run (WinPadSettingsWithAuto: the one that worked, else the next to try), under the
+// game's own settings. An installer or a .NET program is said first. YES when the start goes on.
+- (BOOL)prepareAuto:(WinPadGame*)game program:(NSString*)program {
+  NSDictionary* traits = WinPadProgramTraits([Documents() stringByAppendingPathComponent:game.exe]);
+  game.traits = traits;
+  NSDictionary* plain = game.plainSettings ?: game.settings ?: @{};
+  game.plainSettings = plain;
+  NSDictionary* variant = nil;
+  game.settings = WinPadSettingsWithAuto(traits ?: @{}, game.exe.lastPathComponent, plain, WinPadOwnGameSettings(game.folder), &variant);
+  game.autoVariant = variant;
+  printf("WinPad Library: %s: graphics %s, automatic settings %s\n", game.folder.UTF8String,
+         [(traits[@"graphics"] ?: @"?") UTF8String], [(variant[@"id"] ?: @"-") UTF8String]);
+  if (self.installerAsked || [NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return YES;
+  NSString* installer = WinPadInstallerName(traits);
+  const BOOL dotnet = [traits[@"uses"] containsObject:@"dotnet"];
+  if (!installer && !dotnet) return YES;
+  NSString* text =
+      installer
+          ? [NSString stringWithFormat:@"%@ je instalačka (%@), ne samotná hra. Instalačky na iPadu většinou nedoběhnou, protože "
+                                       @"spouštějí další programy. Nainstaluj hru na počítači a nakopíruj sem nainstalovanou "
+                                       @"složku, nebo hru z GOG nainstaluj přímo v aplikaci.",
+                                       game.exe.lastPathComponent, installer]
+          : [NSString stringWithFormat:@"%@ je program pro .NET. Ten WinPad zatím neumí (chybí mu Wine Mono), takže se "
+                                       @"nejspíš nespustí.",
+                                       game.exe.lastPathComponent];
+  UIAlertController* ask = [UIAlertController alertControllerWithTitle:installer ? @"Instalačka hry" : @"Hra pro .NET"
+                                                               message:text
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+  __weak LibraryViewController* weak = self;
+  if (installer && WinPadGamePrograms(game.folder).count > 1)
+    [ask addAction:[UIAlertAction actionWithTitle:@"Vybrat jiný program"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction* action) {
+                                            [weak openGameSettingsFor:game];
+                                          }]];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Spustit i tak"
+                                          style:UIAlertActionStyleDefault
+                                        handler:^(UIAlertAction* action) {
+                                          weak.installerAsked = YES;
+                                          [weak startProgram:program game:game];
+                                        }]];
+  [ask addAction:[UIAlertAction actionWithTitle:@"Zrušit" style:UIAlertActionStyleCancel handler:nil]];
+  [self presentViewController:ask animated:YES completion:nil];
+  return NO;
+}
+
+// The last game run, once (WinPadJudgeLastRun): a start that worked keeps its settings variant
+// for the game; one that failed (crashed, an error, next to nothing drawn in its first 20 s)
+// moves on to the next variant and offers to start again. A missing DLL or a second program
+// is offerDirectX's to say. YES when this showed something.
+- (BOOL)judgeLastRun {
+  NSDictionary* run = WinPadJudgeLastRun();
+  if (!run) return NO;
+  NSString* folder = run[@"folder"];
+  NSDictionary* own = WinPadOwnGameSettings(folder);
+  WinPadGame* game = nil;
+  for (WinPadGame* g in self.games)
+    if ([g.folder isEqualToString:folder]) game = g;
+  printf("WinPad Library: last run of %s: %s (%lds, %ld frames, variant %s)\n", folder.UTF8String,
+         [run[@"ok"] boolValue] ? "worked" : [run[@"why"] UTF8String], [run[@"seconds"] longValue],
+         [run[@"frames"] longValue], [run[@"variant"] UTF8String]);
+  if ([run[@"ok"] boolValue]) {
+    if ([run[@"variant"] length] && ![own[@"autoWorked"] isEqual:run[@"variant"]]) {
+      WinPadSetOwnGameSetting(folder, @"autoWorked", run[@"variant"]);
+      WinPadSetOwnGameSetting(folder, @"autoVariant", nil);
+    }
+    self.judgeReport = [NSString stringWithFormat:@"judge: %@ | worked | %@", folder, run[@"variant"]];
+    return NO;
+  }
+  // A variant that once worked stays: a later crash is the game's, not its setup's.
+  if (!game || own[@"autoWorked"] || [own[@"autoExhausted"] boolValue]) return NO;
+  if (![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+      (WinPadMissingDLLOfLastRun() || WinPadFailedChildOfLastRun()))
+    return NO;
+  NSDictionary* traits = WinPadProgramTraits([Documents() stringByAppendingPathComponent:game.exe]);
+  NSArray<NSDictionary*>* variants = WinPadAutoVariants(traits ?: @{}, game.exe.lastPathComponent, game.settings ?: @{});
+  NSUInteger at = 0;
+  for (NSUInteger i = 0; i < variants.count; i++)
+    if ([variants[i][@"id"] isEqual:run[@"variant"]]) at = i;
+  NSDictionary* next = at + 1 < variants.count ? variants[at + 1] : nil;
+  WinPadSetOwnGameSetting(folder, @"autoVariant", next[@"id"]);
+  if (!next) WinPadSetOwnGameSetting(folder, @"autoExhausted", @YES);
+  self.judgeReport = [NSString stringWithFormat:@"judge: %@ | %@ | next %@", folder, run[@"why"], next[@"id"] ?: @"none"];
+  if ([NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) return NO;
+  NSString* text =
+      next ? [NSString stringWithFormat:@"%@ %@. Zkusím ji spustit s jiným nastavením: %@.", game.title, run[@"why"], next[@"title"]]
+           : [NSString stringWithFormat:@"%@ %@. Vyzkoušel jsem všech %lu automatických nastavení a žádné nepomohlo. "
+                                        @"Podívej se do Nastavení › Poslední log, nebo v nastavení hry (podrž její dlaždici) "
+                                        @"vyber jiný program.",
+                                        game.title, run[@"why"], (unsigned long)variants.count];
+  UIAlertController* ask = [UIAlertController alertControllerWithTitle:@"Hra se nespustila"
+                                                               message:text
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+  __weak LibraryViewController* weak = self;
+  if (next) {
+    [ask addAction:[UIAlertAction actionWithTitle:@"Později" style:UIAlertActionStyleCancel handler:nil]];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Spustit znovu"
+                                            style:UIAlertActionStyleDefault
+                                          handler:^(UIAlertAction* action) {
+                                            LibraryViewController* me = weak;
+                                            [me reload];
+                                            for (WinPadGame* g in me.games)
+                                              if ([g.folder isEqualToString:folder]) {
+                                                [me focusFolder:folder];
+                                                [me startProgram:@"game" game:g];
+                                              }
+                                          }]];
+  } else {
+    [ask addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+  }
+  [self presentViewController:ask animated:YES completion:nil];
+  return YES;
 }
 
 - (void)askToStartWithout:(NSString*)text start:(void (^)(void))start cancel:(void (^)(void))cancel {

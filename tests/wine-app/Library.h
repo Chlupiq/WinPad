@@ -30,6 +30,12 @@
 @property(nonatomic, copy) NSString* autoExe;
 // What the user set for this game with a long press on its tile (WinPadOwnGameSettings).
 @property(nonatomic, copy) NSDictionary* own;
+// What its program is (WinPadProgramTraits) and the settings variant of its next run
+// (WinPadSettingsWithAuto: {"id", "title", "settings"}), set when it starts; plainSettings
+// are its settings without that variant.
+@property(nonatomic, copy) NSDictionary* traits;
+@property(nonatomic, copy) NSDictionary* autoVariant;
+@property(nonatomic, copy) NSDictionary* plainSettings;
 @end
 
 // A game's own settings, made in the app (Nastavení hry: a long press on the game's tile), kept
@@ -99,9 +105,16 @@ NSString* WinPadPadStyle(void);
 // An input's short label in STYLE (a button's face, "L" for the left stick), for the touch controller.
 NSString* WinPadPadLabel(int input, NSString* style);
 
+// Logs "[launch] WHAT: N ms since the process started" (main.m), for how long a launch takes:
+// the process start is the kernel's, so what dyld does before main counts too.
+void WinPadLogLaunch(NSString* what);
+
 @interface LibraryViewController : UIViewController
 // Runs a program: "game" with the game picked, or a test program (hello, window) with nil.
 @property(nonatomic, copy) void (^start)(NSString* program, WinPadGame* game);
+// A game whose launcher started it in the last run (main.m handOff): the library starts it once
+// it shows, as Spustit does (the DLL check and StikDebug's JIT first).
+@property(nonatomic, strong) WinPadGame* handedOver;
 // Installs the packages at URLS (opened from AirDrop, Files or a share sheet) and the ones
 // waiting in Documents, then shows the game.
 - (void)openPackages:(NSArray<NSURL*>*)urls;

@@ -37,7 +37,9 @@ BOOL WinPadDirectXProvides(NSString* dll) {
   return NO;
 }
 
-static NSString* LastRunLog(void) {
+// The last run's log (wine.log, or wine.log.crashed when that is newer), mapped, not read: a
+// game's log can grow to many megabytes, and the library looks into it at every launch.
+static NSData* LastRunLog(void) {
   NSFileManager* fm = NSFileManager.defaultManager;
   NSString* newest = nil;
   NSDate* newest_date = nil;
@@ -49,44 +51,60 @@ static NSString* LastRunLog(void) {
       newest_date = date;
     }
   }
-  return newest ? [NSString stringWithContentsOfFile:newest encoding:NSUTF8StringEncoding error:nil] : nil;
+  return newest ? [NSData dataWithContentsOfFile:newest options:NSDataReadingMappedIfSafe error:nil] : nil;
+}
+
+// The text of LEN bytes at BYTES (UTF-8, else Latin-1, which takes any bytes).
+static NSString* LogText(const char* bytes, size_t len) {
+  return [[NSString alloc] initWithBytes:bytes length:len encoding:NSUTF8StringEncoding]
+             ?: [[NSString alloc] initWithBytes:bytes length:len encoding:NSISOLatin1StringEncoding];
+}
+
+// The line of LOG (SIZE bytes) that the byte at AT is on, without its newline.
+static NSString* LogLine(const char* log, size_t size, const char* at) {
+  const char* begin = at;
+  while (begin > log && begin[-1] != '\n') begin--;
+  const char* end = memchr(at, '\n', size - (size_t)(at - log));
+  return LogText(begin, (size_t)((end ? end : log + size) - begin));
 }
 
 NSString* WinPadFailedChildOfLastRun(void) {
-  NSString* log = LastRunLog();
-  const NSRange failed = log ? [log rangeOfString:@"BOOT FAILED at stage 'guest-window-reserve'"] : NSMakeRange(NSNotFound, 0);
-  if (failed.location == NSNotFound) return nil;
+  NSData* data = LastRunLog();
+  if (!data.length) return nil;
+  const char* log = data.bytes;
+  static const char failed_text[] = "BOOT FAILED at stage 'guest-window-reserve'";
+  const char* failed = memmem(log, data.length, failed_text, sizeof failed_text - 1);
+  if (!failed) return nil;
   // NtCreateUserProcess: image=L"C:\\windows\\~e5.0001" cmdline=...: the last one before it.
-  NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"NtCreateUserProcess: image=L\"([^\"]*)\""
-                                                                      options:0
-                                                                        error:nil];
-  NSArray<NSTextCheckingResult*>* found = [re matchesInString:log options:0 range:NSMakeRange(0, failed.location)];
-  if (!found.count) return @"";
-  NSString* image = [log substringWithRange:[found.lastObject rangeAtIndex:1]];
-  image = [image stringByReplacingOccurrencesOfString:@"\\\\" withString:@"\\"];
-  return [image componentsSeparatedByString:@"\\"].lastObject;
+  static const char create_text[] = "NtCreateUserProcess: image=L\"";
+  const char* image = NULL;
+  for (const char* at = log; (at = memmem(at, (size_t)(failed - at), create_text, sizeof create_text - 1));
+       at += sizeof create_text - 1)
+    image = at + sizeof create_text - 1;
+  if (!image) return @"";
+  const char* quote = memchr(image, '"', (size_t)(failed - image));
+  if (!quote) return @"";
+  NSString* path = [LogText(image, (size_t)(quote - image)) stringByReplacingOccurrencesOfString:@"\\\\" withString:@"\\"];
+  return [path componentsSeparatedByString:@"\\"].lastObject;
 }
 
 NSString* WinPadMissingDLLOfLastRun(void) {
-  NSFileManager* fm = NSFileManager.defaultManager;
-  NSString* newest = nil;
-  NSDate* newest_date = nil;
-  for (NSString* name in @[ @"wine.log", @"wine.log.crashed" ]) {
-    NSString* path = DocumentsFile(name);
-    NSDate* date = [fm attributesOfItemAtPath:path error:nil].fileModificationDate;
-    if (date && (!newest_date || [date compare:newest_date] == NSOrderedDescending)) {
-      newest = path;
-      newest_date = date;
-    }
-  }
-  NSString* log = newest ? [NSString stringWithContentsOfFile:newest encoding:NSUTF8StringEncoding error:nil] : nil;
-  if (!log) return nil;
+  NSData* data = LastRunLog();
+  if (!data.length) return nil;
+  const char* log = data.bytes;
+  const size_t size = data.length;
   // err:module:import_dll Library d3dx9_30.dll (which is needed by L"Z:\\...\\NFSC.exe") not found
-  NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"Library ([^ ()]+\\.dll) \\(which is needed by [^\\n]*\\) not found"
+  NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"Library ([^ ()]+\\.dll) \\(which is needed by .*\\) not found"
                                                                       options:NSRegularExpressionCaseInsensitive
                                                                         error:nil];
-  NSTextCheckingResult* m = [re firstMatchInString:log options:0 range:NSMakeRange(0, log.length)];
-  return m ? [log substringWithRange:[m rangeAtIndex:1]].lowercaseString : nil;
+  static const char needed_text[] = "(which is needed by ";
+  for (const char* at = log; (at = memmem(at, size - (size_t)(at - log), needed_text, sizeof needed_text - 1));
+       at += sizeof needed_text - 1) {
+    NSString* line = LogLine(log, size, at);
+    NSTextCheckingResult* m = [re firstMatchInString:line options:0 range:NSMakeRange(0, line.length)];
+    if (m) return [line substringWithRange:[m rangeAtIndex:1]].lowercaseString;
+  }
+  return nil;
 }
 
 static void AddImport(const char* dll, void* ctx) {
@@ -107,8 +125,11 @@ NSArray<NSString*>* WinPadMissingDLLsOf(NSString* exe, NSString* gameFolder) {
   [have unionSet:LowercaseNames(exe_dir)];
   if (gameFolder) [have unionSet:LowercaseNames(gameFolder)];
   [have unionSet:LowercaseNames([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"i386-windows"])];
+  // A 64-bit game's system DLLs: the ARM64EC set (main.m MakePrefix).
+  [have unionSet:LowercaseNames([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"arm64ec-windows"])];
   [have unionSet:LowercaseNames(DocumentsFile(@"prefix/drive_c/windows/syswow64"))];
   [have unionSet:LowercaseNames(WinPadDirectXDir())];
+  [have unionSet:LowercaseNames(WinPadExtraDir())];
   // The executable and the game's own modules next to it (a DLL only the game loads by name,
   // with LoadLibrary, is not seen: the run's log still names it, WinPadMissingDLLOfLastRun).
   NSMutableArray* files = [NSMutableArray arrayWithObject:exe];
@@ -155,6 +176,13 @@ NSArray<NSString*>* WinPadDirectXLink(NSString* syswow64, NSString* bundleI386) 
 // The download, with its progress.
 @interface WinPadDirectXDownloader : NSObject <NSURLSessionDownloadDelegate>
 @property(nonatomic, copy) void (^progress)(double);
+// Where the download is kept until UNPACK (on a background queue) has done with it.
+@property(nonatomic, copy) NSString* file;
+@property(nonatomic, copy) void (^unpack)(NSString* file);
+// A link that redirects (aka.ms): only a Microsoft host may serve the file.
+@property(nonatomic) BOOL microsoftOnly;
+// The same for NVIDIA's PhysX: only an nvidia.com host.
+@property(nonatomic) BOOL nvidiaOnly;
 @property(nonatomic, copy) void (^done)(NSString* _Nullable);
 @property(nonatomic, strong) NSURLSession* session;
 @end
@@ -227,9 +255,18 @@ static void Unpack(NSString* exe) {
     Finish([NSString stringWithFormat:@"Microsoft odpověděl chybou %ld.", (long)response.statusCode]);
     return;
   }
+  NSString* host = response.URL.host.lowercaseString;
+  if (self.microsoftOnly && !([host isEqualToString:@"microsoft.com"] || [host hasSuffix:@".microsoft.com"])) {
+    Finish([NSString stringWithFormat:@"Soubor nepřišel od Microsoftu (%@).", host ?: @"?"]);
+    return;
+  }
+  if (self.nvidiaOnly && !([host isEqualToString:@"nvidia.com"] || [host hasSuffix:@".nvidia.com"])) {
+    Finish([NSString stringWithFormat:@"Soubor nepřišel od NVIDIE (%@).", host ?: @"?"]);
+    return;
+  }
   // The file at LOCATION is gone after this method returns: move it first.
   NSFileManager* fm = NSFileManager.defaultManager;
-  NSString* exe = DocumentsFile(@".redist/directx_Jun2010_redist.exe");
+  NSString* exe = self.file;
   [fm createDirectoryAtPath:exe.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
   [fm removeItemAtPath:exe error:nil];
   NSError* error = nil;
@@ -241,8 +278,9 @@ static void Unpack(NSString* exe) {
   dispatch_async(dispatch_get_main_queue(), ^{
     if (progress) progress(1);
   });
+  void (^unpack)(NSString*) = self.unpack;
   dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-    Unpack(exe);
+    unpack(exe);
   });
 }
 
@@ -256,6 +294,10 @@ void WinPadDirectXDownload(void (^progress)(double fraction), void (^done)(NSStr
   current = [WinPadDirectXDownloader new];
   current.progress = progress;
   current.done = done;
+  current.file = DocumentsFile(@".redist/directx_Jun2010_redist.exe");
+  current.unpack = ^(NSString* file) {
+    Unpack(file);
+  };
   current.session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration
                                                   delegate:current
                                              delegateQueue:nil];
@@ -303,4 +345,166 @@ NSArray<NSString*>* WinPadDirectXLinkNative(NSString* syswow64, NSArray<NSString
     [native addObject:name.stringByDeletingPathExtension];
   }
   return native;
+}
+
+NSString* WinPadExtraDir(void) {
+  return DocumentsFile(@".redist/extra");
+}
+
+NSArray<NSString*>* WinPadExtraLink(NSString* syswow64, NSString* bundleI386) {
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSMutableArray* linked = [NSMutableArray new];
+  NSString* dir = WinPadExtraDir();
+  for (NSString* name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+    if (![name.pathExtension isEqualToString:@"dll"]) continue;
+    // Wine's own stays (a game that wants Microsoft's says so in its profile's overrides), and
+    // so does a DirectX DLL the download linked.
+    if ([fm fileExistsAtPath:[bundleI386 stringByAppendingPathComponent:name]]) continue;
+    NSString* path = [syswow64 stringByAppendingPathComponent:name];
+    NSDictionary* attrs = [fm attributesOfItemAtPath:path error:nil];
+    if (attrs) continue;
+    if ([fm createSymbolicLinkAtPath:path withDestinationPath:[dir stringByAppendingPathComponent:name] error:nil])
+      [linked addObject:name.stringByDeletingPathExtension];
+  }
+  return linked;
+}
+
+// A folder whose installers are Microsoft's runtimes (Library.m's RedistFolder has more
+// words, for picking the game's program).
+static BOOL InstallerFolder(NSString* name) {
+  NSString* lower = name.lowercaseString;
+  for (NSString* word in @[ @"redist", @"directx", @"dxsetup", @"vcredist", @"vc_redist", @"msvc", @"support", @"prereq",
+                            @"installer", @"3rdparty", @"__installer", @"physx" ])
+    if ([lower containsString:word]) return YES;
+  return NO;
+}
+
+NSArray<NSString*>* WinPadGameInstallers(NSString* gameFolder) {
+  NSFileManager* fm = NSFileManager.defaultManager;
+  NSDirectoryEnumerator* walk = [fm enumeratorAtPath:gameFolder];
+  NSMutableArray* found = [NSMutableArray new];
+  NSUInteger seen = 0;
+  for (NSString* path; (path = walk.nextObject) && seen < 20000; seen++) {
+    NSString* name = path.lastPathComponent;
+    if ([walk.fileAttributes.fileType isEqualToString:NSFileTypeDirectory]) {
+      if ([name hasPrefix:@"."] || walk.level >= 5) [walk skipDescendants];
+      continue;
+    }
+    NSString* lower = name.lowercaseString;
+    NSString* ext = lower.pathExtension;
+    const unsigned long long size = walk.fileAttributes.fileSize;
+    if (size < 1024 || size > 600ull * 1024 * 1024) continue;
+    BOOL in_installers = NO;
+    for (NSString* part in path.stringByDeletingLastPathComponent.pathComponents)
+      if (InstallerFolder(part)) in_installers = YES;
+    const BOOL redist_name = [lower containsString:@"vcredist"] || [lower containsString:@"vc_redist"] ||
+                             [lower containsString:@"directx"] || [lower hasPrefix:@"dxsetup"] ||
+                             [lower containsString:@"physx"];
+    // DirectX's cabinets (Jun2010_d3dx9_43_x86.cab...), .msi files and programs, in an installer
+    // folder or named like one; not the game's own data cabinets (some are hundreds of MB).
+    const BOOL package = [ext isEqualToString:@"cab"] || [ext isEqualToString:@"msi"] || [ext isEqualToString:@"exe"];
+    if (package && (redist_name || in_installers || [lower hasSuffix:@"_x86.cab"]))
+      [found addObject:[gameFolder stringByAppendingPathComponent:path]];
+  }
+  return found;
+}
+
+int WinPadTakeDLLsFromGameInstallers(NSString* gameFolder) {
+  NSString* dir = WinPadExtraDir();
+  [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+  [[NSURL fileURLWithPath:DocumentsFile(@".redist")] setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+  int total = 0;
+  for (NSString* file in WinPadGameInstallers(gameFolder)) {
+    char err[512] = "";
+    int count = 0;
+    if (winpad_redist_extract_dlls(file.fileSystemRepresentation, dir.fileSystemRepresentation, 0x14c, &count, err,
+                                   sizeof(err)))
+      printf("WinPad Wine: %s: %s\n", file.lastPathComponent.UTF8String, err);
+    else if (count)
+      printf("WinPad Wine: %d DLLs out of the game's %s\n", count, file.lastPathComponent.UTF8String);
+    total += count;
+  }
+  return total;
+}
+
+int WinPadVCRedistYearOf(NSString* dll) {
+  return winpad_vcredist_year_of(dll.UTF8String);
+}
+
+void WinPadVCRedistDownload(int year, void (^progress)(double fraction), void (^done)(NSString* _Nullable error)) {
+  const struct winpad_vcredist* vc = winpad_vcredist_for_year(year);
+  if (!vc) {
+    done([NSString stringWithFormat:@"Visual C++ %d neznám.", year]);
+    return;
+  }
+  if (current) return;
+  current = [WinPadDirectXDownloader new];
+  current.progress = progress;
+  current.done = done;
+  current.file = DocumentsFile([NSString stringWithFormat:@".redist/vcredist%d_x86.exe", year]);
+  current.microsoftOnly = YES;
+  NSString* sha = vc->sha256 ? @(vc->sha256) : nil;
+  current.unpack = ^(NSString* file) {
+    NSFileManager* fm = NSFileManager.defaultManager;
+    char err[512] = "", hex[65] = "";
+    NSString* error = nil;
+    if (sha && winpad_redist_sha256(file.fileSystemRepresentation, hex, err, sizeof(err))) {
+      error = [NSString stringWithFormat:@"Stažený soubor nejde přečíst: %s", err];
+    } else if (sha && ![sha isEqualToString:[NSString stringWithUTF8String:hex]]) {
+      error = [NSString stringWithFormat:@"Stažený soubor není instalačka Visual C++ %d od Microsoftu (nesedí jeho SHA-256).", year];
+    } else {
+      NSString* dir = WinPadExtraDir();
+      [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+      int count = 0;
+      if (winpad_redist_extract_dlls(file.fileSystemRepresentation, dir.fileSystemRepresentation, 0x14c, &count, err,
+                                     sizeof(err)))
+        error = [NSString stringWithFormat:@"Rozbalení se nepovedlo: %s", err];
+      else
+        printf("WinPad Wine: Visual C++ %d from Microsoft: %d new DLLs in %s\n", year, count, dir.UTF8String);
+      // Done once per year: what it lacks, another download would not bring.
+      [NSUserDefaults.standardUserDefaults setBool:YES forKey:[NSString stringWithFormat:@"vcredist%d", year]];
+    }
+    [fm removeItemAtPath:file error:nil];
+    Finish(error);
+  };
+  current.session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration
+                                                  delegate:current
+                                             delegateQueue:nil];
+  [[current.session downloadTaskWithURL:[NSURL URLWithString:@(vc->url)]] resume];
+}
+
+BOOL WinPadPhysXProvides(NSString* dll) {
+  NSString* lower = dll.lowercaseString;
+  return [lower isEqualToString:@"physxloader.dll"] || [lower isEqualToString:@"physxcore.dll"] ||
+         [lower isEqualToString:@"physxcooking.dll"] || [lower isEqualToString:@"nxcooking.dll"] ||
+         [lower isEqualToString:@"cudart32_30_9.dll"] || [lower hasPrefix:@"physxdevice"];
+}
+
+void WinPadPhysXDownload(void (^progress)(double fraction), void (^done)(NSString* _Nullable error)) {
+  if (current) return;
+  current = [WinPadDirectXDownloader new];
+  current.progress = progress;
+  current.done = done;
+  current.file = DocumentsFile(@".redist/physx-legacy.msi");
+  current.nvidiaOnly = YES;
+  current.unpack = ^(NSString* file) {
+    NSString* dir = WinPadExtraDir();
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    char err[512] = "";
+    int count = 0;
+    NSString* error = nil;
+    if (winpad_redist_extract_dlls(file.fileSystemRepresentation, dir.fileSystemRepresentation, 0x14c, &count, err,
+                                   sizeof(err)))
+      error = [NSString stringWithFormat:@"Rozbalení se nepovedlo: %s", err];
+    else
+      printf("WinPad Wine: PhysX from NVIDIA: %d new DLLs in %s\n", count, dir.UTF8String);
+    // Once: what the package lacks, another download would not bring.
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"physxDownloaded"];
+    [NSFileManager.defaultManager removeItemAtPath:file error:nil];
+    Finish(error);
+  };
+  current.session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration
+                                                  delegate:current
+                                             delegateQueue:nil];
+  [[current.session downloadTaskWithURL:[NSURL URLWithString:@WINPAD_PHYSX_URL]] resume];
 }

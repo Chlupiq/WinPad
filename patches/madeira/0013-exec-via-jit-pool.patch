@@ -1,0 +1,39 @@
+From: WinPad
+Subject: [PATCH] virtual: Optionally make every image executable through the JIT pool.
+
+On an iPad with TXM mprotect cannot make a file view executable, so
+mprotect_exec copies the image into the JIT pool and its x18 patcher
+rewrites the TEB accesses there. An iPad simulator is a Mac process and
+grants PROT_EXEC on the view, so an ARM64EC module (ntdll for a 64-bit x86
+program) ran from its view unpatched, computed TEB addresses from x18,
+which the kernel keeps at 0, and wrote to 0x3008 during process start.
+
+WINE_IOS_EXEC_VIA_POOL=1 skips the plain mprotect fast path, so every
+image takes the pool copy as on the device. winehost sets it for a 64-bit
+x86 program.
+
+Applies to willfaust/Madeira at 48f9764 (build/), after 0001-0011.
+---
+diff --git a/build/ntdll-unix/virtual_ios.c b/build/ntdll-unix/virtual_ios.c
+index ca80452..38dcfe9 100644
+--- a/build/ntdll-unix/virtual_ios.c
++++ b/build/ntdll-unix/virtual_ios.c
+@@ -12579,7 +12579,17 @@ static inline int mprotect_exec( void *base, size_t size, int unix_prot )
+          * actually granting EXEC — pages stay RW only. Verify by querying the
+          * actual page protection via Mach vm_region_64; only return early if
+          * EXEC was truly granted. */
+-        if (!mprotect( base, size, unix_prot ))
++        /* WinPad: WINE_IOS_EXEC_VIA_POOL=1 skips this fast path, so every image takes the
++         * JIT-pool copy with its x18 patcher as on an iPad with TXM. A simulator (a Mac
++         * process) grants PROT_EXEC on a file view, and ARM64EC code run from there
++         * unpatched computes TEB addresses from x18, which the kernel keeps at 0. */
++        static int exec_via_pool = -1;
++        if (exec_via_pool < 0)
++        {
++            const char *e = getenv( "WINE_IOS_EXEC_VIA_POOL" );
++            exec_via_pool = e && e[0] == '1';
++        }
++        if (!exec_via_pool && !mprotect( base, size, unix_prot ))
+         {
+             mach_vm_address_t addr = (mach_vm_address_t)base;
+             mach_vm_size_t reg_size = 0;

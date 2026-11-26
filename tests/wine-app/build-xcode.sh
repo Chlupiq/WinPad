@@ -46,6 +46,9 @@ mkdir -p "$proj"
 d3d9=
 [ -f "$work/dxmt-iphoneos/libdxmt_combined.a" ] && [ -f "$work/dxmt-iphonesimulator/libdxmt_combined.a" ] &&
     [ -f "$work/i386-windows/d3d9-cube.exe" ] && d3d9=1
+# OpenGL (tests/opengl/build.sh): opengl32's unix side, gl4es and WinPad's EGL.
+opengl=
+[ -f "$work/opengl-iphoneos/libwinpad_opengl.a" ] && [ -f "$work/opengl-iphonesimulator/libwinpad_opengl.a" ] && opengl=1
 # The Mac app (Mac Catalyst) too, when Wine's unix side, its modules and (with D3D9) DXMT were
 # built for it (SDK maccatalyst; build-ntdll.sh and the rest): its files go to lib/macosx and
 # wine/macosx, Xcode's PLATFORM_NAME for it.
@@ -69,9 +72,30 @@ for sdk in $sdks; do
         echo "__clear_cache is a stub for $sdk" >&2
         exit 1
     fi
-    cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
+    # The controllers reach games that read them (padMode xinput/hid) through Madeira's bridge.
+    if grep -qE '^_winios_(gamepad|hidpad)_' "$out/host-$sdk/stubbed" ||
+        grep -qE '_winios_(gamepad|hidpad)_' "$out/host-$sdk/weak-flags"; then
+        echo "the controller bridge (WiniosGamepad.c) is not linked for $sdk" >&2
+        exit 1
+    fi
+    cp "$out/host-$sdk/stubs.o" "$out/host-$sdk/gamepad.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$dir/"
     [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$dir/"
+    if [ -n "$opengl" ] && [ -f "$work/opengl-$sdk/libwinpad_opengl.a" ]; then
+        cp "$work/opengl-$sdk/libwinpad_opengl.a" "$proj/lib/$dir/"
+    elif [ -n "$opengl" ]; then
+        # No OpenGL ES on the Mac (Mac Catalyst has no OpenGLES.framework): an empty archive
+        # keeps one list of libraries for all platforms; the host there leaves opengl32's
+        # unix side undefined (weak-flags), so a GL program finds no driver.
+        stub="$out/no-opengl-$sdk"
+        echo 'static int winpad_no_opengl;' > "$stub.c"
+        # (sdk.sh sets sdk to the SDK's path: in a subshell, so the loop's sdk stays.)
+        (sdk_name=$sdk; . "$root/tests/wine-loader/sdk.sh"
+            # shellcheck disable=SC2086
+            xcrun -sdk "$xcsdk" clang -target "$target" -isysroot "$sdk" $sdk_flags -c "$stub.c" -o "$stub.o")
+        rm -f "$proj/lib/$dir/libwinpad_opengl.a"
+        xcrun ar rcs "$proj/lib/$dir/libwinpad_opengl.a" "$stub.o"
+    fi
     cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$dir/"
 done
 # The Mac's host may leave other hooks undefined than an iPad's: one list for all, each
@@ -89,6 +113,20 @@ if [ -n "$sim_window_aot" ]; then
     cp "$sim_window_aot" "$proj/Frameworks/iphonesimulator/fexaot-window.dylib"
 fi
 cp -R "$work/i386-windows" "$proj/wine/"
+# Madeira's ARM64EC Wine modules, for 64-bit x86 programs (main.m MakePrefix): plain PE
+# files, the same for both platforms, loaded into the JIT pool. Of its test programs only
+# hello-x64.exe and the Direct3D 11 cube-x64.exe come along.
+ec="$work/madeira/app/Madeira/arm64ec-windows"
+if [ -f "$ec/ntdll.dll" ]; then
+    mkdir -p "$proj/wine/arm64ec-windows"
+    for f in "$ec"/*; do
+        case ${f##*/} in
+            hello-x64.exe | cube-x64.exe) ;;
+            *-x64.exe | *-x64.dll) continue ;;
+        esac
+        cp "$f" "$proj/wine/arm64ec-windows/"
+    done
+fi
 mkdir -p "$proj/wine/nls" "$proj/wine/fonts"
 cp "$work"/madeira/wine/nls/*.nls "$proj/wine/nls/"
 # The registry each launch's prefix starts from (main.m's MakePrefix).
@@ -102,7 +140,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/GOG.h" "$here/GOG.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/GOG.h" "$here/GOG.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/GameDetect.h" "$here/GameDetect.c" "$here/WinPadAuto.h" "$here/WinPadAuto.m" "$work/madeira/app/Madeira/Winios/WiniosGamepad.h" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 rm -rf "$proj/profiles"
 mkdir -p "$proj/profiles"
@@ -110,18 +148,19 @@ cp "$here/../../tools/winpad-translator/data/profiles/"*.json "$proj/profiles/"
 # And those made from Proton's umu-protonfixes (import-protonfixes.py), found by Steam or GOG id.
 cp "$here/../../tools/winpad-translator/data/protonfixes.json" "$proj/profiles/"
 # The built-in JIT helper, with StikJIT's sources (build-stikjit.sh) compiled into it.
-cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$here/WinPadMac.entitlements" "$proj/"
+cp -R "$here/JITHelper" "$here/VPN" "$here/WinPad.xcconfig" "$here/WinPadMemory.entitlements" "$here/WinPadMac.entitlements" "$proj/"
 sh "$here/build-stikjit.sh" "$proj/StikJIT"
 # libmspack's cabinet decompressor, for Microsoft's DirectX installer (Redist.c).
 sh "$here/fetch-mspack.sh" "$proj/mspack"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/; s/@CATALYST@/$catalyst_setting/" "$here/project.yml.in"
-    libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
+    libs="winehost.o stubs.o gamepad.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
     frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers NetworkExtension WebKit Security"
     if [ -n "$d3d9" ]; then
         libs="$libs metal-display.o libdxmt_combined.a"
         frameworks="$frameworks Metal QuartzCore IOSurface"
     fi
+    [ -z "$opengl" ] || libs="$libs libwinpad_opengl.a"
     for f in $libs; do
         echo "          - \"\$(PROJECT_DIR)/lib/\$(PLATFORM_NAME)/$f\""
     done
@@ -136,6 +175,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
     schemes="WinPadWine:"
     [ -z "$sim_window_aot" ] || schemes="$schemes WinPadWine_Window:window"
     [ -z "$d3d9" ] || schemes="$schemes WinPadWine_D3D9:d3d9-cube WinPadWine_D3D11:d3d11-triangle WinPadWine_D3D10:d3d10-triangle WinPadWine_Game:game"
+    [ -z "$opengl" ] || schemes="$schemes WinPadWine_OpenGL:gl-triangle"
     if [ "$schemes" != "WinPadWine:" ]; then
         echo 'schemes:'
         for s in $schemes; do
@@ -147,7 +187,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
             echo '      config: Debug'
             # The JIT programs run under Xcode's debugger, which would stop on
             # every signal Wine uses (thread suspend, faults it handles).
-            case ${s#*:} in d3d9-cube|d3d1?-triangle|game)
+            case ${s#*:} in d3d9-cube|d3d1?-triangle|gl-triangle|game)
                 echo '      customLLDBInit: $(SRCROOT)/lldbinit' ;;
             esac
             [ -z "${s#*:}" ] || {
@@ -175,6 +215,11 @@ build() {
         test -f "$product/$f" || { echo "the $1 build lacks $f" >&2; exit 1; }
     done
     test -f "$product/Settings.bundle/Root.plist" || { echo "the $1 build lacks its Settings.bundle" >&2; exit 1; }
+    if [ -d "$proj/wine/arm64ec-windows" ]; then
+        for f in ntdll.dll xtajit64.dll kernel32.dll d3d11.dll dxgi.dll winemetal.dll hello-x64.exe; do
+            test -f "$product/arm64ec-windows/$f" || { echo "the $1 build lacks arm64ec-windows/$f" >&2; exit 1; }
+        done
+    fi
     test -f "$product/profiles/mafia.json" || { echo "the $1 build lacks the game profiles" >&2; exit 1; }
     test -f "$product/PlugIns/WinPadJITHelper.appex/WinPadJITHelper" ||
         { echo "the $1 build lacks the JIT helper extension" >&2; exit 1; }
@@ -395,9 +440,35 @@ for expect in 'library: 6 games' 'library: Morrowind | Morrowind/Morrowind.exe |
     'package: Zed Game.winpad -> Zed Game' 'package: broken.winpad -> Není to balíček WinPad' \
     'library: WinPad Packed | Zed Game/PACKED.EXE | 32bit | image none' \
     'own: Plain | exe Plain/GAME.EXE (auto Other.exe) | screen 800x600 | scaling stretch | programs GAME.EXE, Other.exe, Bin/Tool.exe' \
-    'own: Plain saved | exe scaling screen'; do
+    'own: Plain saved | exe scaling screen' \
+    'auto: d3d9-cube.exe | graphics d3d9 |' 'auto variant: d3d9-cube.exe base | Výchozí: širokoúhlý monitor' \
+    'auto variant: d3d9-cube.exe ms-directx' 'auto variant: d3d9-cube.exe screen-4-3' 'auto variant: d3d9-cube.exe rwx' \
+    'judge: Morrowind | skončila s chybou 0xc0000005 po 0 s | next rwx | own rwx' 'judge: Morrowind | worked | rwx | own rwx' \
+    'share: https://github.com/Chlupiq/WinPad/issues/new?title=Profil%20hry' \
+    'settings: detected 32-bit, graphics unknown' 'settings: automatic settings: variant base (Výchozí)' \
+    'settings: registry (auto): "Version"="win10" in user.reg [Software\Wine\AppDefaults\TEST.EXE]'; do
     grep -qF "$expect" "$docs/library.txt" 2>/dev/null || { echo "missing in the library's report: $expect" >&2; exit 1; }
 done
+# Again: the library now takes what it found from its scan cache (Library/Caches/WinPad/games.json)
+# and walks no game folder, and finds the same.
+cp "$docs/library.txt" "$out/library-first.txt"
+rm -f "$docs/library.txt"
+xcrun simctl launch "$udid" "$bundle" -libraryTest YES -lastGame Plain
+for _ in $(seq 60); do
+    grep -q '== finished' "$docs/library.txt" 2>/dev/null && break
+    sleep 1
+done
+xcrun simctl terminate "$udid" "$bundle" 2>/dev/null || true
+echo "--- the library's report, launched again ---"
+grep '^scan: ' "$out/library-first.txt" "$docs/library.txt" || true
+grep '^library: ' "$out/library-first.txt" >"$out/library-first.games"
+grep '^library: ' "$docs/library.txt" >"$out/library-again.games" || true
+if ! diff "$out/library-first.games" "$out/library-again.games"; then
+    echo "the library found other games from its scan cache" >&2
+    exit 1
+fi
+grep -q '^scan: 6 games, 0 walked' "$docs/library.txt" ||
+    { echo "the library walked game folders again although none changed" >&2; exit 1; }
 [ -f "$docs/Zed Game/DATA/level1.dat" ] && [ ! -e "$docs/Inbox/Zed Game.winpad" ] ||
     { echo "the package was not unpacked into Documents/Zed Game, or is still in the Inbox" >&2; exit 1; }
 # In the prefix as Wine writes keys; the next runs (window.exe) start Wine's server on it.

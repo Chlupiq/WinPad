@@ -324,3 +324,161 @@ out:
   free(data);
   return rc;
 }
+
+// What winpad_redist_extract_dlls needs of a PE file: its machine, whether it is a DLL and
+// the name in its export directory (lowercase, ".dll" added when it has no extension). 0
+// when PATH is a PE DLL with a usable name.
+static int pe_dll_name(const char* path, unsigned* machine, char name[64]) {
+  FILE* f = fopen(path, "rb");
+  if (!f) return -1;
+  fseek(f, 0, SEEK_END);
+  const long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (size < 512 || size > 256L * 1024 * 1024) {
+    fclose(f);
+    return -1;
+  }
+  unsigned char head[2];
+  if (fread(head, 1, 2, f) != 2 || head[0] != 'M' || head[1] != 'Z') {
+    fclose(f);
+    return -1;
+  }
+  unsigned char* data = malloc((size_t)size);
+  fseek(f, 0, SEEK_SET);
+  const size_t got = data ? fread(data, 1, (size_t)size, f) : 0;
+  fclose(f);
+  int rc = -1;
+  if (got != (size_t)size) goto out;
+  const uint32_t nt = le32(data + 60);
+  if ((size_t)nt + 24 > (size_t)size || memcmp(data + nt, "PE\0\0", 4)) goto out;
+  const unsigned char* coff = data + nt + 4;
+  *machine = le16(coff);
+  const unsigned nsections = le16(coff + 2), opt_size = le16(coff + 16), flags = le16(coff + 18);
+  const unsigned char* opt = coff + 20;
+  if (!(flags & 0x2000)) goto out;  // IMAGE_FILE_DLL
+  if ((size_t)(opt - data) + opt_size + (size_t)nsections * 40 > (size_t)size || opt_size < 2) goto out;
+  const uint16_t magic = le16(opt);
+  const unsigned dirs_at = magic == 0x10b ? 96 : magic == 0x20b ? 112 : 0;
+  if (!dirs_at || opt_size < dirs_at + 8) goto out;
+  const uint32_t export_rva = le32(opt + dirs_at);
+  const struct pe_file pe = {data, (size_t)size, opt + opt_size, nsections};
+  const size_t dir = export_rva ? pe_offset(&pe, export_rva) : 0;
+  if (!dir || dir + 16 > (size_t)size) goto out;
+  const size_t at = pe_offset(&pe, le32(data + dir + 12));
+  if (!at) goto out;
+  size_t n = 0;
+  for (; at + n < (size_t)size && n < 50; n++) {
+    unsigned char c = data[at + n];
+    if (!c) break;
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) goto out;
+    name[n] = (char)c;
+  }
+  if (!n || n >= 50 || name[0] == '.') goto out;
+  name[n] = 0;
+  if (!strchr(name, '.')) strcat(name, ".dll");
+  rc = 0;
+out:
+  free(data);
+  return rc;
+}
+
+static int extract_dlls(struct mscab_decompressor* cabd, const char* path, const char* dest, unsigned machine,
+                        int depth, int* count) {
+  struct mscabd_cabinet* found = cabd->search(cabd, path);
+  if (!found) return 0;
+  for (struct mscabd_cabinet* c = found; c; c = c->next) {
+    for (struct mscabd_file* f = c->files; f; f = f->next) {
+      // Not a DLL or a package of them: help files, manifests, policies...
+      if (f->length < 512 || f->length > 200u * 1024 * 1024) continue;
+      char tmp[1024];
+      snprintf(tmp, sizeof(tmp), "%s/.extract-%d", dest, depth);
+      if (cabd->extract(cabd, f, tmp) != MSPACK_ERR_OK) {
+        unlink(tmp);
+        continue;
+      }
+      unsigned m = 0;
+      char name[64];
+      if (!pe_dll_name(tmp, &m, name)) {
+        if (m == machine) {
+          char out[1200];
+          snprintf(out, sizeof(out), "%s/%s", dest, name);
+          if (access(out, F_OK) && !rename(tmp, out)) (*count)++;
+        }
+      } else if (depth < 3) {
+        extract_dlls(cabd, tmp, dest, machine, depth + 1, count);
+      }
+      unlink(tmp);
+    }
+  }
+  cabd->close(cabd, found);
+  return 0;
+}
+
+int winpad_redist_extract_dlls(const char* path, const char* dest, unsigned machine, int* count, char* err,
+                               size_t errlen) {
+  *count = 0;
+  if (access(path, R_OK)) {
+    say(err, errlen, "%s: %s", path, strerror(errno));
+    return -1;
+  }
+  struct mscab_decompressor* cabd = mspack_create_cab_decompressor(NULL);
+  if (!cabd) {
+    say(err, errlen, "libmspack: no cabinet decompressor");
+    return -1;
+  }
+  // Damaged or false cabinets (MSCF inside other data) are skipped, not errors.
+  cabd->set_param(cabd, MSCABD_PARAM_FIXMSZIP, 1);
+  // A cabinet stored as a stream of an .msi (vc_red.msi of 2005/2008) can be in pieces: what
+  // fails its checksums is left out.
+  const int rc = extract_dlls(cabd, path, dest, machine, 0, count);
+  mspack_destroy_cab_decompressor(cabd);
+  return rc;
+}
+
+// Winetricks' load_vcrun* (Winetricks/winetricks src/winetricks, 2025): the 32-bit installers.
+static const struct winpad_vcredist vcredists[] = {
+    {2005, "https://download.microsoft.com/download/8/B/4/8B42259F-5D70-43F4-AC2E-4B208FD8D66A/vcredist_x86.EXE",
+     "8648c5fc29c44b9112fe52f9a33f80e7fc42d10f3b5b42b2121542a13e44adfd"},
+    {2008, "https://download.microsoft.com/download/5/D/8/5D8C65CB-C849-4025-8E95-C3966CAFD8AE/vcredist_x86.exe",
+     "8742bcbf24ef328a72d2a27b693cc7071e38d3bb4b9b44dec42aa3d2c8d61d92"},
+    {2010, "https://download.microsoft.com/download/5/B/C/5BC5DBB3-652D-4DCE-B14A-475AB85EEF6E/vcredist_x86.exe",
+     "31d32fa39d52cac9a765a43660431f7a127eee784b54b2f5e2af3e2b763a1af8"},
+    {2012,
+     "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x86.exe",
+     "b924ad8062eaf4e70437c8be50fa612162795ff0839479546ce907ffa8d6e386"},
+    {2013, "https://download.microsoft.com/download/0/5/6/056dcda9-d667-4e27-8001-8a0c6971d6b1/vcredist_x86.exe",
+     "89f4e593ea5541d1c53f983923124f9fd061a1c0c967339109e375c661573c17"},
+    // Microsoft replaces it with each update (winetricks' checksum changes every few months).
+    {2022, "https://aka.ms/vs/17/release/vc_redist.x86.exe", NULL},
+};
+
+const struct winpad_vcredist* winpad_vcredist_for_year(int year) {
+  for (size_t i = 0; i < sizeof(vcredists) / sizeof(vcredists[0]); i++)
+    if (vcredists[i].year == year) return &vcredists[i];
+  return NULL;
+}
+
+int winpad_vcredist_year_of(const char* dll) {
+  static const char* const families[] = {"mfcm", "mfc", "msvcm", "msvcp", "msvcr", "vcomp", "atl",
+                                         "vcruntime", "concrt", "vccorlib", "vcamp"};
+  char name[64];
+  size_t n = 0;
+  for (; dll[n] && n < sizeof(name) - 1; n++) name[n] = (char)(dll[n] >= 'A' && dll[n] <= 'Z' ? dll[n] + 32 : dll[n]);
+  name[n] = 0;
+  for (size_t i = 0; i < sizeof(families) / sizeof(families[0]); i++) {
+    const size_t len = strlen(families[i]);
+    if (strncmp(name, families[i], len) || name[len] < '0' || name[len] > '9') continue;
+    const int version = atoi(name + len);
+    switch (version) {
+      case 80: return 2005;
+      case 90: return 2008;
+      case 100: return 2010;
+      case 110: return 2012;
+      case 120: return 2013;
+      case 140: return 2022;
+      default: return 0;
+    }
+  }
+  return 0;
+}
