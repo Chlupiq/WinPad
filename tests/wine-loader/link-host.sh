@@ -2,7 +2,7 @@
 # Links host/winehost.c with the libntdll_unix.a, libwin32u_unix.a and
 # libwineserver.a that build-ntdll.sh, build-win32u.sh and build-wineserver.sh
 # built for SDK. What the app around Madeira's Wine would provide
-# (Swift bridges, the gamepad, DXMT, FEX) is not linked: every symbol the
+# (Swift bridges, DXMT, FEX) is not linked: every symbol the
 # linker reports missing gets a stub that logs its first call and returns 0.
 # Except the weak winios_* hooks of win32u's display driver: those stay
 # undefined (NULL), so the driver falls back to Wine's null driver,
@@ -48,6 +48,13 @@ fi
 if [ -f "$work/opengl-$sdk_name/libwinpad_opengl.a" ]; then
     libs="$libs $work/opengl-$sdk_name/libwinpad_opengl.a"
 fi
+
+# Madeira's controller bridge (WiniosGamepad.c): the snapshot win32u's ios_gamepad_query
+# hands Wine's xinput, and the HID pad the wineserver serves (hidpad_ios.c) to DirectInput.
+# The app writes the iPad's controllers into it (tests/wine-app/main.m).
+# shellcheck disable=SC2086
+$cc -O1 -g -Wall -c "$work/madeira/app/Madeira/Winios/WiniosGamepad.c" -o "$out/gamepad.o"
+objs="$objs $out/gamepad.o"
 
 # shellcheck disable=SC2086 # $cc and $libs are lists
 $cc -O1 -g -Wall -c "$here/host/winehost.c" -o "$out/winehost.o"

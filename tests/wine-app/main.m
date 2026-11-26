@@ -57,7 +57,7 @@
 #import "Library.h"
 #import "WinPadJIT.h"
 #import "WinPadAuto.h"
-#include "winpad-pad.h"  // tests/xinput, copied beside it into the project
+#include "WiniosGamepad.h"  // Madeira's controller bridge to Wine (link-host.sh links it)
 #import "WinPadRedist.h"
 
 #include <dlfcn.h>
@@ -525,13 +525,15 @@ static BOOL pad_in[2][PadCount];  // what the controllers and the touch controll
 static BOOL pad_down[256];        // the keys the controllers hold down
 static BOOL pad_sent;             // a controller has sent a key
 
-// A game that reads an Xbox controller (its "padMode" "xinput", WinPadAuto.m for games that
-// import XInput): the controllers go to it as one, through winpad-xinput.dll (tests/xinput),
-// instead of as keys. The app writes their state into Documents/.winpad-pad (winpad-pad.h),
-// which the DLL reads.
-static BOOL pad_xinput;
-static int pad_fd = -1;
-static struct winpad_pad pad_state;
+// A game that reads a controller itself (its "padMode", WinPadAuto.m for games that import
+// XInput): the controllers go to it as one instead of as keys, through Madeira's bridge
+// (WiniosGamepad.h). "xinput": an Xbox controller, which Wine's xinput reads through win32u
+// (ios_gamepad_query), 32- and 64-bit. "hid": a generic HID game controller the wineserver
+// serves (hidpad_ios.c, MADEIRA_HIDPAD), which DirectInput, hid.dll and Windows.Gaming.Input see.
+enum { PadAsKeys, PadAsXInput, PadAsHID };
+static int pad_native = PadAsKeys;
+static struct winios_gamepad pad_sample;
+static BOOL pad_sample_set;
 static float pad_analog[6];       // the controller's left x, y, right x, y, left and right trigger
 static BOOL pad_thumb[2];         // its stick buttons
 static BOOL pad_controller;       // a controller is connected
@@ -544,10 +546,10 @@ static int16_t PadAxis(float value, BOOL minus, BOOL plus) {
   return (int16_t)(v < 0 ? v * 32768 : v * 32767);
 }
 
-// Writes the state of both controllers as one Xbox controller (ApplyPad's PAD_IN, with the
+// Gives the game the state of both controllers as one (ApplyPad's PAD_IN, with the
 // controller's sticks and triggers as they are).
-static void WriteXInput(void) {
-  if (pad_fd < 0) return;
+static void WritePad(void) {
+  if (pad_native == PadAsKeys) return;
   const BOOL* c = pad_in[PadFromController];
   const BOOL* t = pad_in[PadFromTouch];
 #define HELD(i) (c[i] || t[i])
@@ -557,8 +559,7 @@ static void WriteXInput(void) {
   } map[] = {{PadUp, 0x0001},   {PadDown, 0x0002}, {PadLeft, 0x0004}, {PadRight, 0x0008}, {PadMenu, 0x0010},
              {PadOptions, 0x0020}, {PadL1, 0x0100}, {PadR1, 0x0200}, {PadA, 0x1000},   {PadB, 0x2000},
              {PadX, 0x4000},    {PadY, 0x8000}};
-  struct winpad_pad p = pad_state;
-  p.magic = WINPAD_PAD_MAGIC;
+  struct winios_gamepad p = {0};
   p.connected = pad_controller || pad_touch;
   uint16_t buttons = 0;
   for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
@@ -567,37 +568,42 @@ static void WriteXInput(void) {
   if (pad_thumb[1]) buttons |= 0x0080;
   p.buttons = buttons;
   // The touch controller's sticks and triggers are all or nothing; a controller's as they are.
-  p.thumb_lx = PadAxis(pad_analog[0], t[PadLLeft], t[PadLRight]);
-  p.thumb_ly = PadAxis(pad_analog[1], t[PadLDown], t[PadLUp]);
-  p.thumb_rx = PadAxis(pad_analog[2], t[PadRLeft], t[PadRRight]);
-  p.thumb_ry = PadAxis(pad_analog[3], t[PadRDown], t[PadRUp]);
+  p.lx = PadAxis(pad_analog[0], t[PadLLeft], t[PadLRight]);
+  p.ly = PadAxis(pad_analog[1], t[PadLDown], t[PadLUp]);
+  p.rx = PadAxis(pad_analog[2], t[PadRLeft], t[PadRRight]);
+  p.ry = PadAxis(pad_analog[3], t[PadRDown], t[PadRUp]);
   p.left_trigger = t[PadL2] ? 255 : (uint8_t)(pad_analog[4] * 255);
   p.right_trigger = t[PadR2] ? 255 : (uint8_t)(pad_analog[5] * 255);
 #undef HELD
-  if (p.connected == pad_state.connected && p.buttons == pad_state.buttons && p.left_trigger == pad_state.left_trigger &&
-      p.right_trigger == pad_state.right_trigger && p.thumb_lx == pad_state.thumb_lx && p.thumb_ly == pad_state.thumb_ly &&
-      p.thumb_rx == pad_state.thumb_rx && p.thumb_ry == pad_state.thumb_ry && pad_state.magic)
+  if (pad_sample_set && !memcmp(&p, &pad_sample, sizeof(p))) return;
+  if (!pad_sample_set || p.buttons != pad_sample.buttons || p.connected != pad_sample.connected)
+    printf("gamepad: %s buttons %#x%s\n", pad_native == PadAsHID ? "HID" : "XInput", p.buttons,
+           p.connected ? "" : " (not connected)");
+  pad_sample = p;
+  pad_sample_set = YES;
+  if (pad_native == PadAsXInput) {
+    // The bridge numbers the samples (packet) itself.
+    winios_gamepad_set_state(0, p.connected ? &p : NULL);
     return;
-  if (p.buttons != pad_state.buttons || p.connected != pad_state.connected)
-    printf("gamepad: XInput buttons %#x%s\n", p.buttons, p.connected ? "" : " (not connected)");
-  p.packet = pad_state.packet + 1;
-  // Odd while written, as winpad-xinput.dll expects (it reads again).
-  p.seq = pad_state.seq + 1;
-  p.seq_end = 0;
-  pwrite(pad_fd, &p, sizeof(p), 0);
-  p.seq++;
-  p.seq_end = p.seq;
-  pwrite(pad_fd, &p, sizeof(p), 0);
-  pad_state = p;
+  }
+  struct winios_hidpad h = {0};
+  h.connected = p.connected;
+  h.buttons = p.buttons;
+  if (p.left_trigger > 30) h.buttons |= WINIOS_HIDPAD_L2;
+  if (p.right_trigger > 30) h.buttons |= WINIOS_HIDPAD_R2;
+  h.lx = p.lx, h.ly = p.ly, h.rx = p.rx, h.ry = p.ry;
+  h.left_trigger = p.left_trigger, h.right_trigger = p.right_trigger;
+  h.battery = WINIOS_HIDPAD_BATTERY_UNKNOWN;
+  winios_hidpad_set_state(p.connected ? &h : NULL);
 }
 
 // Sends the keys whose state changed with this snapshot of a controller's
 // inputs; a key is down while either controller holds an input that is it.
 static void ApplyPad(int from, const BOOL in[PadCount]) {
   memcpy(pad_in[from], in, sizeof pad_in[from]);
-  if (pad_xinput) {
+  if (pad_native != PadAsKeys) {
     pad_sent = YES;
-    WriteXInput();
+    WritePad();
     return;
   }
   BOOL want[256] = {NO};
@@ -973,7 +979,7 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
     if (!c.extendedGamepad) return;
     printf("gamepad: %s connected\n", (c.vendorName ?: @"a controller").UTF8String);
     pad_controller = YES;
-    WriteXInput();
+    WritePad();
     // The Xbox/Home button ends the game (RequestExit) instead of opening the system's menu.
     if (@available(iOS 14.0, *)) c.extendedGamepad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
@@ -986,7 +992,7 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
     [view addSubview:touch_pad];
     printf("gamepad: the touch controller connected\n");
     pad_touch = YES;
-    WriteXInput();
+    WritePad();
   }
   for (GCController* c in GCController.controllers) attach(c);
   NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
@@ -1361,35 +1367,26 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     [said addObject:[NSString stringWithFormat:@"the game's profile wants DirectX from Microsoft (%@), which is not "
                                                @"downloaded",
                                                [want_dx componentsJoinedByString:@" "]]];
-  // A game that reads an Xbox controller (padMode "xinput", 32-bit): winpad-xinput.dll as
-  // its XInput, native first, and the file the app writes the controllers' state into.
+  // A game that reads a controller itself (padMode "xinput" or "hid"): the controllers go to
+  // it through Madeira's bridge instead of as keys (WritePad). The wineserver serves the HID
+  // controller only when MADEIRA_HIDPAD is set before it starts.
   NSString* pad_mode = [s[@"padMode"] isKindOfClass:NSString.class] ? s[@"padMode"] : @"keys";
-  NSString* bundle_xinput = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"i386-windows/winpad-xinput.dll"];
-  if ([pad_mode isEqualToString:@"xinput"] && [game.arch isEqualToString:@"32bit"] &&
-      [NSFileManager.defaultManager fileExistsAtPath:bundle_xinput]) {
-    NSFileManager* fm = NSFileManager.defaultManager;
-    NSString* syswow64 = [prefix stringByAppendingPathComponent:@"drive_c/windows/syswow64"];
-    for (NSString* name in @[ @"xinput1_1", @"xinput1_2", @"xinput1_3", @"xinput1_4", @"xinput9_1_0" ]) {
-      NSString* path = [syswow64 stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"dll"]];
-      NSDictionary* attrs = [fm attributesOfItemAtPath:path error:nil];
-      // Only the app's own links (MakePrefix's, to Wine's DLL): a file a program put there stays.
-      if (attrs && ![attrs.fileType isEqualToString:NSFileTypeSymbolicLink]) continue;
-      [fm removeItemAtPath:path error:nil];
-      if ([fm createSymbolicLinkAtPath:path withDestinationPath:bundle_xinput error:nil]) dlls[name] = @"n";
-    }
-    NSString* file = DocumentsPath(@".winpad-pad");
-    if (pad_fd >= 0) close(pad_fd);
-    pad_fd = open(file.fileSystemRepresentation, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    memset(&pad_state, 0, sizeof(pad_state));
-    pad_xinput = pad_fd >= 0;
-    WriteXInput();
-    NSString* windows = [@"Z:" stringByAppendingString:[file stringByReplacingOccurrencesOfString:@"/" withString:@"\\"]];
-    setenv("WINPAD_PAD_FILE", windows.UTF8String, 1);
-    [said addObject:[NSString stringWithFormat:@"controller: as an Xbox controller (XInput, winpad-xinput.dll), state in %@",
-                                               windows]];
+  unsetenv("MADEIRA_HIDPAD");
+  memset(&pad_sample, 0, sizeof(pad_sample));
+  pad_sample_set = NO;
+  if ([pad_mode isEqualToString:@"xinput"]) {
+    pad_native = PadAsXInput;
+    [said addObject:@"controller: as an Xbox controller (XInput)"];
+  } else if ([pad_mode isEqualToString:@"hid"]) {
+    pad_native = PadAsHID;
+    setenv("MADEIRA_HIDPAD", "generic", 1);
+    setenv("MADEIRA_HIDPAD_NAME", "WinPad Controller", 1);
+    [said addObject:@"controller: as a HID game controller (DirectInput)"];
   } else {
+    pad_native = PadAsKeys;
     [said addObject:@"controller: as keys"];
   }
+  WritePad();
   NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
   NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
   if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {

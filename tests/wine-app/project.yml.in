@@ -85,6 +85,7 @@ targets:
       # settings and variants that follow from it.
       - GameDetect.h
       - GameDetect.c
+      - WiniosGamepad.h
       - WinPadAuto.h
       - WinPadAuto.m
       - WinPadRedist.h

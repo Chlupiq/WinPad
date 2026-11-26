@@ -2259,7 +2259,9 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameAutoSection
         NSString* mine = [self own:@"padMode"];
         NSString* mode = mine ?: self.variant[@"settings"][@"padMode"] ?: @"keys";
         cell.textLabel.text = @"Ovladač";
-        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@%@", [mode isEqualToString:@"xinput"] ? @"Jako ovladač Xbox" : @"Jako klávesy",
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@%@", [mode isEqualToString:@"xinput"] ? @"Jako ovladač Xbox"
+                                                               : [mode isEqualToString:@"hid"] ? @"Jako herní ovladač (DirectInput)"
+                                                                                               : @"Jako klávesy",
                                                                mine ? @"" : @" (automaticky)"];
       } else {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
@@ -2334,7 +2336,8 @@ enum { GameCoverSection, GameProgramSection, GamePictureSection, GameAutoSection
   list.title = @"Ovladač";
   list.choices = @[
     @[ @"Automaticky", @"Jako ovladač Xbox, když ho hra umí (XInput), jinak jako klávesy", NSNull.null ],
-    @[ @"Jako ovladač Xbox", @"Hra dostane ovladač přímo (XInput); jen 32bitové hry", @"xinput" ],
+    @[ @"Jako ovladač Xbox", @"Hra dostane ovladač přímo (XInput), i s analogovými páčkami a spouštěmi", @"xinput" ],
+    @[ @"Jako herní ovladač (DirectInput)", @"Pro starší hry, které umí joystick nebo gamepad přes DirectInput; ve hře ho pak vyber v nastavení ovládání", @"hid" ],
     @[ @"Jako klávesy", @"Tlačítka a páčky jsou klávesy podle Nastavení › Ovladač", @"keys" ],
   ];
   list.chosen = [self own:@"padMode"];

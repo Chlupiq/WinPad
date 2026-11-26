@@ -62,7 +62,13 @@ for sdk in iphoneos iphonesimulator; do
         echo "__clear_cache is a stub for $sdk" >&2
         exit 1
     fi
-    cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
+    # The controllers reach games that read them (padMode xinput/hid) through Madeira's bridge.
+    if grep -qE '^_winios_(gamepad|hidpad)_' "$out/host-$sdk/stubbed" ||
+        grep -qE '_winios_(gamepad|hidpad)_' "$out/host-$sdk/weak-flags"; then
+        echo "the controller bridge (WiniosGamepad.c) is not linked for $sdk" >&2
+        exit 1
+    fi
+    cp "$out/host-$sdk/stubs.o" "$out/host-$sdk/gamepad.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$sdk/"
     [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$sdk/"
     [ -z "$opengl" ] || cp "$work/opengl-$sdk/libwinpad_opengl.a" "$proj/lib/$sdk/"
@@ -106,7 +112,7 @@ find "$work/madeira/wine/fonts" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*
 echo "Wine files in the project:"
 du -sh "$proj"/wine/* "$proj"/wine/*/aarch64-windows "$proj"/lib/* | sed 's/^/  /'
 
-cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/GOG.h" "$here/GOG.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/GameDetect.h" "$here/GameDetect.c" "$here/WinPadAuto.h" "$here/WinPadAuto.m" "$here/../xinput/winpad-pad.h" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
+cp "$here/main.m" "$here/Library.h" "$here/Library.m" "$here/Covers.h" "$here/Covers.m" "$here/GOG.h" "$here/GOG.m" "$here/Package.h" "$here/Package.c" "$here/JITPool.h" "$here/JITPool.c" "$here/WinPadJIT.h" "$here/WinPadJIT.m" "$here/Redist.h" "$here/Redist.c" "$here/WinPadRedist.h" "$here/WinPadRedist.m" "$here/GameDetect.h" "$here/GameDetect.c" "$here/WinPadAuto.h" "$here/WinPadAuto.m" "$work/madeira/app/Madeira/Winios/WiniosGamepad.h" "$here/Info.plist" "$here/README.md" "$here/make-ipa.sh" "$proj/"
 cp -R "$here/Settings.bundle" "$proj/"
 rm -rf "$proj/profiles"
 mkdir -p "$proj/profiles"
@@ -120,7 +126,7 @@ sh "$here/build-stikjit.sh" "$proj/StikJIT"
 sh "$here/fetch-mspack.sh" "$proj/mspack"
 {
     sed "s/@MIN_IOS@/$min_ios/; s/@BUNDLE@/$bundle/" "$here/project.yml.in"
-    libs="winehost.o stubs.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
+    libs="winehost.o stubs.o gamepad.o libntdll_unix.a libwin32u_unix.a libwineserver.a"
     frameworks="Foundation CoreFoundation CoreText CoreGraphics AudioToolbox AVFoundation GameController PhotosUI UniformTypeIdentifiers NetworkExtension WebKit Security"
     if [ -n "$d3d9" ]; then
         libs="$libs metal-display.o libdxmt_combined.a"

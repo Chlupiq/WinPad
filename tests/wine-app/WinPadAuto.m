@@ -232,9 +232,11 @@ NSArray<NSDictionary*>* WinPadAutoVariants(NSDictionary* traits, NSString* exeNa
     base[@"padMouse"] = @"right";
     [said addObject:@"pravá páčka ovládá myš"];
   }
-  // A game that reads an Xbox controller gets the controllers as one (winpad-xinput.dll),
-  // not as keys; 32-bit games for now.
-  if (x86 && Uses(traits, @"xinput") && !settings[@"padMode"]) {
+  // A game that reads an Xbox controller gets the controllers as one (Wine's xinput through
+  // Madeira's bridge, main.m), not as keys. DirectInput alone says nothing of a joystick
+  // (most games read the keyboard with it), so those keep the keys; the game's settings
+  // can make it a HID controller ("hid").
+  if (Uses(traits, @"xinput") && !settings[@"padMode"]) {
     base[@"padMode"] = @"xinput";
     [said addObject:@"ovladač jako Xbox"];
   }
@@ -255,7 +257,7 @@ NSArray<NSDictionary*>* WinPadAutoVariants(NSDictionary* traits, NSString* exeNa
   NSMutableArray* verbs = [NSMutableArray new];
   if (Uses(traits, @"d3dx") || [graphics isEqual:@"d3d9"]) [verbs addObject:@"d3dx9"];
   if (Uses(traits, @"xaudio")) [verbs addObject:@"xact"];
-  if (Uses(traits, @"xinput")) [verbs addObject:@"xinput"];
+  // Not xinput: Microsoft's sees no controller here, Wine's gets the iPad's.
   if (x86 && verbs.count && !settings[@"nativeDirectX"])
     add(@"ms-directx", @"DirectX od Microsoftu místo Wine", @{@"nativeDirectX" : verbs});
   if (ddraw) add(@"ddraw-gl", @"DirectDraw přes OpenGL", @{@"registryForce" : @{d3d_key : @{@"renderer" : @"gl"}}});

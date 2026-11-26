@@ -170,15 +170,12 @@ done
     -Wl,--entry=_start -Wl,--large-address-aware \
     -DWINPAD_GL_SECONDS="${GL_TRIANGLE_SECONDS:-8}" \
     -o "$out/gl-triangle.exe" "$here/gl-triangle.c" -lkernel32 -luser32 -lgdi32 -lopengl32
-# XInput for games that read an Xbox controller, fed by the iPad's controllers (tests/xinput,
-# main.m links it in as xinput1_3 & co. for such a game).
-sh "$here/../xinput/build.sh" "$tc" i686 "$out"
 # MinGW's import libraries name USER32.dll and GDI32.dll, which Wine does not
 # find in these runs; see lowercase-imports.py.
 python3 -I "$here/lowercase-imports.py" "$out/winemetal.dll" "$out/d3d9.dll" "$out/d3d9shim.dll" \
     "$out/d3d9-emulated.dll" "$out/d3d9-cube.exe" "$out/d3d8.dll" "$out/d3d8-cube.exe" \
     "$out/dxgi.dll" "$out/d3d11.dll" "$out/d3d10core.dll" "$out/d3d11-triangle.exe" "$out/d3d10-triangle.exe" \
-    "$out/gl-triangle.exe" "$out/winpad-xinput.dll"
+    "$out/gl-triangle.exe"
 
 # Every DLL a module imports has to be there (api-ms-win-* resolve through
 # the API set schema, to ucrtbase).
