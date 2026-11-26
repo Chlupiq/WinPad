@@ -112,6 +112,35 @@ s = s.replace(old, '''static inline TEB *get_teb64( ULONG teb32 )
 old = 'return (GLsync)(UINT_PTR)sync->unix_handle;'
 assert old in s, 'get_unix_sync changed upstream'
 s = s.replace(old, 'return (GLsync)(UINT_PTR)((struct __GLsync *)winpad_gl_client_ptr( sync ))->unix_handle;')
+# The 32-bit array the thunks copy (glShaderSource's strings, glBindBuffersRange's offsets...)
+# is at a guest address; its elements are pointers only for the string arrays (wow64-ptrs.py
+# makes those calls copy_wow64_str32s): offsets, sizes and indirect offsets stay numbers.
+old = '''    ULONG *ptrs = (ULONG *)address;
+    void **tmp;
+
+    if (!ptrs || !(tmp = calloc( count, sizeof(*tmp) ))) return NULL;
+    while (count--) tmp[count] = ULongToPtr(ptrs[count]);
+    return tmp;
+}'''
+assert old in s, 'copy_wow64_ptr32s changed upstream'
+s = s.replace(old, '''    ULONG *ptrs = ios_wow_host_ptr( address );  /* WinPad: a guest address */
+    void **tmp;
+
+    if (!ptrs || !(tmp = calloc( count, sizeof(*tmp) ))) return NULL;
+    while (count--) tmp[count] = ULongToPtr(ptrs[count]);
+    return tmp;
+}
+
+/* WinPad: an array of guest pointers (strings) as host pointers. */
+static inline void *copy_wow64_str32s( UINT_PTR address, ULONG count )
+{
+    ULONG *ptrs = ios_wow_host_ptr( address );
+    void **tmp;
+
+    if (!ptrs || !(tmp = calloc( count, sizeof(*tmp) ))) return NULL;
+    while (count--) tmp[count] = ios_wow_host_ptr( ptrs[count] );
+    return tmp;
+}''')
 open(p, 'w').write(s)
 EOF
 # The client objects (context, pbuffer, sync) of a 32-bit program are at guest addresses.

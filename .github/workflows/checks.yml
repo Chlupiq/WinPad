@@ -965,6 +965,7 @@ jobs:
           WINEHOST_EXPECT_LOG: |
             WINPAD-GL: context current
             WINPAD-GL: glActiveTextureARB found
+            WINPAD-GL: the shader from two strings compiled
             WINPAD-GL: the textured quad drew
             winpad-egl: swap 1 of surface
             opengl32 (WinPad, gl4es)

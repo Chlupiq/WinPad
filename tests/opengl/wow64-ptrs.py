@@ -60,8 +60,26 @@ def map_ret(m):
 
 src = re.sub(r'params->ret = \(UINT_PTR\)(wow64_glMap\w*\(.*\));', map_ret, src)
 
+# Arrays of strings (glShaderSource, glTransformFeedbackVaryings, glGetUniformIndices,
+# glCompileShaderIncludeARB, glCreateShaderProgramv): their elements are guest pointers too.
+# copy_wow64_str32s is added to unix_private.h by build.sh.
+STRINGS = {'string', 'strings', 'path', 'uniformNames', 'varyings'}
+
+
+def str_arrays(m):
+    if m.group(2) not in STRINGS:
+        return m.group(0)
+    counts['strs'] = counts.get('strs', 0) + 1
+    return '%s = copy_wow64_str32s( params->%s' % (m.group(1), m.group(2))
+
+
+src = re.sub(r'(\w+) = copy_wow64_ptr32s\( params->(\w+)', str_arrays, src)
+if counts.get('strs', 0) < 5:
+    sys.exit('wow64-ptrs: expected the string arrays (glShaderSource...) in unix_thunks.c, found %d'
+             % counts.get('strs', 0))
+
 left = re.findall(r'U[Ll]ongToPtr\(params->(\w+)\)', src)
 unexpected = sorted(set(n for n in left if n not in KEEP))
 open(sys.argv[2], 'w').write(src)
 print('wow64-ptrs: %(host)d pointers converted to host, %(kept)d handles/offsets kept, '
-      '%(guest)d pointers written back as guest addresses' % counts)
+      '%(guest)d pointers written back as guest addresses, %(strs)d string arrays' % counts)
