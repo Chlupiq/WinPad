@@ -46,6 +46,9 @@ mkdir -p "$proj"
 d3d9=
 [ -f "$work/dxmt-iphoneos/libdxmt_combined.a" ] && [ -f "$work/dxmt-iphonesimulator/libdxmt_combined.a" ] &&
     [ -f "$work/i386-windows/d3d9-cube.exe" ] && d3d9=1
+# OpenGL (tests/opengl/build.sh): opengl32's unix side, gl4es and WinPad's EGL.
+opengl=
+[ -f "$work/opengl-iphoneos/libwinpad_opengl.a" ] && [ -f "$work/opengl-iphonesimulator/libwinpad_opengl.a" ] && opengl=1
 
 for sdk in iphoneos iphonesimulator; do
     test -f "$work/modules-$sdk/aarch64-windows/xtajit.dll.dylib" ||
@@ -62,6 +65,7 @@ for sdk in iphoneos iphonesimulator; do
     cp "$out/host-$sdk/stubs.o" "$work/ntdll-$sdk/libntdll_unix.a" "$work/win32u-$sdk/libwin32u_unix.a" \
         "$work/wineserver-$sdk/libwineserver.a" "$proj/lib/$sdk/"
     [ -z "$d3d9" ] || cp "$out/host-$sdk/metal-display.o" "$work/dxmt-$sdk/libdxmt_combined.a" "$proj/lib/$sdk/"
+    [ -z "$opengl" ] || cp "$work/opengl-$sdk/libwinpad_opengl.a" "$proj/lib/$sdk/"
     cp -R "$work/modules-$sdk/aarch64-windows" "$proj/wine/$sdk/"
 done
 # One list of flags serves both platforms through $(PLATFORM_NAME).
@@ -108,6 +112,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
         libs="$libs metal-display.o libdxmt_combined.a"
         frameworks="$frameworks Metal QuartzCore IOSurface"
     fi
+    [ -z "$opengl" ] || libs="$libs libwinpad_opengl.a"
     for f in $libs; do
         echo "          - \"\$(PROJECT_DIR)/lib/\$(PLATFORM_NAME)/$f\""
     done
@@ -122,6 +127,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
     schemes="WinPadWine:"
     [ -z "$sim_window_aot" ] || schemes="$schemes WinPadWine_Window:window"
     [ -z "$d3d9" ] || schemes="$schemes WinPadWine_D3D9:d3d9-cube WinPadWine_D3D11:d3d11-triangle WinPadWine_D3D10:d3d10-triangle WinPadWine_Game:game"
+    [ -z "$opengl" ] || schemes="$schemes WinPadWine_OpenGL:gl-triangle"
     if [ "$schemes" != "WinPadWine:" ]; then
         echo 'schemes:'
         for s in $schemes; do
@@ -133,7 +139,7 @@ sh "$here/fetch-mspack.sh" "$proj/mspack"
             echo '      config: Debug'
             # The JIT programs run under Xcode's debugger, which would stop on
             # every signal Wine uses (thread suspend, faults it handles).
-            case ${s#*:} in d3d9-cube|d3d1?-triangle|game)
+            case ${s#*:} in d3d9-cube|d3d1?-triangle|gl-triangle|game)
                 echo '      customLLDBInit: $(SRCROOT)/lldbinit' ;;
             esac
             [ -z "${s#*:}" ] || {

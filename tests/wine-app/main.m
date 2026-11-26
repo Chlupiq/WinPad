@@ -23,7 +23,8 @@
 // (tests/wine-i386/d3d9-cube.c, the "WinPadWine D3D9" scheme), a 32-bit
 // Direct3D 9 program drawing through DXMT and Metal (d3d11-triangle and
 // d3d10-triangle, tests/wine-i386/d3d11-triangle.c, the same through
-// Direct3D 11 and 10: schemes "WinPadWine D3D11" and "WinPadWine D3D10"), and game (the
+// Direct3D 11 and 10: schemes "WinPadWine D3D11" and "WinPadWine D3D10";
+// gl-triangle, tests/wine-i386/gl-triangle.c, through OpenGL: "WinPadWine OpenGL"), and game (the
 // "WinPadWine Game" scheme): a game the user copied into Documents, the
 // "game" setting naming its program there (NFSU2/SPEED2.EXE by default).
 // The game starts in its own folder (winehost.c) and runs until it ends or
@@ -1562,7 +1563,8 @@ static CFTimeInterval fps_shown;
   const BOOL window = [name isEqualToString:@"window"];
   // The Direct3D test programs (tests/wine-i386/d3d9-cube.c, d3d11-triangle.c): JIT, no image.
   NSDictionary<NSString*, NSString*>* d3d_tests =
-      @{@"d3d9-cube" : @"MADEIRA-D3D9", @"d3d11-triangle" : @"WINPAD-D3D11", @"d3d10-triangle" : @"WINPAD-D3D10"};
+      @{@"d3d9-cube" : @"MADEIRA-D3D9", @"d3d11-triangle" : @"WINPAD-D3D11", @"d3d10-triangle" : @"WINPAD-D3D10",
+        @"gl-triangle" : @"WINPAD-GL"};
   NSString* d3d_tag = d3d_tests[name];
   const BOOL cube = d3d_tag != nil, game = [name isEqualToString:@"game"];
   NSString* bundle = NSBundle.mainBundle.bundlePath;
@@ -1752,8 +1754,10 @@ static CFTimeInterval fps_shown;
   printf("%s, exit %d\n", FinishedMarker.UTF8String, ok ? 0 : 1);
 
   self.summary = !ok    ? [NSString stringWithFormat:@"FAILED (winehost %d)\n\n", status]
-                 : cube ? [NSString stringWithFormat:@"OK: the 32-bit %@ program presented its frames through DXMT and Metal.\n\n",
-                                                     [d3d_tag componentsSeparatedByString:@"-"].lastObject]
+                 : cube ? [NSString stringWithFormat:@"OK: the 32-bit %@ program presented its frames through %@.\n\n",
+                                                     [d3d_tag componentsSeparatedByString:@"-"].lastObject,
+                                                     [d3d_tag isEqualToString:@"WINPAD-GL"] ? @"gl4es and OpenGL ES"
+                                                                                           : @"DXMT and Metal"]
                  : game ? @"OK: the game ended with exit code 0.\n\n"
                  : window ? @"OK: the x86 program drew its window and took a tap in Wine from the AOT image, without a JIT.\n\n"
                           : @"OK: the x86 program ran in Wine from the AOT image, without a JIT.\n\n";

@@ -24,6 +24,8 @@
 # for them. Wine's own DXGI and D3D11 are not: they draw through wined3d's
 # OpenGL or Vulkan, which iOS has not. d3d11-triangle.c is the D3D11 test
 # (also built as d3d10-triangle.exe, through D3D10).
+# gl-triangle.c is the OpenGL test (Wine's opengl32.dll from build.sh, its
+# unix side from tests/opengl/build.sh).
 #
 # The Wine modules a 32-bit program with a window needs come first, built
 # with build.sh: user32 and what it imports, and ucrtbase, which DXMT's DLLs
@@ -162,17 +164,24 @@ for v in 11 10; do
         -DWINPAD_D3D11_SECONDS="${D3D11_TRIANGLE_SECONDS:-8}" -DWINPAD_D3D10=$((v == 10)) \
         -o "$out/d3d$v-triangle.exe" "$here/d3d11-triangle.c" -lkernel32 -luser32 -ld3d$v -ldxguid
 done
+# The OpenGL test (tests/opengl), the same way; GL_TRIANGLE_SECONDS, then exit 43.
+"$tc/i686-w64-mingw32-clang" -O2 -g -nostdlib -ffreestanding \
+    -static-libgcc -Wno-unused-command-line-argument \
+    -Wl,--entry=_start -Wl,--large-address-aware \
+    -DWINPAD_GL_SECONDS="${GL_TRIANGLE_SECONDS:-8}" \
+    -o "$out/gl-triangle.exe" "$here/gl-triangle.c" -lkernel32 -luser32 -lgdi32 -lopengl32
 # MinGW's import libraries name USER32.dll and GDI32.dll, which Wine does not
 # find in these runs; see lowercase-imports.py.
 python3 -I "$here/lowercase-imports.py" "$out/winemetal.dll" "$out/d3d9.dll" "$out/d3d9shim.dll" \
     "$out/d3d9-emulated.dll" "$out/d3d9-cube.exe" "$out/d3d8.dll" "$out/d3d8-cube.exe" \
-    "$out/dxgi.dll" "$out/d3d11.dll" "$out/d3d10core.dll" "$out/d3d11-triangle.exe" "$out/d3d10-triangle.exe"
+    "$out/dxgi.dll" "$out/d3d11.dll" "$out/d3d10core.dll" "$out/d3d11-triangle.exe" "$out/d3d10-triangle.exe" \
+    "$out/gl-triangle.exe"
 
 # Every DLL a module imports has to be there (api-ms-win-* resolve through
 # the API set schema, to ucrtbase).
 missing=0
 present=$(ls "$out" | tr 'A-Z' 'a-z')
-for f in "$out"/*.dll "$out"/d3d9-cube.exe "$out"/d3d8-cube.exe "$out"/d3d1?-triangle.exe; do
+for f in "$out"/*.dll "$out"/d3d9-cube.exe "$out"/d3d8-cube.exe "$out"/d3d1?-triangle.exe "$out"/gl-triangle.exe; do
     imports=$("$tc/llvm-objdump" -p "$f" | sed -n 's/^ *DLL Name: //p' | tr 'A-Z' 'a-z' | sort -u)
     echo "${f##*/}:" $imports
     for i in $imports; do
