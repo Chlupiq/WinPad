@@ -30,6 +30,12 @@
 @property(nonatomic, copy) NSString* autoExe;
 // What the user set for this game with a long press on its tile (WinPadOwnGameSettings).
 @property(nonatomic, copy) NSDictionary* own;
+// What its program is (WinPadProgramTraits) and the settings variant of its next run
+// (WinPadSettingsWithAuto: {"id", "title", "settings"}), set when it starts; plainSettings
+// are its settings without that variant.
+@property(nonatomic, copy) NSDictionary* traits;
+@property(nonatomic, copy) NSDictionary* autoVariant;
+@property(nonatomic, copy) NSDictionary* plainSettings;
 @end
 
 // A game's own settings, made in the app (Nastavení hry: a long press on the game's tile), kept

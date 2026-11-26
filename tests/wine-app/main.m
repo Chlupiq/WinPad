@@ -56,9 +56,13 @@
 
 #import "Library.h"
 #import "WinPadJIT.h"
+#import "WinPadAuto.h"
+#include "WiniosGamepad.h"  // Madeira's controller bridge to Wine (link-host.sh links it)
 #import "WinPadRedist.h"
 
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,6 +80,10 @@ static NSString* const FinishedMarker = @"== finished";
 // When the app started (main), for the log's [clock] lines.
 static CFAbsoluteTime app_started;
 
+// The frames of programs that draw with GDI (a DirectDraw game through wined3d's GDI
+// renderer), for the run record (WinPadRunProgress) next to Metal's.
+static volatile long gdi_frames;
+
 // Writes a [clock] line to the log every second from now on: the seconds since
 // the app started and how many frames the program has drawn, so a log says how
 // long each part of a start took.
@@ -87,7 +95,11 @@ static void StartLogClock(void) {
   dispatch_source_set_event_handler(timer, ^{
     // Looked up each time, as the status line does: the host may not be loaded yet.
     long (*metal_frames)(void) = (long (*)(void))dlsym(RTLD_DEFAULT, "winehost_metal_frames");
-    printf("[clock] %.1f s, %ld frames\n", CFAbsoluteTimeGetCurrent() - app_started, metal_frames ? metal_frames() : 0);
+    const long frames = metal_frames ? metal_frames() : 0;
+    printf("[clock] %.1f s, %ld frames\n", CFAbsoluteTimeGetCurrent() - app_started, frames);
+    // The game's run record, for the library's look at how it went (WinPadJudgeLastRun).
+    static int tick;
+    if (++tick % 2 == 0) WinPadRunProgress(frames + gdi_frames);
   });
   dispatch_resume(timer);
   static dispatch_source_t keep;
@@ -158,6 +170,7 @@ static UIImageView* frame_view;
 
 static void ShowFrame(void* hwnd, int width, int height, int stride, const void* bits) {
   (void)hwnd;
+  gdi_frames++;
   CFDataRef data = CFDataCreate(NULL, bits, (CFIndex)stride * height);
   CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
   CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
@@ -536,10 +549,87 @@ static BOOL pad_in[2][PadCount];  // what the controllers and the touch controll
 static BOOL pad_down[256];        // the keys the controllers hold down
 static BOOL pad_sent;             // a controller has sent a key
 
+// A game that reads a controller itself (its "padMode", WinPadAuto.m for games that import
+// XInput): the controllers go to it as one instead of as keys, through Madeira's bridge
+// (WiniosGamepad.h). "xinput": an Xbox controller, which Wine's xinput reads through win32u
+// (ios_gamepad_query), 32- and 64-bit. "hid": a generic HID game controller the wineserver
+// serves (hidpad_ios.c, MADEIRA_HIDPAD), which DirectInput, hid.dll and Windows.Gaming.Input see.
+enum { PadAsKeys, PadAsXInput, PadAsHID };
+static int pad_native = PadAsKeys;
+static struct winios_gamepad pad_sample;
+static BOOL pad_sample_set;
+static float pad_analog[6];       // the controller's left x, y, right x, y, left and right trigger
+static BOOL pad_thumb[2];         // its stick buttons
+static BOOL pad_controller;       // a controller is connected
+static BOOL pad_touch;            // the touch controller is on the screen
+
+static int16_t PadAxis(float value, BOOL minus, BOOL plus) {
+  if (plus && !minus) return 32767;
+  if (minus && !plus) return -32768;
+  const float v = value > 1 ? 1 : value < -1 ? -1 : value;
+  return (int16_t)(v < 0 ? v * 32768 : v * 32767);
+}
+
+// Gives the game the state of both controllers as one (ApplyPad's PAD_IN, with the
+// controller's sticks and triggers as they are).
+static void WritePad(void) {
+  if (pad_native == PadAsKeys) return;
+  const BOOL* c = pad_in[PadFromController];
+  const BOOL* t = pad_in[PadFromTouch];
+#define HELD(i) (c[i] || t[i])
+  static const struct {
+    int input;
+    uint16_t bit;
+  } map[] = {{PadUp, 0x0001},   {PadDown, 0x0002}, {PadLeft, 0x0004}, {PadRight, 0x0008}, {PadMenu, 0x0010},
+             {PadOptions, 0x0020}, {PadL1, 0x0100}, {PadR1, 0x0200}, {PadA, 0x1000},   {PadB, 0x2000},
+             {PadX, 0x4000},    {PadY, 0x8000}};
+  struct winios_gamepad p = {0};
+  p.connected = pad_controller || pad_touch;
+  uint16_t buttons = 0;
+  for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+    if (HELD(map[i].input)) buttons |= map[i].bit;
+  if (pad_thumb[0]) buttons |= 0x0040;
+  if (pad_thumb[1]) buttons |= 0x0080;
+  p.buttons = buttons;
+  // The touch controller's sticks and triggers are all or nothing; a controller's as they are.
+  p.lx = PadAxis(pad_analog[0], t[PadLLeft], t[PadLRight]);
+  p.ly = PadAxis(pad_analog[1], t[PadLDown], t[PadLUp]);
+  p.rx = PadAxis(pad_analog[2], t[PadRLeft], t[PadRRight]);
+  p.ry = PadAxis(pad_analog[3], t[PadRDown], t[PadRUp]);
+  p.left_trigger = t[PadL2] ? 255 : (uint8_t)(pad_analog[4] * 255);
+  p.right_trigger = t[PadR2] ? 255 : (uint8_t)(pad_analog[5] * 255);
+#undef HELD
+  if (pad_sample_set && !memcmp(&p, &pad_sample, sizeof(p))) return;
+  if (!pad_sample_set || p.buttons != pad_sample.buttons || p.connected != pad_sample.connected)
+    printf("gamepad: %s buttons %#x%s\n", pad_native == PadAsHID ? "HID" : "XInput", p.buttons,
+           p.connected ? "" : " (not connected)");
+  pad_sample = p;
+  pad_sample_set = YES;
+  if (pad_native == PadAsXInput) {
+    // The bridge numbers the samples (packet) itself.
+    winios_gamepad_set_state(0, p.connected ? &p : NULL);
+    return;
+  }
+  struct winios_hidpad h = {0};
+  h.connected = p.connected;
+  h.buttons = p.buttons;
+  if (p.left_trigger > 30) h.buttons |= WINIOS_HIDPAD_L2;
+  if (p.right_trigger > 30) h.buttons |= WINIOS_HIDPAD_R2;
+  h.lx = p.lx, h.ly = p.ly, h.rx = p.rx, h.ry = p.ry;
+  h.left_trigger = p.left_trigger, h.right_trigger = p.right_trigger;
+  h.battery = WINIOS_HIDPAD_BATTERY_UNKNOWN;
+  winios_hidpad_set_state(p.connected ? &h : NULL);
+}
+
 // Sends the keys whose state changed with this snapshot of a controller's
 // inputs; a key is down while either controller holds an input that is it.
 static void ApplyPad(int from, const BOOL in[PadCount]) {
   memcpy(pad_in[from], in, sizeof pad_in[from]);
+  if (pad_native != PadAsKeys) {
+    pad_sent = YES;
+    WritePad();
+    return;
+  }
   BOOL want[256] = {NO};
   for (int i = 0; i < PadCount; i++) {
     // The stick that moves the mouse is no keys.
@@ -615,6 +705,16 @@ static void ReadPad(GCExtendedGamepad* pad) {
       [PadRLeft] = right.xAxis.value < -tilt,
       [PadRRight] = right.xAxis.value > tilt,
   };
+  pad_analog[0] = stick.xAxis.value;
+  pad_analog[1] = stick.yAxis.value;
+  pad_analog[2] = right.xAxis.value;
+  pad_analog[3] = right.yAxis.value;
+  pad_analog[4] = pad.leftTrigger.value;
+  pad_analog[5] = pad.rightTrigger.value;
+  if (@available(iOS 12.1, *)) {
+    pad_thumb[0] = pad.leftThumbstickButton.pressed;
+    pad_thumb[1] = pad.rightThumbstickButton.pressed;
+  }
   GCControllerDirectionPad* mouse_stick = pad_mouse_stick == PadLUp ? stick : right;
   pad_stick[0] = CGPointMake(mouse_stick.xAxis.value, mouse_stick.yAxis.value);
   ApplyPad(PadFromController, in);
@@ -902,6 +1002,8 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
   void (^attach)(GCController*) = ^(GCController* c) {
     if (!c.extendedGamepad) return;
     printf("gamepad: %s connected\n", (c.vendorName ?: @"a controller").UTF8String);
+    pad_controller = YES;
+    WritePad();
     // The Xbox/Home button ends the game (RequestExit) instead of opening the system's menu.
     if (@available(iOS 14.0, *)) c.extendedGamepad.buttonHome.preferredSystemGestureState = GCSystemGestureStateDisabled;
     c.extendedGamepad.valueChangedHandler = ^(GCExtendedGamepad* pad, GCControllerElement* element) {
@@ -913,6 +1015,8 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
     touch_pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [view addSubview:touch_pad];
     printf("gamepad: the touch controller connected\n");
+    pad_touch = YES;
+    WritePad();
   }
   for (GCController* c in GCController.controllers) attach(c);
   NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
@@ -927,6 +1031,12 @@ static void Gamepads(UIView* view, NSDictionary* settings) {
                        queue:NSOperationQueue.mainQueue
                   usingBlock:^(NSNotification* note) {
                     const BOOL none[PadCount] = {NO};
+                    BOOL any = NO;
+                    for (GCController* c in GCController.controllers)
+                      if (c.extendedGamepad && c != note.object) any = YES;
+                    pad_controller = any;
+                    memset(pad_analog, 0, sizeof(pad_analog));
+                    pad_thumb[0] = pad_thumb[1] = NO;
                     ApplyPad(PadFromController, none);  // no key stays held by a controller that left
                   }];
 }
@@ -1161,7 +1271,10 @@ static NSString* RegValueLine(NSString* name, id v) {
 // that changes one (its resolution...) keeps its own. Wine reads a key that is in the file
 // twice as one; its server writes the file anew when it saves. A 32-bit game sees
 // HKLM\Software through Wow6432Node. Returns what it did, for the log.
-static NSArray<NSString*>* AddRegistryDefaults(NSString* prefix, NSDictionary* registry, BOOL wow64) {
+// With FORCE (the values the app's automatic settings own, WinPadAuto.m's "registryForce": a
+// game's renderer, its Windows version) a value is written also when the key has it: Wine
+// takes the last one in the file.
+static NSArray<NSString*>* AddRegistryDefaults(NSString* prefix, NSDictionary* registry, BOOL wow64, BOOL force) {
   NSMutableArray<NSString*>* said = [NSMutableArray new];
   if (![registry isKindOfClass:NSDictionary.class]) return said;
   const long stamp = (long)NSDate.date.timeIntervalSince1970;
@@ -1215,11 +1328,11 @@ static NSArray<NSString*>* AddRegistryDefaults(NSString* prefix, NSDictionary* r
       NSString* key = name.length ? [NSString stringWithFormat:@"\"%@\"", RegEscape(name)].lowercaseString : @"@";
       if (!line) {
         [said addObject:[NSString stringWithFormat:@"registry: skipped %@\\%@ (not text, a number or hex)", full, name]];
-      } else if ([have containsObject:key]) {
+      } else if ([have containsObject:key] && !force) {
         [said addObject:[NSString stringWithFormat:@"registry: %@\\%@ kept as it is", full, name]];
       } else {
         [lines appendFormat:@"%@\n", line];
-        [said addObject:[NSString stringWithFormat:@"registry: %@ in %@ [%@]", line, file, path]];
+        [said addObject:[NSString stringWithFormat:@"registry%@: %@ in %@ [%@]", force ? @" (auto)" : @"", line, file, path]];
       }
     }
     if (!lines.length) continue;
@@ -1253,6 +1366,13 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
   NSMutableArray<NSString*>* said = [NSMutableArray new];
   NSDictionary* s = game.settings ?: @{};
   if (game.profile) [said addObject:[NSString stringWithFormat:@"game profile %@", game.profile]];
+  // What the library read of the program and the automatic settings it picked (WinPadAuto.m).
+  if (game.traits)
+    [said addObject:[NSString stringWithFormat:@"detected %@, graphics %@, uses %@%@", [game.traits[@"machine"] integerValue] == 0x8664 ? @"64-bit" : @"32-bit",
+                                               game.traits[@"graphics"], [game.traits[@"uses"] componentsJoinedByString:@" "] ?: @"",
+                                               game.traits[@"installer"] ? [@", installer " stringByAppendingString:game.traits[@"installer"]] : @""]];
+  if (game.autoVariant)
+    [said addObject:[NSString stringWithFormat:@"automatic settings: variant %@ (%@)", game.autoVariant[@"id"], game.autoVariant[@"title"]]];
   NSMutableDictionary* dlls = [@{@"dinput8" : @"n,b"} mutableCopy];
   for (NSString* dll in directx_native) dlls[dll] = @"n,b";
   if (directx_native.count)
@@ -1271,6 +1391,26 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     [said addObject:[NSString stringWithFormat:@"the game's profile wants DirectX from Microsoft (%@), which is not "
                                                @"downloaded",
                                                [want_dx componentsJoinedByString:@" "]]];
+  // A game that reads a controller itself (padMode "xinput" or "hid"): the controllers go to
+  // it through Madeira's bridge instead of as keys (WritePad). The wineserver serves the HID
+  // controller only when MADEIRA_HIDPAD is set before it starts.
+  NSString* pad_mode = [s[@"padMode"] isKindOfClass:NSString.class] ? s[@"padMode"] : @"keys";
+  unsetenv("MADEIRA_HIDPAD");
+  memset(&pad_sample, 0, sizeof(pad_sample));
+  pad_sample_set = NO;
+  if ([pad_mode isEqualToString:@"xinput"]) {
+    pad_native = PadAsXInput;
+    [said addObject:@"controller: as an Xbox controller (XInput)"];
+  } else if ([pad_mode isEqualToString:@"hid"]) {
+    pad_native = PadAsHID;
+    setenv("MADEIRA_HIDPAD", "generic", 1);
+    setenv("MADEIRA_HIDPAD_NAME", "WinPad Controller", 1);
+    [said addObject:@"controller: as a HID game controller (DirectInput)"];
+  } else {
+    pad_native = PadAsKeys;
+    [said addObject:@"controller: as keys"];
+  }
+  WritePad();
   NSCharacterSet* bad_dll = [NSCharacterSet characterSetWithCharactersInString:@"=;,\" "];
   NSCharacterSet* bad_order = [NSCharacterSet characterSetWithCharactersInString:@"nbd, "].invertedSet;
   if ([s[@"dllOverrides"] isKindOfClass:NSDictionary.class]) {
@@ -1323,7 +1463,9 @@ static NSArray<NSString*>* ApplyGameSettings(WinPadGame* game, NSString* prefix,
     merged[key] = values;
     registry = merged;
   }
-  [said addObjectsFromArray:AddRegistryDefaults(prefix, registry, [game.arch isEqualToString:@"32bit"])];
+  [said addObjectsFromArray:AddRegistryDefaults(prefix, registry, [game.arch isEqualToString:@"32bit"], NO)];
+  if ([s[@"registryForce"] isKindOfClass:NSDictionary.class])
+    [said addObjectsFromArray:AddRegistryDefaults(prefix, s[@"registryForce"], [game.arch isEqualToString:@"32bit"], YES)];
   // Empty folders the game writes into (Mafia's Maps): copying a game often leaves them out,
   // and then its saves fail with "path not found".
   if ([s[@"folders"] isKindOfClass:NSArray.class] && game.folder.length) {
@@ -1485,6 +1627,7 @@ static CFTimeInterval fps_shown;
   [tell addAction:[UIAlertAction actionWithTitle:@"Zavřít a spustit hru"
                                            style:UIAlertActionStyleDefault
                                          handler:^(UIAlertAction* action) {
+                                           WinPadRunEnded(@"handoff", 0);
                                            printf("WinPad Wine: closing for the handed-over program\n%s, exit 0\n",
                                                   FinishedMarker.UTF8String);
                                            fflush(stdout);
@@ -1516,6 +1659,7 @@ static CFTimeInterval fps_shown;
                 preferredStyle:UIAlertControllerStyleAlert];
   exit_now = ^{
     // The log ends as a finished run, not one that crashed (wine.log.crashed).
+    WinPadRunEnded(@"player", 0);
     printf("WinPad Wine: the player ended the game (Exit)\n%s, exit 0\n", FinishedMarker.UTF8String);
     fflush(stdout);
     exit_alert = nil;
@@ -1814,6 +1958,9 @@ static CFTimeInterval fps_shown;
     // winpad.json (its profile) may add more.
     for (NSString* line in ApplyGameSettings(self.game, prefix, game_args))
       printf("WinPad Wine: %s\n", line.UTF8String);
+    // How this run goes, for the library's next look (a start that failed tries the next
+    // variant of the automatic settings).
+    if (self.game && !self.record) WinPadRunStarted(self.game.folder, self.game.autoVariant[@"id"], self.game.autoVariant[@"title"]);
   }
   // The game has an AOT image only where game-aot.sh put one into the
   // project on the Mac it was built on; without it the game runs with the JIT.
@@ -1915,6 +2062,18 @@ static CFTimeInterval fps_shown;
   args[argc] = NULL;
   const int status = winehost_main(argc, args);
   NSString* log = ReadLog();
+  if (game) {
+    NSRegularExpression* re = [NSRegularExpression regularExpressionWithPattern:@"winehost: Wine process exited with code (-?\\w+)"
+                                                                        options:0
+                                                                          error:nil];
+    NSTextCheckingResult* m = [re matchesInString:log options:0 range:NSMakeRange(0, log.length)].lastObject;
+    unsigned code = status ? (unsigned)status : 0;
+    if (m) {
+      NSString* text = [log substringWithRange:[m rangeAtIndex:1]];
+      code = (unsigned)strtoul(text.UTF8String, NULL, 0);
+    }
+    WinPadRunEnded(@"exited", (int)code);
+  }
   const BOOL ok = cube   ? [log containsString:[d3d_tag stringByAppendingString:@": done, frames presented = "]] &&
                              [log containsString:@"winehost: Wine process exited with code 43"]
                   : game ? [log containsString:@"winehost: Wine process exited with code 0"]

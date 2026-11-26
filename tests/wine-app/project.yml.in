@@ -81,6 +81,13 @@ targets:
       # cabinets with libmspack (fetch-mspack.sh).
       - Redist.h
       - Redist.c
+      # What a game's program is (graphics API, input, runtimes, installers) and the automatic
+      # settings and variants that follow from it.
+      - GameDetect.h
+      - GameDetect.c
+      - WiniosGamepad.h
+      - WinPadAuto.h
+      - WinPadAuto.m
       - WinPadRedist.h
       - WinPadRedist.m
       - path: mspack

@@ -52,3 +52,24 @@ done
 # The game's own DirectX folder: its *_x86.cab files, as DXSETUP has them next to it.
 mkdir -p "$work/dxgame"
 "$work/redist-test" --dlls "$work/directx_redist.exe" "$work/dxgame" d3dx9_43.dll xinput1_3.dll
+
+# What the app reads of a game before it runs (GameDetect.c, detect-test.c): the rules for
+# import names, and these installers and DLLs as they are.
+cc -O1 -Wall -Werror -I"$here" -I"$work/mspack" "$here/detect-test.c" "$here/GameDetect.c" "$here/Redist.c" \
+    "$work"/mspack/*.o -o "$work/detect-test"
+"$work/detect-test" "$work/directx_redist.exe" installer "$work/vc2022.exe" wixburn \
+    "$work/dlls/d3dx9_30.dll" 0x14c "$work/dlls/d3dx9_30.dll" no-installer
+for f in "$work/directx_redist.exe" "$work/vc2010.exe" "$work/vc2022.exe"; do "$work/detect-test" --file "$f" || true; done
+
+# NVIDIA's legacy PhysX (WINPAD_PHYSX_URL), which the app downloads for a game that imports
+# PhysXLoader.dll and lacks it: reported only (NVIDIA's link and package may change).
+physx=$(sed -n 's/^#define WINPAD_PHYSX_URL "\(.*\)"$/\1/p' "$here/Redist.h")
+echo "PhysX: $physx"
+if curl -fsSL --retry 3 -o "$work/physx.msi" "$physx"; then
+    sha256sum "$work/physx.msi" 2>/dev/null || shasum -a 256 "$work/physx.msi"
+    rm -rf "$work/physx" && mkdir -p "$work/physx"
+    "$work/redist-test" --dlls "$work/physx.msi" "$work/physx" physxloader.dll || echo "PhysX: no PhysXLoader.dll out of it (reported only)"
+    ls "$work/physx" || true
+else
+    echo "PhysX: download failed (reported only)"
+fi
