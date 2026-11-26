@@ -7,7 +7,7 @@
 # Leaves out the unix libraries of other DLLs (GnuTLS, FFmpeg, FreeType):
 # a Wine process can start without them.
 #
-# Usage: build-ntdll.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
+# Usage: build-ntdll.sh WORK_DIR SDK   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # WORK_DIR must hold the trees build.sh fetched and configured.
 set -eu
 
@@ -22,12 +22,7 @@ out="$work/ntdll-$sdk_name"
 rm -rf "$out"
 mkdir -p "$out"
 
-case $sdk_name in
-    iphoneos) target=arm64-apple-ios17.0 ;;
-    iphonesimulator) target=arm64-apple-ios17.0-simulator ;;
-    *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
-esac
-sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
+. "$(cd "$(dirname "$0")" && pwd)/sdk.sh"
 
 git -C "$madeira" apply "$root"/patches/madeira/*.patch
 trap 'git -C "$madeira" checkout -q -- build; git -C "$wine" checkout -q -- dlls/ntdll/unix/file.c' EXIT
@@ -35,7 +30,7 @@ trap 'git -C "$madeira" checkout -q -- build; git -C "$wine" checkout -q -- dlls
 compile() {  # SOURCE NAME [FLAGS...]
     c_src=$1 c_name=$2
     shift 2
-    if xcrun -sdk "$sdk_name" clang -target "$target" -isysroot "$sdk" \
+    if xcrun -sdk "$xcsdk" clang -target "$target" -isysroot "$sdk" $sdk_flags \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
         -include "$wine/build-macos/include/config.h" \

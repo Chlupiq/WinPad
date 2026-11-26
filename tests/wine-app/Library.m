@@ -62,6 +62,8 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include <dirent.h>
+#include "JITPool.h"
+
 #include <math.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -109,7 +111,7 @@ static NSString* WinPadGameImage(NSString* folder) {
 
 // The build of this app (build-xcode.sh's winpad-build.txt), or nil.
 static NSString* AppBuild(void) {
-  NSString* path = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"winpad-build.txt"];
+  NSString* path = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"winpad-build.txt"];
   NSString* build = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
   build = [build stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
   return build.length ? build : nil;
@@ -1606,7 +1608,7 @@ static NSString* DirectXSummary(void) {
     UISwitch* toggle = [UISwitch new];
     id touch = [NSUserDefaults.standardUserDefaults objectForKey:@"touchControls"];
     // A Mac has a keyboard, a mouse and maybe a controller: no touch controller by default.
-    toggle.on = touch ? [touch boolValue] : !NSProcessInfo.processInfo.isiOSAppOnMac;
+    toggle.on = touch ? [touch boolValue] : !winpad_jit_on_mac();
     [toggle addTarget:self action:@selector(touchChanged:) forControlEvents:UIControlEventValueChanged];
     cell.accessoryView = toggle;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
@@ -2696,7 +2698,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   self.addGame.layer.cornerRadius = 6;
   self.addGame.layer.masksToBounds = YES;
   // A tap picks a game's folder (on a Mac anywhere on it) and copies it into the library.
-  if (NSProcessInfo.processInfo.isiOSAppOnMac)
+  if (winpad_jit_on_mac())
     self.addGame.text = @"Přidat hru\n\nKlikni a vyber složku hry na Macu, zkopíruje se do knihovny. "
                         @"Nebo otevři soubor .winpad z převodníku.";
   self.addGame.userInteractionEnabled = YES;
@@ -2894,13 +2896,26 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
 #if !TARGET_OS_SIMULATOR
   // The first launch on a device without the JIT: how to turn it on, once. A Mac turns it on
   // itself.
-  if (!NSProcessInfo.processInfo.isiOSAppOnMac && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
+  if (!winpad_jit_on_mac() && ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"] &&
       ![NSUserDefaults.standardUserDefaults boolForKey:@"jitGuideShown"] && !WinPadJITUsable() &&
       !self.installing && !self.presentedViewController) {
     [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"jitGuideShown"];
     [self openJITGuide];
   }
 #endif
+  // An iPad app on a Mac is held to its code signature: without a debugger the kernel kills it
+  // when Wine makes its own code executable (and FEX's JIT), so games run only from Xcode's Run.
+  if (NSProcessInfo.processInfo.isiOSAppOnMac && !winpad_jit_cs_debugged() && !self.presentedViewController &&
+      ![NSUserDefaults.standardUserDefaults boolForKey:@"libraryTest"]) {
+    UIAlertController* alert = [UIAlertController
+        alertControllerWithTitle:@"Na Macu spusť WinPad z Xcode"
+                         message:@"Macy pouštějí iPadové aplikace jen s podepsaným kódem. Wine a JIT si ale kód "
+                                 @"vyrábějí za běhu, takže by hra spadla. Otevři projekt v Xcode, vyber cíl "
+                                 @"„My Mac (Designed for iPad)“ a stiskni Run."
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+  }
   // CI (build-xcode.sh): a game's settings open, as a long press opens them, for a screenshot.
   NSString* settings_test = [NSUserDefaults.standardUserDefaults stringForKey:@"gameSettingsTest"];
   for (WinPadGame* game in settings_test ? self.games : @[])
@@ -2937,7 +2952,7 @@ static WinPadTag* LightTag(NSString* text, uint32_t fg, UIColor* bg) {
   NSString* cube = [cube_dir stringByAppendingPathComponent:@"d3d9-cube.exe"];
   [NSFileManager.defaultManager removeItemAtPath:cube_dir error:nil];
   [NSFileManager.defaultManager createDirectoryAtPath:cube_dir withIntermediateDirectories:YES attributes:nil error:nil];
-  [NSFileManager.defaultManager copyItemAtPath:[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"i386-windows/d3d9-cube.exe"]
+  [NSFileManager.defaultManager copyItemAtPath:[NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"i386-windows/d3d9-cube.exe"]
                                         toPath:cube
                                          error:nil];
   NSDictionary* cube_traits = WinPadProgramTraits(cube);

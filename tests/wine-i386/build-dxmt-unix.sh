@@ -13,7 +13,7 @@
 # (Madeira keeps them from an earlier meson build), so they are made here
 # the way dxmt/src/airconv/meson.build makes them.
 #
-# Usage: build-dxmt-unix.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
+# Usage: build-dxmt-unix.sh WORK_DIR SDK   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # WORK_DIR must hold the Madeira checkout tests/wine-loader/build.sh made.
 # Needs cmake, ninja and Xcode's Metal toolchain.
 # Output: WORK_DIR/dxmt-SDK/libdxmt_combined.a, which link-host.sh links.
@@ -24,10 +24,8 @@ work=$1
 sdk_name=$2
 r="$work/dxmt-root"
 out="$work/dxmt-$sdk_name"
-case $sdk_name in
-    iphoneos | iphonesimulator) ;;
-    *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
-esac
+# target, xcsdk (xcrun's SDK: macosx for Mac Catalyst), sdk.
+. "$here/../wine-loader/sdk.sh"
 
 sh "$here/fetch-dxmt.sh" "$r"
 sh "$here/build-llvm.sh" "$r" "$sdk_name"
@@ -52,6 +50,15 @@ mkdir -p "$r/research"
 cp -R "$work/madeira/research/remote-metal" "$r/research/remote-metal"
 if [ "$sdk_name" = iphoneos ]; then
     cp "$work/madeira/build/dxmt-ios/build.sh" "$b/build.sh"
+elif [ "$sdk_name" = maccatalyst ]; then
+    # Mac Catalyst: the macOS SDK with its iOSSupport frameworks (UIKit, and MetalFX is there).
+    sed -e "s/-sdk iphoneos /-sdk macosx /g; s/--sdk iphoneos /--sdk macosx /g" \
+        -e "s|-arch arm64 -isysroot \$SDK -miphoneos-version-min=18.0|-target arm64-apple-ios18.0-macabi -isysroot \$SDK -iframework \$SDK/System/iOSSupport/System/Library/Frameworks -isystem \$SDK/System/iOSSupport/usr/include|" \
+        "$work/madeira/build/dxmt-ios/build.sh" >"$b/build.sh"
+    if grep -n 'iphoneos' "$b/build.sh" | grep -v '^ *[0-9]*: *#'; then
+        echo "Madeira's build.sh still names iphoneos above" >&2
+        exit 1
+    fi
 else
     sed -e "s/-sdk iphoneos /-sdk $sdk_name /g; s/--sdk iphoneos /--sdk $sdk_name /g" \
         -e "s|-arch arm64 -isysroot \$SDK -miphoneos-version-min=18.0|-target arm64-apple-ios18.0-simulator -isysroot \$SDK -I$here/sim-metalfx|" \
@@ -81,6 +88,6 @@ fi
 
 rm -rf "$out"
 mkdir -p "$out"
-xcrun -sdk "$sdk_name" libtool -static -o "$out/libdxmt_combined.a" \
+xcrun -sdk "$xcsdk" libtool -static -o "$out/libdxmt_combined.a" \
     "$b"/obj/*.o "$r"/toolchains/llvm-ios-build/lib/*.a
 echo "DXMT unix side for $sdk_name: $out/libdxmt_combined.a ($(wc -c <"$out/libdxmt_combined.a" | tr -d ' ') bytes)"

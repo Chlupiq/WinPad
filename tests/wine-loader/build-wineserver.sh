@@ -5,7 +5,7 @@
 # Madeira's script only swaps objects into a prebuilt libwineserver.a that is
 # not in its repository; this builds every object from source instead.
 #
-# Usage: build-wineserver.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
+# Usage: build-wineserver.sh WORK_DIR SDK   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # WORK_DIR must hold the trees build.sh fetched and configured.
 # Needs llvm-objcopy (Homebrew llvm) for the symbol renames.
 set -eu
@@ -19,13 +19,8 @@ out="$work/wineserver-$sdk_name"
 rm -rf "$out"
 mkdir -p "$out/obj"
 
-case $sdk_name in
-    iphoneos) target=arm64-apple-ios17.0 ;;
-    iphonesimulator) target=arm64-apple-ios17.0-simulator ;;
-    *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
-esac
-sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
-cc="xcrun -sdk $sdk_name clang -target $target -isysroot $sdk -O2"
+. "$(cd "$(dirname "$0")" && pwd)/sdk.sh"
+cc="xcrun -sdk $xcsdk clang -target $target -isysroot $sdk $sdk_flags -O2"
 
 compile() {  # SOURCE NAME
     # shellcheck disable=SC2086 # $cc is a command line

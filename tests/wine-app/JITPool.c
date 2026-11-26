@@ -100,12 +100,14 @@ int winpad_jit_has_txm(void) {
 #endif
 }
 
-// NSProcessInfo.isiOSAppOnMac through the Objective-C runtime, so that this file stays plain C
+// The Mac Catalyst app, or NSProcessInfo.isiOSAppOnMac through the Objective-C runtime, so that this file stays plain C
 // with no framework to link (jit-protocol-test.sh builds it for macOS with CoreFoundation only).
 int winpad_jit_on_mac(void) {
   const char* force = getenv("WINPAD_JIT_MAC");
   if (force && *force) return atoi(force) != 0;
-#if TARGET_OS_SIMULATOR || !TARGET_OS_IPHONE
+#if TARGET_OS_MACCATALYST
+  return 1;
+#elif TARGET_OS_SIMULATOR || !TARGET_OS_IPHONE
   return 0;
 #else
   static int on_mac = -1;
@@ -133,6 +135,14 @@ enum winpad_jit_kind winpad_jit_kind(char* why, size_t why_size) {
   return WINPAD_JIT_SIMULATOR;
 #else
   if (winpad_jit_on_mac()) {
+    // An iPad app on a Mac is held to its code signature as on an iPad: the kernel kills it at
+    // the first page of code it made ("rejecting invalid page"), which no check can catch, unless
+    // a debugger has had it (Xcode's Run). So without one, no pool is tried at all.
+    // The Mac Catalyst app is a Mac app whose entitlements allow it (WinPadMac.entitlements).
+    if (!TARGET_OS_MACCATALYST && !mac_pool_state && !winpad_jit_cs_debugged()) {
+      say(why, why_size, "Mac without a debugger: no JIT (start the app from Xcode for it)");
+      return WINPAD_JIT_NONE;
+    }
     if (mac_pool_state < 0) {
       say(why, why_size, "Mac: %s", mac_pool_why);
       return WINPAD_JIT_NONE;

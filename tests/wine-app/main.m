@@ -58,6 +58,7 @@
 #import "WinPadJIT.h"
 #import "WinPadAuto.h"
 #include "WiniosGamepad.h"  // Madeira's controller bridge to Wine (link-host.sh links it)
+#include "JITPool.h"
 #import "WinPadRedist.h"
 
 #include <dlfcn.h>
@@ -1709,7 +1710,7 @@ static CFTimeInterval fps_shown;
          [touch_mouse isEqualToString:@"off"] ? "nothing" : touch_mouse.UTF8String,
          pad_mouse_stick == PadRUp ? "the right stick" : pad_mouse_stick == PadLUp ? "the left stick" : "no stick", mouse_speed);
   // A Mac has a keyboard, a mouse and maybe a controller: no touch controller unless asked for.
-  const BOOL touch_default = !NSProcessInfo.processInfo.isiOSAppOnMac;
+  const BOOL touch_default = !winpad_jit_on_mac();
   Gamepads(gamepad_test || (touch ? [touch boolValue] : touch_default) ? self.view : nil, self.game.settings);
   if (pad_mouse_stick >= 0) {
     stick_mouse = [WinPadStickMouse new];
@@ -1868,7 +1869,7 @@ static CFTimeInterval fps_shown;
         @"gl-triangle" : @"WINPAD-GL"};
   NSString* d3d_tag = d3d_tests[name];
   const BOOL cube = d3d_tag != nil, game = [name isEqualToString:@"game"];
-  NSString* bundle = NSBundle.mainBundle.bundlePath;
+  NSString* bundle = NSBundle.mainBundle.resourcePath;
   // A 64-bit game (PE machine AMD64) runs through ARM64EC (MakePrefix), always with the JIT.
   NSString* game_exe = game ? DocumentsPath((self.game ? self.game.exe : [NSUserDefaults.standardUserDefaults stringForKey:@"game"]) ?: @"")
                             : nil;
@@ -2002,7 +2003,11 @@ static CFTimeInterval fps_shown;
     printf("WinPad Wine: recording the game's code maps with the JIT into %s\n",
            [cache stringByAppendingPathComponent:@"codemap/new"].UTF8String);
   }
-  if (!cube && (!game || game_image)) {
+  // The Mac Catalyst app carries no AOT images: its test programs run with FEX's JIT, which
+  // winehost.c maps itself as in a simulator.
+  const BOOL catalyst_jit = TARGET_OS_MACCATALYST && !game;
+  if (catalyst_jit) printf("WinPad Wine: Mac Catalyst: the program runs with FEX's JIT, no AOT image\n");
+  if (!cube && !catalyst_jit && (!game || game_image)) {
     // Each program has its own AOT image: hello's is fexaot.dylib, NAME's fexaot-NAME.dylib.
     NSString* path = game ? game_image
                           : [frameworks stringByAppendingPathComponent:[name isEqualToString:@"hello"]
@@ -2169,7 +2174,7 @@ static CFTimeInterval fps_shown;
       // What the game would be started with (its winpad.json): the registry values go into the
       // prefix for real, so that the runs after this one load them.
       NSMutableArray<NSString*>* game_args = [NSMutableArray new];
-      for (NSString* line in ApplyGameSettings(game, MakePrefix(NSBundle.mainBundle.bundlePath, [game.arch isEqualToString:@"64bit"]), game_args))
+      for (NSString* line in ApplyGameSettings(game, MakePrefix(NSBundle.mainBundle.resourcePath, [game.arch isEqualToString:@"64bit"]), game_args))
         report = [report stringByAppendingFormat:@"settings: %@\n", line];
       report = [report stringByAppendingFormat:@"%@\n", FinishedMarker];
       [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];

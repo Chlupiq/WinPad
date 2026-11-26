@@ -34,12 +34,8 @@ if [ $# = 0 ]; then
 fi
 mkdir -p "$out" "$tmp"
 
-case $sdk_name in
-    iphoneos) target=arm64-apple-ios17.0 ;;
-    iphonesimulator) target=arm64-apple-ios17.0-simulator ;;
-    *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
-esac
-cc="xcrun -sdk $sdk_name clang -target $target"
+. "$(cd "$(dirname "$0")" && pwd)/sdk.sh"
+cc="xcrun -sdk $xcsdk clang -target $target"
 
 wrapped=0
 plain=0

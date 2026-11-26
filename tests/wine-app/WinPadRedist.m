@@ -124,9 +124,9 @@ NSArray<NSString*>* WinPadMissingDLLsOf(NSString* exe, NSString* gameFolder) {
   NSMutableSet* have = [NSMutableSet new];
   [have unionSet:LowercaseNames(exe_dir)];
   if (gameFolder) [have unionSet:LowercaseNames(gameFolder)];
-  [have unionSet:LowercaseNames([NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"i386-windows"])];
+  [have unionSet:LowercaseNames([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"i386-windows"])];
   // A 64-bit game's system DLLs: the ARM64EC set (main.m MakePrefix).
-  [have unionSet:LowercaseNames([NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"arm64ec-windows"])];
+  [have unionSet:LowercaseNames([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"arm64ec-windows"])];
   [have unionSet:LowercaseNames(DocumentsFile(@"prefix/drive_c/windows/syswow64"))];
   [have unionSet:LowercaseNames(WinPadDirectXDir())];
   [have unionSet:LowercaseNames(WinPadExtraDir())];
