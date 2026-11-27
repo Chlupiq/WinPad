@@ -6,7 +6,7 @@
 # build/freetype-ios does) and merged into the library, so win32u can load
 # Wine's TrueType fonts and draw text.
 #
-# Usage: build-win32u.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
+# Usage: build-win32u.sh WORK_DIR SDK   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # WORK_DIR must hold the trees build.sh fetched and configured. win32u needs
 # the COM headers Wine generates from IDL files; they are made here with
 # Wine's own widl (needs bison and flex on PATH) when they are missing.
@@ -22,12 +22,7 @@ out="$work/win32u-$sdk_name"
 rm -rf "$out"
 mkdir -p "$out"
 
-case $sdk_name in
-    iphoneos) target=arm64-apple-ios17.0 ;;
-    iphonesimulator) target=arm64-apple-ios17.0-simulator ;;
-    *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
-esac
-sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
+. "$(cd "$(dirname "$0")" && pwd)/sdk.sh"
 
 if [ ! -f "$wine/build-macos/include/objidlbase.h" ]; then
     headers=$(cd "$wine" && ls include/*.idl | sed 's/\.idl$/.h/')
@@ -48,9 +43,12 @@ if [ ! -f "$ft_src/include/ft2build.h" ]; then
     git clone -q --depth 1 --branch "$FREETYPE_TAG" https://github.com/freetype/freetype.git "$ft_src"
 fi
 if [ ! -f "$ft_build/libfreetype.a" ]; then
+    # Mac Catalyst: a Mac build whose target (-target ...-macabi) makes it Catalyst.
+    if [ "$sdk_name" = maccatalyst ]; then system="-DCMAKE_SYSTEM_NAME=Darwin"; else
+        system="-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0"; fi
+    # shellcheck disable=SC2086 # $system is a list
     cmake -S "$ft_src" -B "$ft_build" -G "Unix Makefiles" \
-        -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_OSX_SYSROOT="$sdk" \
+        $system -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_SYSROOT="$sdk" \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
         -DFT_DISABLE_ZLIB=ON -DFT_DISABLE_BZIP2=ON -DFT_DISABLE_PNG=ON \
         -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BROTLI=ON \
@@ -64,7 +62,7 @@ compile() {  # SOURCE NAME [FLAGS...]
     f=$1
     name=$2
     shift 2
-    if xcrun -sdk "$sdk_name" clang -target "$target" -isysroot "$sdk" \
+    if xcrun -sdk "$xcsdk" clang -target "$target" -isysroot "$sdk" $sdk_flags \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
         -include "$src/config_ios.h" \

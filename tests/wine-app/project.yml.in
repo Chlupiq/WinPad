@@ -94,11 +94,17 @@ targets:
       - path: profiles
         type: folder
     dependencies:
+      # Both extensions are the iPad's: a Mac runs the JIT without them.
+      # Both embedded by the script below and not by Xcode: Xcode's embed phase put the
+      # iOS extension into the Mac Catalyst app too, which the Mac build refuses.
       - target: WinPadJITHelper
+        embed: false
+        platformFilter: ios
       # Built always, embedded by the script below only with WINPAD_VPN = YES: an embedded
       # extension Xcode would validate after the script had removed it.
       - target: WinPadVPN
         embed: false
+        platformFilter: ios
     postBuildScripts:
       # Wine's files for the platform being built, laid out next to the
       # executable as in Madeira's app, and the AOT images in Frameworks/
@@ -114,27 +120,37 @@ targets:
           - $(PROJECT_DIR)/wine/i386-windows
           - $(PROJECT_DIR)/Frameworks/$(PLATFORM_NAME)/fexaot.dylib
         outputFiles:
-          - $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)/aarch64-windows/ntdll.dll
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/aarch64-windows/ntdll.dll
           - $(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/fexaot.dylib
         script: |
           set -e
-          app="$TARGET_BUILD_DIR/$WRAPPER_NAME"
+          # The bundle's root on an iPad, Contents/Resources in the Mac Catalyst app.
+          app="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
           rm -rf "$app/aarch64-windows" "$app/i386-windows" "$app/nls" "$app/fonts"
           cp -R "$PROJECT_DIR/wine/$PLATFORM_NAME/aarch64-windows" "$app/"
           cp -R "$PROJECT_DIR/wine/i386-windows" "$PROJECT_DIR/wine/nls" "$PROJECT_DIR/wine/fonts" "$app/"
           cp "$PROJECT_DIR/wine/system.reg" "$app/"
           if [ -f "$PROJECT_DIR/wine/winpad-build.txt" ]; then cp "$PROJECT_DIR/wine/winpad-build.txt" "$app/"; fi
           mkdir -p "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
-          cp -f "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          # The Mac Catalyst app has none: a Mac runs FEX's JIT.
+          for image in "$PROJECT_DIR/Frameworks/$PLATFORM_NAME"/fexaot*.dylib; do
+            [ ! -f "$image" ] || cp -f "$image" "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH/"
+          done
           # The app's own VPN only when it is signed for it (WinPad.xcconfig).
           # (signed by its own target with its entitlement; the app's signature seals it).
-          rm -rf "$app/PlugIns/WinPadVPN.appex"
-          if [ "${WINPAD_VPN:-NO}" = YES ]; then
-            mkdir -p "$app/PlugIns"
-            cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$app/PlugIns/"
+          plugins="$TARGET_BUILD_DIR/$PLUGINS_FOLDER_PATH"
+          rm -rf "$plugins/WinPadVPN.appex" "$plugins/WinPadJITHelper.appex"
+          if [ "$PLATFORM_NAME" != macosx ]; then
+            mkdir -p "$plugins"
+            cp -R "$BUILT_PRODUCTS_DIR/WinPadJITHelper.appex" "$plugins/"
+          fi
+          if [ "${WINPAD_VPN:-NO}" = YES ] && [ "$PLATFORM_NAME" != macosx ]; then
+            mkdir -p "$plugins"
+            cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$plugins/"
           fi
           if [ "${CODE_SIGNING_ALLOWED:-NO}" = YES ] && [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
             for dylib in "$app"/aarch64-windows/*.dylib "$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"/fexaot*.dylib; do
+              [ -f "$dylib" ] || continue
               codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --timestamp=none "$dylib"
             done
           fi
@@ -145,6 +161,14 @@ targets:
         CODE_SIGN_ENTITLEMENTS: "$(WINPAD_VPN_ENTITLEMENTS_$(WINPAD_VPN))"
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+        # The iPad build also runs on a Mac with Apple silicon (Xcode's "My Mac (Designed for
+        # iPad)"): a Mac's GPU with full Metal, and the app makes its own JIT (JITPool.c).
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES
+        # The Mac app (Mac Catalyst): Wine built for it (lib/macosx, wine/macosx), its JIT
+        # allowed by WinPadMac.entitlements, so games run without a debugger.
+        SUPPORTS_MACCATALYST: @CATALYST@
+        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": WinPadMac.entitlements
+        "ENABLE_HARDENED_RUNTIME[sdk=macosx*]": YES
         ARCHS: arm64
         CLANG_ENABLE_OBJC_ARC: YES
         CODE_SIGN_STYLE: Automatic
@@ -155,5 +179,6 @@ targets:
         # libmspack includes its own headers as <system.h>, <mspack.h>.
         HEADER_SEARCH_PATHS: "$(PROJECT_DIR)/mspack"
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/Frameworks"
+        "LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]": "@executable_path/../Frameworks"
         # Wine for the platform being built: lib/iphoneos or lib/iphonesimulator.
         OTHER_LDFLAGS:

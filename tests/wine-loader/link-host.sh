@@ -13,7 +13,7 @@
 # tests/wine-i386/build-dxmt-unix.sh), it is linked too, with
 # host/metal-display.m, which gives DXMT a CAMetalLayer for each window.
 #
-# Usage: link-host.sh SDK WORK_DIR OUT_DIR   (SDK: iphoneos or iphonesimulator)
+# Usage: link-host.sh SDK WORK_DIR OUT_DIR   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # Writes OUT_DIR/winehost (the command-line host), OUT_DIR/stubs.o, the
 # linker flags for the weak hooks in OUT_DIR/weak-flags, and, for an app
 # that calls winehost_main itself (tests/wine-app), OUT_DIR/winehost-lib.o.
@@ -24,13 +24,8 @@ sdk_name=$1
 work=$2
 out=$3
 mkdir -p "$out"
-case $sdk_name in
-    iphoneos) target=arm64-apple-ios17.0 ;;
-    iphonesimulator) target=arm64-apple-ios17.0-simulator ;;
-    *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
-esac
-sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
-cc="xcrun -sdk $sdk_name clang -target $target -isysroot $sdk"
+. "$(cd "$(dirname "$0")" && pwd)/sdk.sh"
+cc="xcrun -sdk $xcsdk clang -target $target -isysroot $sdk $sdk_flags"
 libs="$work/ntdll-$sdk_name/libntdll_unix.a $work/win32u-$sdk_name/libwin32u_unix.a
     $work/wineserver-$sdk_name/libwineserver.a"
 objs="$out/winehost.o"

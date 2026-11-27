@@ -170,9 +170,89 @@ jobs:
       - name: Every Wine module from Madeira wrapped into a dylib and loaded
         run: sh tests/pe2macho/wine-modules.sh "$RUNNER_TEMP/wine-modules"
 
-  wine-loader:
+  # Wine, its modules (with that xtajit.dll) and DXMT built for the Mac app (Mac Catalyst,
+  # SDK maccatalyst in tests/wine-loader/sdk.sh): the iPad app's code as a Mac app, whose
+  # entitlements let it run FEX's JIT without a debugger. wine-loader puts them into the Xcode
+  # project and runs the Mac app.
+  mac-catalyst:
     runs-on: macos-15
     needs: fex-wow64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install bison flex llvm lld meson ninja
+      - name: Newest Xcode
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          sudo xcode-select -s "$xcode"
+          xcrun --sdk macosx --show-sdk-version
+          xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+      - name: Restore configured Wine tree
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/madeira/wine
+          key: wine-configured-257f271-${{ hashFiles('tests/wine-loader/build.sh') }}
+      - name: Madeira and Wine
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          sh tests/wine-loader/build.sh "$RUNNER_TEMP/wine-loader"
+      - name: Wine's ntdll unix side for the Mac app
+        run: sh tests/wine-loader/build-ntdll.sh "$RUNNER_TEMP/wine-loader" maccatalyst
+      - name: wineserver for the Mac app
+        run: |
+          PATH="$(brew --prefix llvm)/bin:$PATH"
+          sh tests/wine-loader/build-wineserver.sh "$RUNNER_TEMP/wine-loader" maccatalyst
+      - name: win32u unix side for the Mac app
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          sh tests/wine-loader/build-win32u.sh "$RUNNER_TEMP/wine-loader" maccatalyst
+      - name: FEX's WoW64 module built from source (fex-wow64 job)
+        uses: actions/download-artifact@v4
+        with:
+          name: xtajit
+          path: ${{ runner.temp }}/xtajit
+      - name: Madeira's Wine modules and that xtajit.dll wrapped into dylibs for the Mac app
+        run: |
+          PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$(brew --prefix llvm)/bin:$(brew --prefix lld)/bin:$PATH"
+          w="$RUNNER_TEMP/wine-loader"
+          sh tests/wine-loader/wrap-modules.sh "$w" maccatalyst
+          cp "$RUNNER_TEMP/xtajit/xtajit.dll" "$w/modules-maccatalyst/aarch64-windows/xtajit.dll"
+          sh tests/wine-loader/wrap-modules.sh "$w" maccatalyst "$w/modules-maccatalyst/aarch64-windows/xtajit.dll"
+      - name: Restore LLVM for the Mac app
+        id: llvm
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/dxmt-root/toolchains-maccatalyst
+          key: llvm-15.0.7-maccatalyst-${{ hashFiles('tests/wine-i386/build-llvm.sh') }}
+      - name: LLVM 15 for the Mac app, for DXMT's shader compiler
+        id: llvm-build
+        if: steps.llvm.outputs.cache-hit != 'true'
+        run: sh tests/wine-i386/build-llvm.sh "$RUNNER_TEMP/wine-loader/dxmt-root" maccatalyst
+      - name: Save LLVM for the Mac app
+        if: ${{ !cancelled() && steps.llvm-build.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/wine-loader/dxmt-root/toolchains-maccatalyst
+          key: llvm-15.0.7-maccatalyst-${{ hashFiles('tests/wine-i386/build-llvm.sh') }}
+      - name: DXMT's unix side for the Mac app
+        run: sh tests/wine-i386/build-dxmt-unix.sh "$RUNNER_TEMP/wine-loader" maccatalyst
+      - name: Upload them for wine-loader
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-maccatalyst
+          path: |
+            ${{ runner.temp }}/wine-loader/ntdll-maccatalyst/libntdll_unix.a
+            ${{ runner.temp }}/wine-loader/wineserver-maccatalyst/libwineserver.a
+            ${{ runner.temp }}/wine-loader/win32u-maccatalyst/libwin32u_unix.a
+            ${{ runner.temp }}/wine-loader/modules-maccatalyst/aarch64-windows
+            ${{ runner.temp }}/wine-loader/dxmt-maccatalyst/libdxmt_combined.a
+          if-no-files-found: error
+
+  wine-loader:
+    runs-on: macos-15
+    needs: [fex-wow64, mac-catalyst]
+    # The Mac app's Wine is optional here: a failed mac-catalyst job leaves the iPad's checks.
+    if: ${{ !cancelled() && needs.fex-wow64.result == 'success' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -826,6 +906,15 @@ jobs:
           cp "$RUNNER_TEMP/xtajit/xtajit.dll" "$RUNNER_TEMP/wine-loader/modules-iphoneos/aarch64-windows/xtajit.dll"
           sh tests/wine-loader/wrap-modules.sh "$RUNNER_TEMP/wine-loader" iphoneos \
             "$RUNNER_TEMP/wine-loader/modules-iphoneos/aarch64-windows/xtajit.dll"
+      # The Mac app's Wine (mac-catalyst job), for the Mac app the Xcode project below also
+      # carries. Without it the project is the iPad's only and the Mac app's step fails.
+      - name: Wine, its modules and DXMT for the Mac app (mac-catalyst job)
+        id: wine-maccatalyst
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: wine-maccatalyst
+          path: ${{ runner.temp }}/wine-loader
       # Direct3D 9 for 32-bit programs, as in Madeira (docs/WOW64.md there):
       # DXMT's i386 d3d9shim forwards to its D3D9 frontend (d3d9-emulated.dll),
       # which FEX runs like the program and which reaches Metal through
@@ -993,6 +1082,21 @@ jobs:
           name: WinPadWine-ipa
           path: ${{ runner.temp }}/wine-app/WinPadWine.ipa
           if-no-files-found: error
+      # Last, so that the iPad app's artifacts are there whatever happens here.
+      - name: The Mac app (Mac Catalyst) from that Xcode project runs hello.exe with FEX's JIT and the D3D11 triangle, on this Mac
+        if: ${{ !cancelled() && steps.modules-iphoneos.outcome == 'success' }}
+        timeout-minutes: 20
+        run: sh tests/wine-app/build-mac.sh "$RUNNER_TEMP/wine-app"
+      - name: The Mac app's logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-app-mac
+          path: |
+            ${{ runner.temp }}/wine-app/wine-mac-*.log
+            ${{ runner.temp }}/wine-app/mac-*.out
+            ${{ runner.temp }}/wine-app/xcodebuild-maccatalyst.log
+          if-no-files-found: ignore
       - name: FEX code map and code caches of the x86 run
         if: always()
         uses: actions/upload-artifact@v4

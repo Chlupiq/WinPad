@@ -7,7 +7,7 @@
 # Leaves out the unix libraries of other DLLs (GnuTLS, FFmpeg, FreeType):
 # a Wine process can start without them.
 #
-# Usage: build-ntdll.sh WORK_DIR SDK   (SDK: iphoneos or iphonesimulator)
+# Usage: build-ntdll.sh WORK_DIR SDK   (SDK: iphoneos, iphonesimulator or maccatalyst)
 # WORK_DIR must hold the trees build.sh fetched and configured.
 set -eu
 
@@ -22,20 +22,21 @@ out="$work/ntdll-$sdk_name"
 rm -rf "$out"
 mkdir -p "$out"
 
-case $sdk_name in
-    iphoneos) target=arm64-apple-ios17.0 ;;
-    iphonesimulator) target=arm64-apple-ios17.0-simulator ;;
-    *) echo "unknown SDK $sdk_name" >&2; exit 2 ;;
-esac
-sdk=$(xcrun --sdk "$sdk_name" --show-sdk-path)
+. "$(cd "$(dirname "$0")" && pwd)/sdk.sh"
 
 git -C "$madeira" apply "$root"/patches/madeira/*.patch
 trap 'git -C "$madeira" checkout -q -- build; git -C "$wine" checkout -q -- dlls/ntdll/unix/file.c' EXIT
 
+# Mac Catalyst sees the macOS SDK's CoreServices, where Wine's loader finds the Multiprocessing
+# calls it makes on macOS, unavailable to Catalyst: the header stays out, as on an iPad, and the
+# calls stay undeclared (the host stubs them, link-host.sh).
+catalyst_flags=
+[ "$sdk_name" != maccatalyst ] || catalyst_flags="-D__MULTIPROCESSING__ -D__MULTIPROCESSINGINFO__"
+
 compile() {  # SOURCE NAME [FLAGS...]
     c_src=$1 c_name=$2
     shift 2
-    if xcrun -sdk "$sdk_name" clang -target "$target" -isysroot "$sdk" \
+    if xcrun -sdk "$xcsdk" clang -target "$target" -isysroot "$sdk" $sdk_flags \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
         -include "$wine/build-macos/include/config.h" \
@@ -67,7 +68,17 @@ for f in "$wine"/dlls/ntdll/unix/*.c; do
         signal_arm64) f="$src/signal_arm64_ios.c" ;;
         cdrom) f="$src/cdrom_stub.c" ;;
     esac
-    compile "$f" "$name"
+    if [ "$sdk_name" = maccatalyst ] && [ "$name" = virtual ]; then
+        # The macOS SDK's headers bring <mach/mach_init.h>, with its function host_page_size,
+        # in before virtual_ios.c renames it away for its variable of that name; a copy next to
+        # it renames the variable instead.
+        perl -pe 's/\bhost_page_size\b/madeira_host_page_size/g' "$f" >"$src/virtual_ios_maccatalyst.c"
+        compile "$src/virtual_ios_maccatalyst.c" "$name" $catalyst_flags
+        rm -f "$src/virtual_ios_maccatalyst.c"
+        continue
+    fi
+    # shellcheck disable=SC2086 # $catalyst_flags is a list
+    compile "$f" "$name" $catalyst_flags
 done
 
 # The unix sides of nsi.dll (network adapters, IP addresses, TCP tables: nsiproxy.sys is
