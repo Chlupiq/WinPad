@@ -95,7 +95,10 @@ targets:
         type: folder
     dependencies:
       # Both extensions are the iPad's: a Mac runs the JIT without them.
+      # Both embedded by the script below and not by Xcode: Xcode's embed phase put the
+      # iOS extension into the Mac Catalyst app too, which the Mac build refuses.
       - target: WinPadJITHelper
+        embed: false
         platformFilter: ios
       # Built always, embedded by the script below only with WINPAD_VPN = YES: an embedded
       # extension Xcode would validate after the script had removed it.
@@ -136,7 +139,11 @@ targets:
           # The app's own VPN only when it is signed for it (WinPad.xcconfig).
           # (signed by its own target with its entitlement; the app's signature seals it).
           plugins="$TARGET_BUILD_DIR/$PLUGINS_FOLDER_PATH"
-          rm -rf "$plugins/WinPadVPN.appex"
+          rm -rf "$plugins/WinPadVPN.appex" "$plugins/WinPadJITHelper.appex"
+          if [ "$PLATFORM_NAME" != macosx ]; then
+            mkdir -p "$plugins"
+            cp -R "$BUILT_PRODUCTS_DIR/WinPadJITHelper.appex" "$plugins/"
+          fi
           if [ "${WINPAD_VPN:-NO}" = YES ] && [ "$PLATFORM_NAME" != macosx ]; then
             mkdir -p "$plugins"
             cp -R "$BUILT_PRODUCTS_DIR/WinPadVPN.appex" "$plugins/"
